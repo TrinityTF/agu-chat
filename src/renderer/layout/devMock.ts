@@ -116,7 +116,6 @@ function createMock(): AguBridge {
       },
       async login(platform, args) {
         if (platform === "twitch") {
-          if (!settings.twitchClientId) throw new Error("Set your Twitch Client ID first.");
           const pending = { userCode: "ABCDEFGH", verificationUri: "https://www.twitch.tv/activate?device-code=ABCDEFGH", expiresAt: Date.now() + 15 * 60_000 };
           setAccount("twitch", { connected: false, pending });
           twitchTimer = setTimeout(

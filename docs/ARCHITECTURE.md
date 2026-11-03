@@ -215,5 +215,6 @@ export function init(ctx) {}  // optional, called once at startup
 - Kick: send our own honest product UA (`ctx.userAgent`), never a browser UA.
 - YouTube: one poll per source, honour `timeoutMs`, back off on failure.
 - X: guest token only, read-only, no paid v2 calls, no bot token in the app.
-- Twitch: device code flow with the user's own **Public** client id. Never use
-  another app's client id (twitch.tv's own web client id included).
+- Twitch: device code flow with Agu Chat's own **Public** client id (`DEFAULT_CLIENT_ID` in
+  twitch/auth.js; Settings can override it with the user's own). Never use another app's client id
+  (twitch.tv's own web client id included).

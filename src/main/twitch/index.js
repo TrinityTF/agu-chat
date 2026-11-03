@@ -3,7 +3,7 @@
 //   reading   anonymous IRC (one shared socket, ircHub.js) + recent-messages history (backlog.js)
 //   mod feed  one EventSub session (eventsub.js) for the channels the user moderates
 //   writing   Helix with the user's own token (routes.js)
-//   login     OAuth device code flow with the user's own Public client id (auth.js)
+//   login     OAuth device code flow with Agu Chat's Public client id (auth.js)
 //
 // Nothing here talks to agu.lol / api.agu.lol, and there is no bot account or client secret.
 import * as authModule from "./auth.js";

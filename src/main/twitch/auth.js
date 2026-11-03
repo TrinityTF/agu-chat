@@ -1,11 +1,13 @@
-// Twitch account: OAuth device code flow with the user's own PUBLIC client id
-// (no client secret, no redirect server), token storage, refresh and the hourly
-// validate Twitch requires. Never falls back to another app's client id.
+// Twitch account: OAuth device code flow with Agu Chat's own PUBLIC client id (no client secret, no redirect
+// server, so nothing of ours has to be online), token storage, refresh and the hourly validate Twitch requires.
+// A client id is not a secret: every Twitch desktop client ships its own. Settings can override it.
 import { EventEmitter } from "node:events";
 import { rt, log } from "./rt.js";
 import { requestJson, HttpError } from "./http.js";
 
 const ID = "https://id.twitch.tv/oauth2";
+// The "Agu Chat" app on dev.twitch.tv (client type Public).
+export const DEFAULT_CLIENT_ID = "lq9jr9g9swe9tbdzhp2vcd2htg9hbg";
 const HELIX = "https://api.twitch.tv/helix";
 const SECRET_KEY = "twitch";
 const VALIDATE_EVERY_MS = 60 * 60_000;
@@ -122,12 +124,7 @@ export function hasScope(scope) {
 // ---------- login (device code flow) ----------
 
 export async function login() {
-  const clientId = String(rt.ctx.settings.get().twitchClientId || "").trim();
-  if (!clientId) {
-    throw new Error(
-      "Paste your Twitch client ID in Settings first. Register a free app at dev.twitch.tv/console with client type \"Public\", then copy its client ID."
-    );
-  }
+  const clientId = String(rt.ctx.settings.get().twitchClientId || "").trim() || DEFAULT_CLIENT_ID;
   cancel();
   lastError = null;
   let dev;
@@ -136,7 +133,7 @@ export async function login() {
   } catch (err) {
     if (err instanceof HttpError && err.status >= 400 && err.status < 500) {
       throw new Error(
-        `Twitch did not accept that client ID (${err.message}). Check it in Settings, and that the app's client type is "Public".`
+        `Twitch did not accept that client ID (${err.message}). If you set your own Twitch app in Settings, check its client ID and that its client type is "Public".`
       );
     }
     throw new Error(err.message || "Could not start the Twitch login.");

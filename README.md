@@ -41,14 +41,11 @@ and run it. Agu Chat keeps itself up to date after that.
 
 ## Logging in to Twitch
 
-Agu Chat uses your own free Twitch app to log in. You set it up once:
+1. Open **Settings → Accounts** and click **Log in with Twitch**.
+2. Open the link it shows, check the code matches, and approve on twitch.tv.
 
-1. Go to <https://dev.twitch.tv/console/apps> and choose **Register Your Application**.
-2. Name: `Agu Chat (<your name>)` (the name must be unique on Twitch).
-3. OAuth Redirect URL: `http://localhost` (the form requires one; it isn't used).
-4. Category: **Chat Bot**. Client Type: **Public**. Click **Create**.
-5. Open **Manage**, copy the **Client ID**, and paste it into **Settings → Accounts** in Agu Chat.
-6. Click **Log in with Twitch**, open the link it shows, and enter the code.
+Your password never goes through Agu Chat, and you can log out or revoke access at any time
+(Twitch → Settings → Connections).
 
 ## Using it
 

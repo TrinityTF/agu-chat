@@ -216,31 +216,6 @@ function DeviceCode({ prompt, onCancel }: { prompt: DevicePrompt; onCancel: () =
   );
 }
 
-const TWITCH_STEPS: ReactNode[] = [
-  <>
-    Go to <Link url="https://dev.twitch.tv/console/apps">https://dev.twitch.tv/console/apps</Link>
-  </>,
-  <>
-    Click <b>Register Your Application</b>
-  </>,
-  <>
-    Name: <code className="text-[var(--color-text)]">Agu Chat (&lt;your name&gt;)</code>, it must be unique on Twitch
-  </>,
-  <>
-    OAuth Redirect URL: <code className="text-[var(--color-text)]">http://localhost</code> (the form requires one, it is not used)
-  </>,
-  <>
-    Category: <b>Chat Bot</b>
-  </>,
-  <>
-    Client Type: <b>Public</b>
-  </>,
-  <>
-    Click <b>Create</b>, then <b>Manage</b> on the new app
-  </>,
-  <>Copy the Client ID and paste it below</>,
-];
-
 function TwitchAccount({ st, settings, setSettings }: { st: AccountState; settings: Settings; setSettings: SetSettings }) {
   const [clientId, setClientId] = useState("");
   const [changing, setChanging] = useState(false);
@@ -253,12 +228,10 @@ function TwitchAccount({ st, settings, setSettings }: { st: AccountState; settin
   }, [st.connected]);
 
   const pending = st.pending ?? prompt;
-  const hasId = !!settings.twitchClientId;
+  const ownId = settings.twitchClientId;
 
-  const saveId = () => {
-    const v = clientId.trim();
-    if (!v) return;
-    setSettings({ twitchClientId: v });
+  const saveId = (v: string) => {
+    setSettings({ twitchClientId: v.trim() });
     setClientId("");
     setChanging(false);
   };
@@ -284,51 +257,55 @@ function TwitchAccount({ st, settings, setSettings }: { st: AccountState; settin
     }
   };
 
+  const link = "underline hover:text-[var(--color-text)]";
+
   return (
     <Card>
       <AccountTitle platform="twitch" />
-      {!hasId || changing ? (
-        <div>
-          {!hasId && (
-            <>
-              <div className="mb-2 text-[var(--color-muted)]">
-                Agu Chat logs in with your own Twitch application, so nothing is shared with anyone else. One-time setup:
-              </div>
-              <ol className="mb-3 list-decimal space-y-1 pl-5 text-[var(--color-muted)]">
-                {TWITCH_STEPS.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ol>
-            </>
-          )}
-          <div className="flex gap-1.5">
-            <input
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && saveId()}
-              placeholder="Client ID"
-              spellCheck={false}
-              className={inputCls}
-              aria-label="Twitch Client ID"
-            />
-            <Btn primary disabled={!clientId.trim()} onClick={saveId}>
-              Save
-            </Btn>
-            {hasId && <Btn onClick={() => setChanging(false)}>Cancel</Btn>}
-          </div>
-        </div>
-      ) : st.connected ? (
+      {st.connected ? (
         <ConnectedLine st={st} onLogout={() => agu.accounts.logout("twitch").catch((e) => setErr(errMsg(e)))} />
       ) : pending ? (
         <DeviceCode prompt={pending} onCancel={cancel} />
       ) : (
-        <div className="flex items-center gap-3">
-          <Btn primary disabled={busy} onClick={login}>
-            Log in with Twitch
-          </Btn>
-          <span className="text-[11px] text-[var(--color-faint)]">
-            Client ID {settings.twitchClientId.slice(0, 6)}… <button type="button" className="underline hover:text-[var(--color-text)]" onClick={() => setChanging(true)}>change</button>
-          </span>
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <Btn primary disabled={busy} onClick={login}>
+              Log in with Twitch
+            </Btn>
+            <span className="text-[11px] text-[var(--color-faint)]">You approve it on twitch.tv; your password never goes through Agu Chat.</span>
+          </div>
+          {changing ? (
+            <div className="flex flex-wrap gap-1.5">
+              <input
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && clientId.trim() && saveId(clientId)}
+                placeholder="Your app's Client ID"
+                spellCheck={false}
+                className={inputCls}
+                aria-label="Twitch Client ID"
+              />
+              <Btn primary disabled={!clientId.trim()} onClick={() => saveId(clientId)}>
+                Save
+              </Btn>
+              <Btn onClick={() => setChanging(false)}>Cancel</Btn>
+            </div>
+          ) : (
+            <div className="text-[11px] text-[var(--color-faint)]">
+              {ownId ? (
+                <>
+                  Using your own Twitch app ({ownId.slice(0, 6)}…).{" "}
+                  <button type="button" className={link} onClick={() => saveId("")}>
+                    Use Agu Chat&apos;s
+                  </button>
+                </>
+              ) : (
+                <button type="button" className={link} onClick={() => setChanging(true)}>
+                  Advanced: log in through your own Twitch app
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
       <Err>{err || st.error}</Err>
