@@ -1,3 +1,9 @@
+
+## Ignores and split search
+
+Ignores are applied in the renderer (`chat/ignores.ts`) before rows are drawn, and ignored rows never alert
+or mark a tab. Split search (Ctrl+F) is `chat/search.ts`.
+
 # Agu Chat architecture
 
 This is the contract between the pieces. Change it only when both sides change.
@@ -29,6 +35,9 @@ renderer (React, sandboxed)  <--  window.agu (preload, contextBridge)  -->  main
 | `src/main/<platform>/vendor/` | files copied from `modtools.agu.lol/render/lib/` (render commit `7704aec`), each with a header naming its origin and what was changed |
 | `src/renderer/icons.tsx`, `platformIcons.tsx`, `hooks.ts` | shared by `layout/` and `chat/` |
 | `src/renderer/chat/ChatPane.tsx` | the one component `layout/` renders per split (props are the contract) |
+| `src/renderer/chat/highlights.ts` | highlight rule matching (pure, tested by `npm test`) |
+| `src/renderer/alerts.ts` | highlight alerts: sound (Web Audio) and taskbar flash, deduplicated across splits |
+| `src/main/highlightRules.js`, `src/main/sounds.js` | validation of the `highlightRules` setting; custom alert sounds in `userData/sounds` |
 | `src/main/updater.js` | GitHub Releases updates, beta/stable channel |
 | `src/preload/preload.cjs` | the `window.agu` bridge (CommonJS: sandboxed preloads cannot be ESM) |
 | `src/renderer/` | the React app (Vite root). `layout/` = notebook, splits, dialogs. `chat/` = message view, input, user card |
@@ -127,7 +136,38 @@ Never a token: tokens stay in main.
 The `Settings` type and defaults live in `src/renderer/protocol.ts` and
 `src/main/store.js` (keep them in sync). Notable keys: `twitchClientId` (the
 user's own Twitch app, Public client type), `updateChannel` (`"beta"` |
-`"stable"`), and the chat display options.
+`"stable"`), the chat display options, `hotkeys` (action id → bindings, only the
+actions the user changed; actions and defaults in `src/renderer/layout/hotkeys.ts`) and `modButtons` (the
+mod-mode row buttons in order; defaults and validation in `src/renderer/chat/modButtons.ts`), the highlight
+settings (`highlightRules` and the alert options) and the ignore lists `ignoredUsers` (`{ platform, login }[]`)
+and `ignoredPhrases` (`{ pattern, regex, caseSensitive, action, replacement }[]`).
+
+Main validates every value, on `set` and when loading `settings.json`, in `clean()` (`src/main/store.js`):
+keys with a sanitizer in `SANITIZE` (hotkeys, mod buttons, highlight rules, volume, the ignore lists; the ignore
+sanitizers live in `src/main/settingsSanitize.js`) get a shape check that drops malformed entries; every other
+key must have its default's type. The renderer validates the meaning when it reads them. `npm test` runs the
+`node --test` suites in `test/`.
+
+## Highlights and alerts
+
+Highlight rules are matched in the renderer, per row, for every platform (`chat/highlights.ts`); the first
+matching rule colours the row. A row that arrived in a `chatlog` frame is marked `backlog` by the chat store:
+history is coloured but never alerts or marks a tab. For live rows `ChatPane` calls `onActivity("message" |
+"highlight")` (the notebook marks unselected tabs) and `alertOnce` (`alerts.ts`), keyed by message, so the
+same channel open in two splits alerts once.
+
+- `agu.app.flash()` flashes the taskbar button (`BrowserWindow.flashFrame`) unless the window is focused;
+  focusing the window stops it.
+- `agu.sounds.pick()` opens a file dialog and copies the chosen audio file into `userData/sounds`, resolving
+  `{ file }` (a bare file name, stored in settings) or `null`. `agu.sounds.read(file)` returns its bytes; only
+  bare names inside that folder are accepted. "" in a sound setting means the built-in ping, which is
+  synthesized in the renderer.
+`"stable"`), the chat display options, and the ignore lists `ignoredUsers`
+(`{ platform, login }[]`) and `ignoredPhrases` (`{ pattern, regex, caseSensitive, action, replacement }[]`).
+Main validates every value against `DEFAULT_SETTINGS`: a scalar must have the default's type, and a list
+needs a sanitizer in `src/main/settingsSanitize.js` (malformed entries are dropped, also when loading).
+Ignores are applied in the renderer (`chat/ignores.ts`) before rows are drawn; split search is
+`chat/search.ts`. Pure logic like this is tested with `npm test` (`node --test`, files in `test/`).
 
 ## Layout
 

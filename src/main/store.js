@@ -4,6 +4,8 @@ import { app, safeStorage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { sanitizeHighlightRules } from "./highlightRules.js";
+import { sanitizeIgnoredPhrases, sanitizeIgnoredUsers, sanitizeSetting } from "./settingsSanitize.js";
 
 // Keep in sync with Settings in src/renderer/protocol.ts.
 export const DEFAULT_SETTINGS = {
@@ -23,7 +25,63 @@ export const DEFAULT_SETTINGS = {
   deletedMessages: "strike", // strike | hide | show
   showModButtons: true,
   showPlatformMarks: true,
+  hotkeys: {}, // action id -> ["Ctrl+T", ...]; only the actions the user changed
+  // Inline mod-mode buttons, in order. Same defaults as DEFAULT_MOD_BUTTONS in src/renderer/chat/modButtons.ts.
+  modButtons: [
+    { id: "ban", action: "ban", icon: "ban", label: "", seconds: 0, command: "" },
+    { id: "timeout", action: "timeout", icon: "clock", label: "", seconds: 600, command: "" },
+    { id: "delete", action: "delete", icon: "trash", label: "", seconds: 0, command: "" },
+  ],
+  highlightRules: [], // see src/main/highlightRules.js
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "", // a file in userData/sounds, "" = the built-in ping
+  highlightVolume: 70, // 0-100
+  highlightSoundFocused: true,
+  ignoredUsers: [], // [{ platform, login }] (see settingsSanitize.js)
+  ignoredPhrases: [], // [{ pattern, regex, caseSensitive, action: "hide" | "replace", replacement }]
 };
+
+const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
+
+// Keys whose value is not a plain string/number/boolean: each gets its own check. A sanitizer returns the
+// cleaned value, or undefined to reject the patch for that key.
+// The renderer validates the meaning of structured values on read; these only check their shape.
+const SANITIZE = {
+  hotkeys(v) {
+    if (!isPlainObject(v)) return undefined;
+    const out = {};
+    for (const [k, list] of Object.entries(v).slice(0, 100)) {
+      if (k.length > 64 || !Array.isArray(list)) continue;
+      out[k] = list.filter((b) => typeof b === "string" && b.length <= 40).slice(0, 8);
+    }
+    return out;
+  },
+  modButtons(v) {
+    if (!Array.isArray(v)) return undefined;
+    return v
+      .filter(isPlainObject)
+      .slice(0, 12)
+      .map((b) => ({
+        id: str(b.id, 40),
+        action: str(b.action, 16),
+        icon: str(b.icon, 16),
+        label: str(b.label, 16),
+        seconds: typeof b.seconds === "number" && Number.isFinite(b.seconds) ? b.seconds : 0,
+        command: str(b.command, 500),
+      }));
+  },
+  highlightRules: sanitizeHighlightRules,
+  ignoredUsers: (v) => sanitizeIgnoredUsers(v) ?? undefined,
+  ignoredPhrases: (v) => sanitizeIgnoredPhrases(v) ?? undefined,
+  highlightVolume: (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : undefined),
+};
+
+function clean(k, v) {
+  if (Object.hasOwn(SANITIZE, k)) return SANITIZE[k](v);
+  return sanitizeSetting(k, v, DEFAULT_SETTINGS); // scalars: must have the default's type
+}
 
 const dir = () => app.getPath("userData");
 const file = (name) => path.join(dir(), name);
@@ -50,15 +108,23 @@ let settings = null;
 
 export const settingsStore = {
   get() {
-    if (!settings) settings = { ...DEFAULT_SETTINGS, ...readJson("settings.json", {}) };
-    return { ...settings };
+    if (!settings) {
+      settings = structuredClone(DEFAULT_SETTINGS);
+      const saved = readJson("settings.json", {});
+      for (const [k, v] of Object.entries(saved && typeof saved === "object" ? saved : {})) {
+        if (!Object.hasOwn(DEFAULT_SETTINGS, k)) continue;
+        const c = clean(k, v);
+        if (c !== undefined) settings[k] = c;
+      }
+    }
+    return structuredClone(settings); // callers may mutate arrays/objects; never hand out the live ones
   },
   set(patch) {
     const next = { ...this.get() };
     for (const [k, v] of Object.entries(patch || {})) {
-      if (!(k in DEFAULT_SETTINGS)) continue;
-      if (typeof v !== typeof DEFAULT_SETTINGS[k]) continue;
-      next[k] = typeof v === "string" ? v.trim() : v;
+      if (!Object.hasOwn(DEFAULT_SETTINGS, k)) continue;
+      const c = clean(k, v);
+      if (c !== undefined) next[k] = c;
     }
     settings = next;
     writeJson("settings.json", settings);

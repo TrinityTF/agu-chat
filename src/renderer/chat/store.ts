@@ -215,7 +215,10 @@ export class ChatStore {
   private replaceBacklog(sk: string, rows: Row[]) {
     this.removeRowsOf(sk);
     rows.sort((a, b) => a.ts - b.ts);
-    for (const r of rows) this.addRow(r);
+    for (const r of rows) {
+      r.backlog = true;
+      this.addRow(r);
+    }
     this.trim();
   }
 

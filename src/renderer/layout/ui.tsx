@@ -2,6 +2,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { XIcon } from "../icons";
+import { hotkeyRecording } from "./hotkeys";
 
 /** Centered modal. Esc and a click on the backdrop close it. */
 export function Modal({
@@ -19,7 +20,7 @@ export function Modal({
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !hotkeyRecording.active) {
         e.preventDefault();
         e.stopPropagation();
         onClose();

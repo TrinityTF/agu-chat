@@ -6,6 +6,7 @@ import { relayApi } from "../../bridge";
 import type { SourceRef } from "../../protocol";
 import type { ModCaps } from "../modCaps";
 import type { Toast } from "../toast";
+import { parseDuration } from "../modButtons";
 
 export type SlashCommand = { name: string; usage: string; capKey?: keyof ModCaps };
 
@@ -37,17 +38,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "me", usage: "<action text> - passthrough, still supported", capKey: "send" },
 ];
 
-// Plain seconds, or a number + s/m/h/d/w suffix, clamped to Twitch's ban/
-// timeout cap of 2 weeks. Returns null for anything unparseable.
-export function parseDuration(s: string): number | null {
-  const m = /^(\d+)(s|m|h|d|w)?$/i.exec(s.trim());
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n)) return null;
-  const mult: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 };
-  const unit = (m[2] || "s").toLowerCase();
-  return Math.max(1, Math.min(1_209_600, Math.round(n * (mult[unit] ?? 1))));
-}
+// Plain seconds, or a number + s/m/h/d/w suffix, clamped to Twitch's ban/timeout cap of 2 weeks (shared with
+// the mod-button settings).
+export { parseDuration };
 
 // Followers-only duration, in MINUTES (Helix's follower_mode_duration unit)
 // — "mo" (month) must be tried before the single-letter "m" (minute)

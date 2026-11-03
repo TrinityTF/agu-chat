@@ -9,7 +9,8 @@ Chatterino code is copied or planned to be.
 Agu Chat beta already has: notebook tabs, splits (side by side / stacked, resize, move), merged multiplatform
 splits, mod-mode toggle with inline ban/timeout/delete, user cards with mod actions, slash commands, Tab / colon /
 @ autocomplete, emote picker, Twitch/7TV/BTTV/FFZ emotes and badges, 7TV paints, own-name mention highlight,
-recent-messages backlog, AutoMod allow/deny, pinned messages, auto-updates.
+recent-messages backlog, AutoMod allow/deny, pinned messages, auto-updates, highlight rules (phrase / regex /
+user, per-rule colour, case toggle) with per-rule sound and taskbar flash, tab unread / highlight markers.
 
 Line format: **feature** — value for Agu Chat — effort (S = a day or less, M = a few days, L = a week or more).
 `[Twitch]` = only meaningful on Twitch (other platforms lack the API). `★n` = in the top 10 below.
@@ -18,8 +19,8 @@ Line format: **feature** — value for Agu Chat — effort (S = a day or less, M
 
 1. ★1 Highlights with phrase/regex/user rules (M)
 2. ★2 Highlight sounds, taskbar flash and toasts (M)
-3. ★3 Ignores (users and phrases, with replacement) (M)
-4. ★4 Split search, Ctrl+F (S)
+3. ★3 Ignores (users and phrases, with replacement) (M) — done
+4. ★4 Split search, Ctrl+F (S) — done (filter only; match highlighting and "search all splits" are still open)
 5. ★5 Tab highlighting on mentions and new messages (S)
 6. ★6 Keyboard shortcuts and a hotkeys editor (M)
 7. ★7 Customizable mod buttons (M)

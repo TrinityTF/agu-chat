@@ -32,6 +32,38 @@ export type AccountState = {
 };
 export type AccountsState = Record<Platform, AccountState>;
 
+/**
+ * A highlight rule (Settings > Highlights). Rules are tried in list order; the first match colours the row.
+ * `phrase` matches whole words, `regex` is a JavaScript regular expression, `user` is a list of names
+ * (login or display name) separated by commas or spaces. Keep in sync with src/main/highlightRules.js.
+ */
+export type HighlightRule = {
+  id: string;
+  enabled: boolean;
+  kind: "phrase" | "regex" | "user";
+  pattern: string;
+  caseSensitive: boolean;
+  /** #rrggbb */
+  color: string;
+  sound: boolean;
+  /** A file in the app's sounds folder (from agu.sounds.pick); "" = the default sound. */
+  soundFile: string;
+  /** Flash the taskbar button when the window isn't focused. */
+  flash: boolean;
+};
+
+/** A user whose messages are hidden, on one platform. `login` is lowercase, without "@". */
+export type IgnoredUser = { platform: Platform; login: string };
+/** A phrase (plain text or a regular expression) that hides a message or replaces the matched text. */
+export type IgnoredPhrase = {
+  pattern: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  action: "hide" | "replace";
+  /** Literal text put in place of each match when `action` is "replace". */
+  replacement: string;
+};
+
 // Keep in sync with DEFAULT_SETTINGS in src/main/store.js.
 export type Settings = {
   twitchClientId: string;
@@ -50,6 +82,37 @@ export type Settings = {
   deletedMessages: "strike" | "hide" | "show";
   showModButtons: boolean;
   showPlatformMarks: boolean;
+  /** Shortcut overrides: action id -> bindings ("Ctrl+Shift+W"). Actions not listed use their defaults. */
+  hotkeys: Record<string, string[]>;
+  /** Inline mod-mode buttons, in display order. */
+  modButtons: ModButton[];
+  highlightRules: HighlightRule[];
+  /** Alerts for the built-in "mentions your Twitch name" highlight. */
+  mentionSound: boolean;
+  mentionFlash: boolean;
+  /** Default alert sound: a file in the app's sounds folder, "" = the built-in ping. */
+  highlightSoundFile: string;
+  /** 0-100 */
+  highlightVolume: number;
+  /** Play alert sounds while the window is focused too (the taskbar only flashes when it isn't). */
+  highlightSoundFocused: boolean;
+  ignoredUsers: IgnoredUser[];
+  ignoredPhrases: IgnoredPhrase[];
+};
+
+export type ModButtonAction = "ban" | "timeout" | "delete" | "command";
+export type ModButtonIcon = "ban" | "clock" | "trash" | "shield" | "warning" | "flag" | "eyeoff" | "chat" | "pin" | "check";
+export type ModButton = {
+  id: string;
+  action: ModButtonAction;
+  /** Drawn when `label` is empty. */
+  icon: ModButtonIcon | "";
+  /** Short text shown instead of the icon. */
+  label: string;
+  /** timeout only. */
+  seconds: number;
+  /** command only: a slash command or chat line with {user}, {msg-id}, ... placeholders. */
+  command: string;
 };
 
 export type SplitNode =
@@ -91,5 +154,16 @@ export interface AguBridge {
     install(): Promise<void>;
     onChange(cb: (s: UpdaterState) => void): () => void;
   };
-  app: { info(): Promise<{ version: string; packaged: boolean }>; openExternal(url: string): Promise<void> };
+  app: {
+    info(): Promise<{ version: string; packaged: boolean }>;
+    openExternal(url: string): Promise<void>;
+    /** Flash the taskbar button until the window is focused (does nothing while it is focused). */
+    flash(): Promise<void>;
+  };
+  sounds: {
+    /** Let the user choose an audio file; it is copied into the app's sounds folder. null = cancelled. */
+    pick(): Promise<{ file: string } | null>;
+    /** The bytes of a file in the sounds folder. */
+    read(file: string): Promise<Uint8Array>;
+  };
 }

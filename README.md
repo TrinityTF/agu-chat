@@ -15,8 +15,16 @@ and run it. Agu Chat keeps itself up to date after that.
 - **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges.
-- **Moderation:** mod mode adds ban, timeout and delete buttons to every message. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
+- **Moderation:** mod mode adds mod buttons to every message: ban, timeout and delete by default, or your own set (any timeout length, or a command such as `/warn {user} …`) in **Settings → Mod buttons**. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
+- **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **AutoMod:** approve or deny held messages right in chat.
+- **Highlights:** colour messages that contain a word or phrase, match a regular expression, or come from a
+  certain user, on every platform. Each rule can play a sound (a built-in ping or your own file) and flash the
+  taskbar. Messages that mention your Twitch name are highlighted too.
+- **Tab markers:** a tab you're not looking at shows a dot when new messages arrive, and lights up when one
+  of them is a highlight.
+- **Ignores:** hide messages from users you don't want to see, and hide or rewrite messages containing words or patterns you choose (Settings → Ignores, or "Ignore user" on a user card).
+- **Search:** Ctrl+F in a split filters it to matching messages; `from:name` shows one person's messages.
 - **Typing:** Tab completes emotes and names; `:` searches emotes, `@` mentions people, `/` lists commands; there's an emote picker, and Up brings back what you sent.
 - **Recent history** loads when you open a Twitch channel, so a new split isn't empty.
 - **Automatic updates** on the Beta or Stable channel.
@@ -57,8 +65,13 @@ Agu Chat uses your own free Twitch app to log in. You set it up once:
 | Merge platforms | In the channel dialog, add several channels to one split |
 | Mod mode | The sword button on a split's header |
 | User card | Click a name (cards can be dragged; several can be open) |
+| Search a split | Ctrl+F, then type words and/or `from:name`; Esc closes it |
+| Ignore someone | "Ignore user" on their user card, or Settings → Ignores |
 | New line in a message | Shift+Enter |
+| Highlight rules and alert sounds | Settings → Highlights |
 | Settings | Ctrl+P or the gear icon |
+| Change shortcuts | Settings → Hotkeys: click `+` next to an action and press the keys |
+| Change mod buttons | Settings → Mod buttons |
 
 ## Updates
 
@@ -83,6 +96,10 @@ npm install
 
 ```bash
 npm run dev
+```
+
+```bash
+npm test
 ```
 
 `npm run dist` builds the Windows installer into `dist/`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and

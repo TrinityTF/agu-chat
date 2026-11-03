@@ -9,6 +9,8 @@ import { CheckIcon, FlagIcon, GearIcon, GiftIcon, StarIcon, SwordIcon } from "..
 import { TextRun } from "../chatText";
 import { emoteTip } from "../emoteTip";
 import { emoteBox } from "../parts";
+import { ruleRowStyle } from "../highlights";
+import type { HighlightRule } from "../../protocol";
 import { readableColor } from "../twitch/colors";
 import type {
   KickBadge,
@@ -27,6 +29,8 @@ import { HoverButtons, ModButtons, RowFrame } from "./RowFrame";
 
 const nameColorOf = (c: string | undefined, readable: boolean) => (c ? (readable ? readableColor(c) : c) : "#a1a1aa");
 const nameCls = "font-semibold hover:underline";
+/** A matched highlight rule's row style (Settings > Highlights). */
+const ruleStyle = (rule: HighlightRule | null | undefined) => (rule ? ruleRowStyle(rule.color) : undefined);
 
 // ---------------------------------------------------------------------------
 // Rumble
@@ -129,7 +133,7 @@ function RumbleText({ text, emotes, ctx }: { text: string; emotes: RumbleEmotes;
 
 type RowOf<K extends Row["k"]> = Extract<Row, { k: K }>;
 
-export const RumbleRow = memo(function RumbleRow({ row, ctx, env, modMode }: { row: RowOf<"rumble">; ctx: RowCtx; env: CoEnv; modMode: boolean }) {
+export const RumbleRow = memo(function RumbleRow({ row, ctx, env, modMode, rule }: { row: RowOf<"rumble">; ctx: RowCtx; env: CoEnv; modMode: boolean; rule?: HighlightRule | null }) {
   const { rs, h } = ctx;
   const msg: RumbleMsg = row.m;
   if (msg.deleted && rs.deletedMessages === "hide") return null;
@@ -139,10 +143,9 @@ export const RumbleRow = memo(function RumbleRow({ row, ctx, env, modMode }: { r
   const mod =
     modMode && canMod ? (
       <ModButtons
-        timeoutTitle="Time out 5 minutes"
-        onBan={() => h.rumbleMod(row.sk, "ban", msg)}
-        onTimeout={() => h.rumbleMod(row.sk, "timeout", msg)}
-        onDelete={() => h.rumbleMod(row.sk, "delete", msg)}
+        buttons={ctx.modList}
+        can={(b) => b.action !== "command"}
+        onRun={(b) => b.action !== "command" && h.rumbleMod(row.sk, b.action, msg, b.seconds)}
       />
     ) : null;
   return (
@@ -152,6 +155,8 @@ export const RumbleRow = memo(function RumbleRow({ row, ctx, env, modMode }: { r
       ts={msg.ts}
       platform="rumble"
       className={rant ? `my-0.5 border ${rantTone(rant.cents)}` : ""}
+      // A rant keeps its tier colour; a rule only adds its left bar.
+      style={rule ? (rant ? { borderLeft: ruleStyle(rule)!.borderLeft, paddingLeft: 6 } : ruleStyle(rule)) : undefined}
       mod={mod}
       hover={<HoverButtons onCopy={() => h.copy(msg.text)} onDelete={canMod ? () => h.rumbleMod(row.sk, "delete", msg) : undefined} />}
     >
@@ -251,7 +256,7 @@ function KickText({ text, ctx }: { text: string; ctx: RowCtx }) {
   );
 }
 
-export const KickRow = memo(function KickRow({ row, ctx, env, modMode }: { row: RowOf<"kick">; ctx: RowCtx; env: CoEnv; modMode: boolean }) {
+export const KickRow = memo(function KickRow({ row, ctx, env, modMode, rule }: { row: RowOf<"kick">; ctx: RowCtx; env: CoEnv; modMode: boolean; rule?: HighlightRule | null }) {
   const { rs, h } = ctx;
   const msg: KickMsg = row.m;
   if (msg.deleted && rs.deletedMessages === "hide") return null;
@@ -261,9 +266,9 @@ export const KickRow = memo(function KickRow({ row, ctx, env, modMode }: { row: 
   const mod =
     modMode && (canMod || canDelete) ? (
       <ModButtons
-        onBan={canMod ? () => h.kickMod(row.sk, "ban", msg) : undefined}
-        onTimeout={canMod ? () => h.kickMod(row.sk, "timeout", msg, 600) : undefined}
-        onDelete={canDelete ? () => h.kickMod(row.sk, "delete", msg) : undefined}
+        buttons={ctx.modList}
+        can={(b) => (b.action === "delete" ? canDelete : b.action !== "command" && canMod)}
+        onRun={(b) => b.action !== "command" && h.kickMod(row.sk, b.action, msg, b.action === "timeout" ? b.seconds : undefined)}
       />
     ) : null;
   return (
@@ -272,6 +277,7 @@ export const KickRow = memo(function KickRow({ row, ctx, env, modMode }: { row: 
       n={row.ord}
       ts={msg.ts}
       platform="kick"
+      style={ruleStyle(rule)}
       mod={mod}
       hover={
         <HoverButtons
@@ -347,7 +353,7 @@ function YouTubeText({ parts, ctx }: { parts: YouTubePart[]; ctx: RowCtx }) {
   );
 }
 
-export const YouTubeRow = memo(function YouTubeRow({ row, ctx }: { row: RowOf<"youtube">; ctx: RowCtx }) {
+export const YouTubeRow = memo(function YouTubeRow({ row, ctx, rule }: { row: RowOf<"youtube">; ctx: RowCtx; rule?: HighlightRule | null }) {
   const { rs, h } = ctx;
   const msg: YouTubeMsg = row.m;
   const paid = msg.paid && msg.paid.amount ? msg.paid : null;
@@ -358,8 +364,8 @@ export const YouTubeRow = memo(function YouTubeRow({ row, ctx }: { row: RowOf<"y
       ts={msg.ts}
       platform="youtube"
       className={paid ? "my-0.5 border border-white/10" : ""}
-      // Super Chats carry YouTube's own tier colour, which is what the viewer paid for.
-      style={paid ? { background: paid.bg || undefined } : undefined}
+      // Super Chats carry YouTube's own tier colour, which is what the viewer paid for; a rule only adds its bar.
+      style={paid ? { background: paid.bg || undefined, ...(rule ? { borderLeft: ruleStyle(rule)!.borderLeft, paddingLeft: 6 } : null) } : ruleStyle(rule)}
       hover={<HoverButtons onCopy={() => h.copy(msg.text)} />}
     >
       {rs.showBadges && <YouTubeBadges badges={msg.badges} />}
@@ -380,11 +386,11 @@ export const YouTubeRow = memo(function YouTubeRow({ row, ctx }: { row: RowOf<"y
 // X: plain text, no emote system (the shared link and mention helpers handle the whole message).
 // ---------------------------------------------------------------------------
 
-export const XRow = memo(function XRow({ row, ctx }: { row: RowOf<"x">; ctx: RowCtx }) {
+export const XRow = memo(function XRow({ row, ctx, rule }: { row: RowOf<"x">; ctx: RowCtx; rule?: HighlightRule | null }) {
   const { h } = ctx;
   const msg: XMsg = row.m;
   return (
-    <RowFrame ctx={ctx} n={row.ord} ts={msg.ts} platform="x" hover={<HoverButtons onCopy={() => h.copy(msg.text)} />}>
+    <RowFrame ctx={ctx} n={row.ord} ts={msg.ts} platform="x" style={ruleStyle(rule)} hover={<HoverButtons onCopy={() => h.copy(msg.text)} />}>
       <button
         type="button"
         className="font-semibold text-text/80 hover:underline"

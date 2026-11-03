@@ -5,7 +5,7 @@
 // scrollback intact) when a sibling is closed, a split is moved, or the tree reshapes.
 import { useMemo, useRef, useState } from "react";
 import type { ConnFrame, SplitNode } from "../protocol";
-import { ChatPane } from "../chat/ChatPane";
+import { ChatPane, type Activity } from "../chat/ChatPane";
 import { SplitHeader, type SplitActions } from "./SplitHeader";
 import { Btn } from "./ui";
 import { sourceKey, type Edge, type Leaf } from "./tree";
@@ -47,11 +47,14 @@ export function SplitView({
   focusedId,
   tabActive,
   actions,
+  onActivity,
 }: {
   root: SplitNode | null;
   focusedId: string | null;
   tabActive: boolean;
   actions: SplitActions;
+  /** Live chat arrived in one of this tab's splits (drives the tab's unread / highlight marker). */
+  onActivity?: (kind: Activity) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -122,6 +125,7 @@ export function SplitView({
               actions={actions}
               dragging={dragging}
               setDragging={setDragging}
+              onActivity={onActivity}
             />
           </div>
         );
@@ -187,6 +191,7 @@ function LeafView({
   actions,
   dragging,
   setDragging,
+  onActivity,
 }: {
   leaf: Leaf;
   focused: boolean;
@@ -195,6 +200,7 @@ function LeafView({
   actions: SplitActions;
   dragging: string | null;
   setDragging: (id: string | null) => void;
+  onActivity?: (kind: Activity) => void;
 }) {
   const [status, setStatus] = useState<Record<string, ConnFrame>>({});
   const [hover, setHover] = useState<Edge | null>(null);
@@ -215,7 +221,7 @@ function LeafView({
         onDragEnd={() => setDragging(null)}
       />
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <ChatPane key={sig} sources={leaf.sources} modMode={leaf.modMode} focused={focused && tabActive} onStatus={setStatus} />
+        <ChatPane key={sig} sources={leaf.sources} modMode={leaf.modMode} focused={focused && tabActive} onStatus={setStatus} onActivity={onActivity} />
       </div>
 
       {dragging && dragging !== leaf.id && (

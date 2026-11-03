@@ -35,7 +35,7 @@ const SENDABLE: Platform[] = ["twitch", "rumble", "kick"];
 const ALL = "*";
 const HISTORY_MAX = 100;
 
-async function postText(source: SourceRef, path: string, text: string, replyTo?: string): Promise<string | null> {
+export async function postText(source: SourceRef, path: string, text: string, replyTo?: string): Promise<string | null> {
   try {
     const r = await relayApi(source, path, { method: "POST", body: JSON.stringify({ text, ...(replyTo ? { replyTo } : {}) }) });
     if (r.ok) return null;

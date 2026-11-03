@@ -6,15 +6,20 @@
 // sources (single channel or merged co-chat) from one ChatStore; the site's page chrome (headers, layout
 // picker, settings popovers, Modes panel, second channel) is not part of the split.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { agu } from "../bridge";
 import { useAccounts, useSettings } from "../hooks";
-import type { ConnFrame, Settings, SourceRef } from "../protocol";
+import type { ConnFrame, HighlightRule, Settings, SourceRef } from "../protocol";
+import { alertOnce } from "../alerts";
+import { textMentionsLogin } from "./chatText";
+import { compileHighlights, matchInputOf } from "./highlights";
 import { EmoteTipLayer } from "./emoteTip";
+import { compileIgnores, filterIgnored, ignoreLogin, isUserIgnored, toggleIgnoredUser } from "./ignores";
 import { MessageList } from "./MessageList";
 import { ModActionPopover, type ModPopoverState } from "./ModActionPopover";
 import { fetchCoCaps, NO_CO_CAPS, ALL_FALSE_CAPS, badgeNames, REACH_ALL, modReach, type CoCaps, type ModReach } from "./modCaps";
 import { kickModAction, pinMessage, resolveAutomod, rumbleModAction, setPinDuration, twitchAction, twitchDelete, unpinMessage } from "./modActions";
 import { buildKickInventory, buildRumbleInventory, buildTwitchInventory, EMPTY_INVENTORY, type Inventory } from "./input/inventory";
-import { SendBox, type SendSource } from "./input/SendBox";
+import { postText, SendBox, type SendSource } from "./input/SendBox";
 import { PinnedCard } from "./rows/PinnedCard";
 import { AutomodRow, ModFeedRow, NoticeRow, TwitchMessageRow } from "./rows/TwitchRows";
 import { KickRow, RumbleRow, XRow, YouTubeRow } from "./rows/CoChatRows";
@@ -26,6 +31,8 @@ import { noticeVisible } from "./twitch/events";
 import { EMPTY_TWITCH_DATA, useTwitchData, type TwitchData } from "./twitch/useTwitchData";
 import type { Row } from "./types";
 import { useChatFeed } from "./useChatFeed";
+import { DEFAULT_MOD_BUTTONS, expandTemplate, formatDuration, normalizeModButtons } from "./modButtons";
+import { confirmedCommand, parseUserArg, runSlashCommand, splitArgs } from "./input/slash";
 import { UserCard, type UserCardState } from "./UserCard";
 
 export type ChatPaneProps = {
@@ -37,7 +44,12 @@ export type ChatPaneProps = {
   focused: boolean;
   /** Called whenever a source's latest conn frame changes, keyed `${platform}:${channel}` as given in `sources`. */
   onStatus?: (status: Record<string, ConnFrame>) => void;
+  /** Live chat arrived (not history): "highlight" when any of it matched a highlight rule or mentions you. */
+  onActivity?: (kind: Activity) => void;
 };
+
+/** What live chat a split got: plain messages, or at least one highlight / mention. */
+export type Activity = "message" | "highlight";
 
 // Used until the real settings arrive (keep in sync with DEFAULT_SETTINGS in src/main/store.js).
 const FALLBACK_SETTINGS: Settings = {
@@ -57,7 +69,19 @@ const FALLBACK_SETTINGS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  hotkeys: {},
+  modButtons: DEFAULT_MOD_BUTTONS,
+  highlightRules: [],
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "",
+  highlightVolume: 70,
+  highlightSoundFocused: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
+
+const NO_RULES: HighlightRule[] = [];
 
 const EMPTY_SCOPED: ProviderScopedMap = { global: new Map(), channel: new Map() };
 const MAX_CARDS = 4;
@@ -80,7 +104,7 @@ function loadHiddenPins(): string[] {
   }
 }
 
-export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps) {
+export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: ChatPaneProps) {
   const rsLive = useSettings();
   const rs = rsLive ?? FALLBACK_SETTINGS;
   const accounts = useAccounts();
@@ -143,6 +167,33 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
   }, [twitchData, personal, rs.sevenTv, rs.bttv, rs.ffz]);
 
   const rows = snap.rows;
+
+  // ---- highlights (Settings > Highlights) ------------------------------------------------------------------
+  const highlighter = useMemo(() => compileHighlights(rs.highlightRules ?? NO_RULES), [rs.highlightRules]);
+  const ownLogin = useMemo(() => {
+    const out: Record<string, { id: string; login: string }> = {};
+    for (const [p, a] of Object.entries(accounts ?? {})) if (a?.user) out[p] = { id: a.user.id, login: (a.user.login || "").toLowerCase() };
+    return out;
+  }, [accounts]);
+  // Rows are immutable (an edit replaces the object), so a row's match is cached by the row object.
+  const ruleCache = useMemo(() => new WeakMap<Row, HighlightRule | null>(), [highlighter, ownLogin]);
+  /** The viewer's own message: never highlighted by a rule and never alerts. */
+  const isOwn = (r: Row): boolean => {
+    const me = ownLogin[r.platform];
+    if (!me || !(r.k === "msg" || r.k === "rumble" || r.k === "kick" || r.k === "youtube" || r.k === "x")) return false;
+    const u = r.m.user as { id?: string; login?: string };
+    return (!!me.id && u.id === me.id) || (!!me.login && (u.login || "").toLowerCase() === me.login);
+  };
+  const ruleOf = (r: Row): HighlightRule | null => {
+    if (!highlighter.size) return null;
+    let hit = ruleCache.get(r);
+    if (hit === undefined) {
+      const input = matchInputOf(r);
+      hit = input && !isOwn(r) ? highlighter.match(input) : null;
+      ruleCache.set(r, hit);
+    }
+    return hit;
+  };
 
   // The viewer's lead-moderator status is read off their own badge in this chat (there is no API for it).
   const leadOf = (sk: string): boolean => {
@@ -239,7 +290,34 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
       },
       quickTimeout(sk, msg, seconds) {
         const ref = refOf(sk);
-        if (ref) void twitchAction(ref, { action: "timeout", userId: msg.user.id, duration: seconds }, `timed out ${msg.user.name} (${Math.round(seconds / 60)}m)`, toast);
+        if (ref) void twitchAction(ref, { action: "timeout", userId: msg.user.id, duration: seconds }, `timed out ${msg.user.name} (${formatDuration(seconds)})`, toast);
+      },
+      twitchCommand(sk, msg, template) {
+        const ref = refOf(sk);
+        if (!ref) return;
+        const line = expandTemplate(template, { user: msg.user.login, name: msg.user.name, userId: msg.user.id, msgId: msg.id, channel: ref.channel, msg: msg.text }).trim();
+        if (!line) return;
+        void (async () => {
+          try {
+            if (line.startsWith("/") && !/^\/me(\s|$)/i.test(line)) {
+              const m = /^\/(\S+)\s*([\s\S]*)$/.exec(line);
+              const cmd = m ? m[1].toLowerCase() : "";
+              if (cmd === "clear" || cmd === "raid") {
+                const login = parseUserArg(splitArgs(m?.[2] ?? "")[0] || "");
+                if (cmd === "raid" && !login) return toast("Usage: /raid <user>", "warn");
+                if (!window.confirm(cmd === "clear" ? "Clear the whole chat?" : `Raid ${login}?`)) return;
+                await confirmedCommand(ref, cmd === "clear" ? { kind: "clear" } : { kind: "raid", login }, toast);
+                return;
+              }
+              await runSlashCommand(line, { source: ref, toast, lastMessageId: () => msg.id, pinnedId: () => store.sources.get(sk)?.pinned?.id ?? null });
+            } else {
+              const err = await postText(ref, "/api/chat/send", line.slice(0, 500));
+              if (err) toast(err, "warn");
+            }
+          } catch (e) {
+            toast((e as Error).message, "warn");
+          }
+        })();
       },
       modPopover(target, kind, sk, msg) {
         const container = panelRef.current;
@@ -260,9 +338,9 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
         const res = await resolveAutomod(ref, id, action, toast);
         if (res === "gone") store.markAutomodExpired(sk, id);
       },
-      rumbleMod(sk, action, msg) {
+      rumbleMod(sk, action, msg, seconds) {
         const ref = refOf(sk);
-        if (ref) void rumbleModAction(ref, action, msg, toast);
+        if (ref) void rumbleModAction(ref, action, msg, toast, seconds);
       },
       kickMod(sk, action, msg, seconds) {
         const ref = refOf(sk);
@@ -274,7 +352,8 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
 
   const showPlatform = rs.showPlatformMarks || sources.length > 1;
   const inlineMod = modMode && rs.showModButtons;
-  const ctx: RowCtx = useMemo(() => ({ rs, h, showPlatform, modButtons: inlineMod }), [rs, h, showPlatform, inlineMod]);
+  const modList = useMemo(() => normalizeModButtons(rs.modButtons), [rs.modButtons]);
+  const ctx: RowCtx = useMemo(() => ({ rs, h, showPlatform, modButtons: inlineMod, modList }), [rs, h, showPlatform, inlineMod, modList]);
 
   // ---- rows ---------------------------------------------------------------------------------------------------
   const visible = useMemo(() => {
@@ -283,12 +362,61 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
     return rows.filter((r) => r.k !== "notice" || noticeVisible(r.n, bombs));
   }, [rows]);
 
+  // Ignored users / phrases. Results are cached per row object (rows are immutable; a change makes a new
+  // object), and the cache is thrown away when the rules change.
+  const ignores = useMemo(() => compileIgnores(rs.ignoredUsers, rs.ignoredPhrases), [rs.ignoredUsers, rs.ignoredPhrases]);
+  const ignoreCache = useMemo(() => new WeakMap<Row, Row | null>(), [ignores]);
+  const shown = useMemo(() => filterIgnored(visible, ignores, ignoreCache), [visible, ignores, ignoreCache]);
+
+  const setIgnored = useCallback(
+    (platform: SourceRef["platform"], login: string, on: boolean) => {
+      // Read the latest list from main so two splits toggling at once don't overwrite each other.
+      void agu.settings
+        .get()
+        .then((cur) => agu.settings.set({ ignoredUsers: toggleIgnoredUser(cur.ignoredUsers ?? [], platform, login, on) }))
+        .then(
+          () => toast(on ? `Ignoring ${login}` : `No longer ignoring ${login}`),
+          () => toast("Couldn't save the ignore list", "warn"),
+        );
+    },
+    [toast],
+  );
+
+  // ---- alerts and tab activity: once per live row (history batches never ring) ----------------------------
+  const isIgnored = useCallback((r: Row) => filterIgnored([r], ignores, ignoreCache).length === 0, [ignores, ignoreCache]);
+  const live = useRef({ rs, ruleOf, isOwn, isIgnored, meLoginLower, onActivity });
+  live.current = { rs, ruleOf, isOwn, isIgnored, meLoginLower, onActivity };
+  const seenOrd = useRef(0);
+  useEffect(() => {
+    const { rs, ruleOf, isOwn, isIgnored, meLoginLower, onActivity } = live.current;
+    let maxOrd = seenOrd.current;
+    let activity: Activity | null = null;
+    for (const r of rows) {
+      const ord = r.ord ?? 0;
+      if (ord <= seenOrd.current) continue;
+      if (ord > maxOrd) maxOrd = ord;
+      if (r.backlog || r.k === "modfeed" || isOwn(r) || isIgnored(r)) continue; // ignored rows never ring
+      if (r.k === "notice" && !noticeVisible(r.n, new Set())) continue;
+      activity ??= "message";
+      const mention = r.k === "msg" && textMentionsLogin(r.m.text, meLoginLower);
+      const rule = mention ? null : ruleOf(r);
+      if (!mention && !rule) continue;
+      activity = "highlight";
+      const key = `${r.sk.toLowerCase()}|${r.key.slice(r.sk.length)}`;
+      alertOnce(key, mention ? { sound: rs.mentionSound, soundFile: "", flash: rs.mentionFlash } : { sound: rule!.sound, soundFile: rule!.soundFile, flash: rule!.flash }, rs);
+    }
+    seenOrd.current = maxOrd;
+    if (activity) onActivity?.(activity);
+  }, [rows]);
+
   const renderRow = (r: Row): ReactNode => {
     switch (r.k) {
       case "msg": {
         const env = twitchEnvOf(r.sk);
         if (!env) return null;
-        return <TwitchMessageRow key={r.key} row={r} ctx={ctx} env={env} susp={store.sources.get(r.sk)?.suspicious.get(r.m.user.id)?.status} modMode={inlineMod} />;
+        return (
+          <TwitchMessageRow key={r.key} row={r} ctx={ctx} env={env} susp={store.sources.get(r.sk)?.suspicious.get(r.m.user.id)?.status} modMode={inlineMod} rule={ruleOf(r)} />
+        );
       }
       case "notice": {
         const env = twitchEnvOf(r.sk);
@@ -302,16 +430,16 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
       }
       case "rumble": {
         const env = coEnvOf(r.sk);
-        return env ? <RumbleRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} /> : null;
+        return env ? <RumbleRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} rule={ruleOf(r)} /> : null;
       }
       case "kick": {
         const env = coEnvOf(r.sk);
-        return env ? <KickRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} /> : null;
+        return env ? <KickRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} rule={ruleOf(r)} /> : null;
       }
       case "youtube":
-        return <YouTubeRow key={r.key} row={r} ctx={ctx} />;
+        return <YouTubeRow key={r.key} row={r} ctx={ctx} rule={ruleOf(r)} />;
       case "x":
-        return <XRow key={r.key} row={r} ctx={ctx} />;
+        return <XRow key={r.key} row={r} ctx={ctx} rule={ruleOf(r)} />;
     }
   };
 
@@ -462,11 +590,12 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
           );
         })}
 
-      <MessageList rows={visible} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} />
+      <MessageList rows={shown} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} focused={focused} />
 
       {cards.map((c) => {
         const ref = refOf(c.sk);
         if (!ref) return null;
+        const ignoreAs = ignoreLogin(c.user);
         return (
           <UserCard
             key={c.id}
@@ -486,6 +615,8 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
             onFront={() => frontCard(c.id)}
             onMove={(l, t, a) => moveCard(c.id, l, t, a)}
             onTwitchDeleted={(id) => store.markDeleted(c.sk, id)}
+            ignored={!!ignoreAs && isUserIgnored(rs.ignoredUsers ?? [], c.platform, ignoreAs)}
+            onIgnore={ignoreAs ? (on) => setIgnored(c.platform, ignoreAs, on) : undefined}
           />
         );
       })}

@@ -4,10 +4,14 @@ import { agu } from "../bridge";
 import type { Layout, SourceRef, SplitNode, Tab } from "../protocol";
 import { NotebookTabs, type TabActions } from "./NotebookTabs";
 import { SplitView } from "./SplitView";
+import type { Activity } from "../chat/ChatPane";
 import type { SplitActions } from "./SplitHeader";
 import { ChannelDialog } from "./ChannelDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { useUpdater } from "./useBridge";
+import { useSettings } from "../hooks";
+import { bindingMap, eventToBinding, hotkeyRecording, resolveHotkeys } from "./hotkeys";
+import { HotkeysContext } from "./hotkeyContext";
 import { defaultLayout, findLeaf, insertAt, leaves, mapLeaf, moveLeaf, newLeaf, newTab, removeLeaf, sanitizeLayout, setSizes, type Edge } from "./tree";
 
 type Dialog =
@@ -21,6 +25,8 @@ export function App() {
   const [focusByTab, setFocusByTab] = useState<Record<string, string>>({});
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [barDismissed, setBarDismissed] = useState<string | null>(null);
+  // Tabs that got live chat while not selected: "message" (a subtle marker) or "highlight" (a strong one).
+  const [unread, setUnread] = useState<Record<string, Activity>>({});
   const updater = useUpdater();
 
   // ---- load + debounced save ------------------------------------------------
@@ -74,6 +80,32 @@ export function App() {
     },
     [focusByTab],
   );
+
+  // ---- tab activity markers --------------------------------------------------------
+  const activeId = activeTab?.id ?? null;
+  const activeRef = useRef(activeId);
+  activeRef.current = activeId;
+  useEffect(() => {
+    if (!activeId) return;
+    setUnread((u) => {
+      if (!(activeId in u)) return u;
+      const next = { ...u };
+      delete next[activeId];
+      return next;
+    });
+  }, [activeId]);
+  const activityFns = useRef(new Map<string, (kind: Activity) => void>()).current;
+  const activityFor = (tabId: string) => {
+    let fn = activityFns.get(tabId);
+    if (!fn) {
+      fn = (kind) => {
+        if (tabId === activeRef.current) return;
+        setUnread((u) => (u[tabId] === kind || u[tabId] === "highlight" ? u : { ...u, [tabId]: kind }));
+      };
+      activityFns.set(tabId, fn);
+    }
+    return fn;
+  };
 
   // ---- tab / split operations (all take ids, so they stay stable) ------------------
   const updateTab = useCallback((tabId: string, fn: (t: Tab) => Tab) => {
@@ -176,25 +208,30 @@ export function App() {
     }
   };
 
-  // ---- keyboard ---------------------------------------------------------------------
-  const keyState = useRef({ layout, dialog });
-  keyState.current = { layout, dialog };
+  // ---- keyboard (bindings from settings.hotkeys over the defaults in hotkeys.ts) -------------------------------
+  const settings = useSettings();
+  const hotkeyTable = useMemo(() => resolveHotkeys(settings?.hotkeys), [settings?.hotkeys]);
+  const keymap = useMemo(() => bindingMap(hotkeyTable), [hotkeyTable]);
+  const keyState = useRef({ layout, dialog, keymap });
+  keyState.current = { layout, dialog, keymap };
   const keyOps = useRef({ tabActions, closeFocusedSplit });
   keyOps.current = { tabActions, closeFocusedSplit };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-      const { layout, dialog } = keyState.current;
+      if (hotkeyRecording.active) return; // the settings page is recording a shortcut
+      const { layout, dialog, keymap } = keyState.current;
       if (!layout) return;
+      const binding = eventToBinding(e);
+      const action = binding ? keymap.get(binding) : undefined;
+      if (!action) return;
       const { tabActions: ta, closeFocusedSplit: closeSplit } = keyOps.current;
-      const k = e.key;
       const stop = () => {
         e.preventDefault();
         e.stopPropagation();
       };
 
-      if (k.toLowerCase() === "p" && !e.shiftKey) {
+      if (action === "openSettings") {
         if (dialog && dialog.kind !== "settings") return;
         stop();
         setDialog((d) => (d && d.kind === "settings" ? null : { kind: "settings" }));
@@ -202,24 +239,30 @@ export function App() {
       }
       if (dialog) return; // dialogs own the keyboard
 
+      stop();
+      const n = layout.tabs.length;
       const idx = layout.tabs.findIndex((t) => t.id === layout.active);
-      if (k.toLowerCase() === "t" && !e.shiftKey) {
-        stop();
-        ta.add();
-      } else if (k.toLowerCase() === "w") {
-        stop();
-        if (e.shiftKey) ta.close(layout.active);
-        else closeSplit();
-      } else if (k === "Tab" || k === "PageDown" || k === "PageUp") {
-        stop();
-        const dir = k === "PageUp" || (k === "Tab" && e.shiftKey) ? -1 : 1;
-        const n = layout.tabs.length;
-        ta.select(layout.tabs[(idx + dir + n) % n].id);
-      } else if (/^[1-9]$/.test(k) && !e.shiftKey) {
-        stop();
-        const n = Number(k);
-        const target = n === 9 ? layout.tabs[layout.tabs.length - 1] : layout.tabs[n - 1];
-        if (target) ta.select(target.id);
+      switch (action) {
+        case "newTab":
+          ta.add();
+          break;
+        case "closeTab":
+          ta.close(layout.active);
+          break;
+        case "closeSplit":
+          closeSplit();
+          break;
+        case "nextTab":
+        case "prevTab":
+          ta.select(layout.tabs[(idx + (action === "prevTab" ? -1 : 1) + n) % n].id);
+          break;
+        case "selectLastTab":
+          ta.select(layout.tabs[n - 1].id);
+          break;
+        default: {
+          const target = layout.tabs[Number(action.slice("selectTab".length)) - 1];
+          if (target) ta.select(target.id);
+        }
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -241,44 +284,46 @@ export function App() {
       : null;
 
   return (
-    <div className="flex h-full flex-col bg-[var(--color-app)]">
-      <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} />
-      {showBar && updater && (
-        <div className="flex h-6 shrink-0 items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-accent-strong)] px-3 text-[12px] text-white">
-          <span className="min-w-0 flex-1 truncate">Agu Chat {updater.version} is ready — Restart to update</span>
-          <button type="button" onClick={() => agu.updater.install().catch(() => {})} className="rounded bg-white/20 px-2 text-[11px] font-semibold hover:bg-white/30">
-            Restart
-          </button>
-          <button type="button" onClick={() => setBarDismissed(updater.version)} className="text-[11px] text-white/80 hover:text-white">
-            Later
-          </button>
+    <HotkeysContext.Provider value={hotkeyTable}>
+      <div className="flex h-full flex-col bg-[var(--color-app)]">
+        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} />
+        {showBar && updater && (
+          <div className="flex h-6 shrink-0 items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-accent-strong)] px-3 text-[12px] text-white">
+            <span className="min-w-0 flex-1 truncate">Agu Chat {updater.version} is ready — Restart to update</span>
+            <button type="button" onClick={() => agu.updater.install().catch(() => {})} className="rounded bg-white/20 px-2 text-[11px] font-semibold hover:bg-white/30">
+              Restart
+            </button>
+            <button type="button" onClick={() => setBarDismissed(updater.version)} className="text-[11px] text-white/80 hover:text-white">
+              Later
+            </button>
+          </div>
+        )}
+        <div className="relative min-h-0 flex-1">
+          {stable.map((t) => {
+            const isActive = t.id === activeTab.id;
+            return (
+              <div key={t.id} className={"absolute inset-0 " + (isActive ? "" : "pointer-events-none invisible")} aria-hidden={!isActive} data-tab-panel={t.id}>
+                <SplitView root={t.root} focusedId={focusedOf(t)} tabActive={isActive} actions={splitActionsFor(t.id)} onActivity={activityFor(t.id)} />
+              </div>
+            );
+          })}
         </div>
-      )}
-      <div className="relative min-h-0 flex-1">
-        {stable.map((t) => {
-          const isActive = t.id === activeTab.id;
-          return (
-            <div key={t.id} className={"absolute inset-0 " + (isActive ? "" : "pointer-events-none invisible")} aria-hidden={!isActive} data-tab-panel={t.id}>
-              <SplitView root={t.root} focusedId={focusedOf(t)} tabActive={isActive} actions={splitActionsFor(t.id)} />
-            </div>
-          );
-        })}
-      </div>
 
-      {dialog?.kind === "settings" && <SettingsDialog onClose={() => setDialog(null)} />}
-      {dialog?.kind === "add" && <ChannelDialog title="Select channel" initial={[]} submitLabel="Add channel" onSubmit={submitChannels} onClose={() => setDialog(null)} />}
-      {dialog?.kind === "change" && dialogLeaf && (
-        <ChannelDialog title="Change channel(s)" initial={dialogLeaf.sources} submitLabel="Apply" onSubmit={submitChannels} onClose={() => setDialog(null)} />
-      )}
-      {dialog?.kind === "split" && dialogLeaf && (
-        <ChannelDialog
-          title={dialog.dir === "right" ? "Add split to the right" : "Add split below"}
-          initial={[]}
-          submitLabel="Add split"
-          onSubmit={submitChannels}
-          onClose={() => setDialog(null)}
-        />
-      )}
-    </div>
+        {dialog?.kind === "settings" && <SettingsDialog onClose={() => setDialog(null)} />}
+        {dialog?.kind === "add" && <ChannelDialog title="Select channel" initial={[]} submitLabel="Add channel" onSubmit={submitChannels} onClose={() => setDialog(null)} />}
+        {dialog?.kind === "change" && dialogLeaf && (
+          <ChannelDialog title="Change channel(s)" initial={dialogLeaf.sources} submitLabel="Apply" onSubmit={submitChannels} onClose={() => setDialog(null)} />
+        )}
+        {dialog?.kind === "split" && dialogLeaf && (
+          <ChannelDialog
+            title={dialog.dir === "right" ? "Add split to the right" : "Add split below"}
+            initial={[]}
+            submitLabel="Add split"
+            onSubmit={submitChannels}
+            onClose={() => setDialog(null)}
+          />
+        )}
+      </div>
+    </HotkeysContext.Provider>
   );
 }

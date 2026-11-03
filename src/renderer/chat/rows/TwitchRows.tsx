@@ -7,6 +7,8 @@
 import { memo, useState, type CSSProperties, type ReactNode } from "react";
 import { WarningIcon } from "../../icons";
 import { textMentionsLogin } from "../chatText";
+import { ruleRowStyle } from "../highlights";
+import type { HighlightRule } from "../../protocol";
 import { Badges, MessageText } from "../parts";
 import { modReach } from "../modCaps";
 import { BADGE_PX, BADGE_VMARGIN } from "../twitch/badges";
@@ -25,12 +27,13 @@ type AutomodRowT = Extract<Row, { k: "automod" }>;
 
 // ---------------------------------------------------------------------------
 // Highlights: a tint on the whole row plus a small label. Priority: suspicious (restricted > monitored)
-// > mentions you > first message > returning. The highlighted-message tint (redemption) never gets a label.
+// > mentions you > the user's highlight rules (their colour, no label) > first message > returning. The
+// highlighted-message tint (redemption) never gets a label.
 // ---------------------------------------------------------------------------
 
 type Highlight = { style?: CSSProperties; label?: { text: string; className: string } };
 
-function rowHighlight(msg: ChatMsg, mentionsMe: boolean, susp: SuspiciousUser["status"] | undefined): Highlight {
+function rowHighlight(msg: ChatMsg, mentionsMe: boolean, susp: SuspiciousUser["status"] | undefined, rule: HighlightRule | null): Highlight {
   if (susp === "restricted") {
     return { style: { borderLeft: "3px solid #ff5c1a", background: "rgba(255,92,26,.10)", paddingLeft: 6 }, label: { text: "RESTRICTED SUSPICIOUS USER", className: "text-orange-300" } };
   }
@@ -40,6 +43,7 @@ function rowHighlight(msg: ChatMsg, mentionsMe: boolean, susp: SuspiciousUser["s
   if (mentionsMe) {
     return { style: { borderLeft: "3px solid #ff3b3b", background: "rgba(255,30,30,.12)", paddingLeft: 6 }, label: { text: "MENTIONS YOU", className: "text-red-300" } };
   }
+  if (rule) return { style: ruleRowStyle(rule.color) };
   if (msg.firstMsg) {
     return { style: { borderLeft: "3px solid #9147ff", background: "rgba(145,71,255,.08)", paddingLeft: 6 }, label: { text: "FIRST MESSAGE", className: "text-purple-300" } };
   }
@@ -135,7 +139,21 @@ function EventFrame({
 
 const EMPTY_KNOWN = new Map();
 
-function MessageRow({ row, ctx, env, susp, modMode }: { row: MsgRowT; ctx: RowCtx; env: TwitchEnv; susp: SuspiciousUser["status"] | undefined; modMode: boolean }) {
+function MessageRow({
+  row,
+  ctx,
+  env,
+  susp,
+  modMode,
+  rule,
+}: {
+  row: MsgRowT;
+  ctx: RowCtx;
+  env: TwitchEnv;
+  susp: SuspiciousUser["status"] | undefined;
+  modMode: boolean;
+  rule: HighlightRule | null;
+}) {
   const { rs, h } = ctx;
   const msg = row.m;
   const cosmeticsOn = rs.sevenTvCosmetics;
@@ -148,7 +166,7 @@ function MessageRow({ row, ctx, env, susp, modMode }: { row: MsgRowT; ctx: RowCt
   const nameStyle: CSSProperties = paint ? paintStyle(paint) : { color };
   const highlighted = msg.msgId === "highlighted-message";
   const mentionsMe = textMentionsLogin(msg.text, env.meLoginLower);
-  const hl = rowHighlight(msg, mentionsMe, susp);
+  const hl = rowHighlight(msg, mentionsMe, susp, rule);
   const parts = buildParts(msg.text, msg.emotes, env.emotes, env.known ?? EMPTY_KNOWN, msg.gifs);
   const reach = modReach(env.viewer, { id: msg.user.id, badges: msg.badges });
   const caps = env.caps;
@@ -157,11 +175,20 @@ function MessageRow({ row, ctx, env, susp, modMode }: { row: MsgRowT; ctx: RowCt
   const canDelete = caps.delete && reach.delete && !msg.deleted;
   const struck = msg.deleted && rs.deletedMessages === "strike";
 
+  // Command buttons need some mod right here; Twitch answers for the exact command.
+  const isMod = caps.ban || caps.delete || caps.warn;
   const mod = modMode ? (
     <ModButtons
-      onBan={canBan && !msg.deleted ? (target) => h.modPopover(target, "ban", row.sk, msg) : undefined}
-      onTimeout={canTimeout && !msg.deleted ? () => h.quickTimeout(row.sk, msg, 600) : undefined}
-      onDelete={canDelete ? () => h.deleteMsg(row.sk, msg.id) : undefined}
+      buttons={ctx.modList}
+      can={(b) =>
+        b.action === "ban" ? canBan && !msg.deleted : b.action === "timeout" ? canTimeout && !msg.deleted : b.action === "delete" ? canDelete : isMod
+      }
+      onRun={(b, target) => {
+        if (b.action === "ban") h.modPopover(target, "ban", row.sk, msg);
+        else if (b.action === "timeout") h.quickTimeout(row.sk, msg, b.seconds);
+        else if (b.action === "delete") h.deleteMsg(row.sk, msg.id);
+        else h.twitchCommand(row.sk, msg, b.command);
+      }}
     />
   ) : null;
 
@@ -230,15 +257,18 @@ export const TwitchMessageRow = memo(function TwitchMessageRow({
   env,
   susp,
   modMode,
+  rule = null,
 }: {
   row: MsgRowT;
   ctx: RowCtx;
   env: TwitchEnv;
   susp: SuspiciousUser["status"] | undefined;
   modMode: boolean;
+  /** The highlight rule this message matched (Settings > Highlights), if any. */
+  rule?: HighlightRule | null;
 }) {
   const en = row.m;
-  const inner = <MessageRow row={row} ctx={ctx} env={env} susp={susp} modMode={modMode} />;
+  const inner = <MessageRow row={row} ctx={ctx} env={env} susp={susp} modMode={modMode} rule={rule} />;
   const ev = DEFAULT_EVENTS;
   // A Power-up comes in on custom-reward-id like a channel-point redeem; only the reward info says which
   // it was. Until that is known the header just says "redeemed" with no price.

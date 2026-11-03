@@ -1,7 +1,7 @@
 // What a row needs from its pane, bundled so memoized rows get a handful of stable props instead of a
 // dozen: `Handlers` is created once per pane (it reads current state through refs), `TwitchEnv` once per
 // Twitch source and only changes when that source's badges / emotes / caps change.
-import type { Platform, Settings, SourceRef } from "../../protocol";
+import type { ModButton, Platform, Settings, SourceRef } from "../../protocol";
 import type { ModCaps, ModViewer, CoCaps } from "../modCaps";
 import type { BadgeMap } from "../twitch/badges";
 import type { SevenTvDefs } from "../twitch/cosmetics";
@@ -20,10 +20,12 @@ export type Handlers = {
   pin(sk: string, id: string): void;
   deleteMsg(sk: string, id: string): void;
   quickTimeout(sk: string, msg: ChatMsg, seconds: number): void;
+  /** A mod button's command template, expanded for this message and run as a slash command or sent as chat. */
+  twitchCommand(sk: string, msg: ChatMsg, template: string): void;
   modPopover(target: HTMLElement, kind: "ban" | "timeout" | "warn" | "delete", sk: string, msg: ChatMsg): void;
   automod(sk: string, id: string, action: "allow" | "deny"): Promise<void>;
   /** Rumble / Kick moderation (only offered when the account can moderate). */
-  rumbleMod(sk: string, action: "timeout" | "ban" | "delete", msg: RumbleMsg): void;
+  rumbleMod(sk: string, action: "timeout" | "ban" | "delete", msg: RumbleMsg, seconds?: number): void;
   kickMod(sk: string, action: KickModAction, msg: KickMsg, seconds?: number): void;
 };
 
@@ -54,4 +56,6 @@ export type RowCtx = {
   showPlatform: boolean;
   /** Chatterino "mod mode": inline mod buttons at the start of every row. */
   modButtons: boolean;
+  /** Which buttons, in order (settings.modButtons, validated). */
+  modList: ModButton[];
 };

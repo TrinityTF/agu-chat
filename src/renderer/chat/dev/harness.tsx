@@ -3,6 +3,7 @@
 // main does) and renders one or two ChatPane splits. Not part of the production bundle (not imported by
 // index.html).
 import type { AguBridge, Frame, Settings, SourceRef } from "../../protocol";
+import { DEFAULT_MOD_BUTTONS } from "../modButtons";
 
 const now = Date.now();
 const user = (id: string, login: string, color = "") => ({ id, login, name: login[0].toUpperCase() + login.slice(1), color });
@@ -105,6 +106,16 @@ const settings: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  hotkeys: {},
+  modButtons: DEFAULT_MOD_BUTTONS,
+  highlightRules: [],
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "",
+  highlightVolume: 70,
+  highlightSoundFocused: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 const frameCbs = new Set<(id: string, f: Frame) => void>();
@@ -172,7 +183,8 @@ const agu: AguBridge = {
   },
   layout: { get: async () => null, set: async () => {} },
   updater: { get: async () => ({}) as any, check: async () => {}, install: async () => {}, onChange: () => () => {} },
-  app: { info: async () => ({ version: "dev", packaged: false }), openExternal: async () => {} },
+  app: { info: async () => ({ version: "dev", packaged: false }), openExternal: async () => {}, flash: async () => {} },
+  sounds: { pick: async () => null, read: async () => new Uint8Array() },
 };
 
 (window as any).agu = agu;

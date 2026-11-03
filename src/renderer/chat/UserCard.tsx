@@ -75,6 +75,8 @@ export function UserCard({
   onFront,
   onMove,
   onTwitchDeleted,
+  ignored,
+  onIgnore,
 }: {
   state: UserCardState;
   source: SourceRef;
@@ -92,6 +94,10 @@ export function UserCard({
   onFront: () => void;
   onMove: (left: number, top: number, above: boolean) => void;
   onTwitchDeleted: (id: string) => void;
+  /** This user is on the ignore list (their messages are hidden). */
+  ignored: boolean;
+  /** Add to / remove from the ignore list; absent when the user has no name to ignore by. */
+  onIgnore?: (on: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
@@ -449,6 +455,20 @@ export function UserCard({
               Unban
             </button>
           </div>
+        </div>
+      )}
+
+      {onIgnore && (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-line p-2.5">
+          <button
+            type="button"
+            className={btnGhost}
+            title={ignored ? "Show this user's messages again" : `Hide this user's messages on ${PLATFORM_LABEL[state.platform]} (Settings > Ignores)`}
+            onClick={() => onIgnore(!ignored)}
+          >
+            {ignored ? "Unignore user" : "Ignore user"}
+          </button>
+          {ignored && <span className="text-[11px] text-faint">Messages hidden</span>}
         </div>
       )}
 
