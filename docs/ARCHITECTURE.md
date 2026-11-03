@@ -26,7 +26,9 @@ renderer (React, sandboxed)  <--  window.agu (preload, contextBridge)  -->  main
 | `src/main/relay.js` | `SourceManager` (ref-counted live sources) and the `api` router |
 | `src/main/platforms.js` | the list of platform modules |
 | `src/main/<platform>/index.js` | one module per platform (see "Platform module") |
-| `src/main/vendor/` | files copied from `modtools.agu.lol/render/lib/`, each with a header naming its origin |
+| `src/main/<platform>/vendor/` | files copied from `modtools.agu.lol/render/lib/` (render commit `7704aec`), each with a header naming its origin and what was changed |
+| `src/renderer/icons.tsx`, `platformIcons.tsx`, `hooks.ts` | shared by `layout/` and `chat/` |
+| `src/renderer/chat/ChatPane.tsx` | the one component `layout/` renders per split (props are the contract) |
 | `src/main/updater.js` | GitHub Releases updates, beta/stable channel |
 | `src/preload/preload.cjs` | the `window.agu` bridge (CommonJS: sandboxed preloads cannot be ESM) |
 | `src/renderer/` | the React app (Vite root). `layout/` = notebook, splits, dialogs. `chat/` = message view, input, user card |
