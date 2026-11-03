@@ -29,6 +29,9 @@ renderer (React, sandboxed)  <--  window.agu (preload, contextBridge)  -->  main
 | `src/main/<platform>/vendor/` | files copied from `modtools.agu.lol/render/lib/` (render commit `7704aec`), each with a header naming its origin and what was changed |
 | `src/renderer/icons.tsx`, `platformIcons.tsx`, `hooks.ts` | shared by `layout/` and `chat/` |
 | `src/renderer/chat/ChatPane.tsx` | the one component `layout/` renders per split (props are the contract) |
+| `src/renderer/chat/highlights.ts` | highlight rule matching (pure, tested by `npm test`) |
+| `src/renderer/alerts.ts` | highlight alerts: sound (Web Audio) and taskbar flash, deduplicated across splits |
+| `src/main/highlightRules.js`, `src/main/sounds.js` | validation of the `highlightRules` setting; custom alert sounds in `userData/sounds` |
 | `src/main/updater.js` | GitHub Releases updates, beta/stable channel |
 | `src/preload/preload.cjs` | the `window.agu` bridge (CommonJS: sandboxed preloads cannot be ESM) |
 | `src/renderer/` | the React app (Vite root). `layout/` = notebook, splits, dialogs. `chat/` = message view, input, user card |
@@ -128,6 +131,25 @@ The `Settings` type and defaults live in `src/renderer/protocol.ts` and
 `src/main/store.js` (keep them in sync). Notable keys: `twitchClientId` (the
 user's own Twitch app, Public client type), `updateChannel` (`"beta"` |
 `"stable"`), and the chat display options.
+
+`settingsStore.set` only accepts a key whose value has the default's type; keys that need more than that
+(`highlightRules`, a list of `HighlightRule`, and `highlightVolume`) have a sanitizer in `SANITIZE`
+(`src/main/store.js`), which also cleans values loaded from `settings.json`.
+
+## Highlights and alerts
+
+Highlight rules are matched in the renderer, per row, for every platform (`chat/highlights.ts`); the first
+matching rule colours the row. A row that arrived in a `chatlog` frame is marked `backlog` by the chat store:
+history is coloured but never alerts or marks a tab. For live rows `ChatPane` calls `onActivity("message" |
+"highlight")` (the notebook marks unselected tabs) and `alertOnce` (`alerts.ts`), keyed by message, so the
+same channel open in two splits alerts once.
+
+- `agu.app.flash()` flashes the taskbar button (`BrowserWindow.flashFrame`) unless the window is focused;
+  focusing the window stops it.
+- `agu.sounds.pick()` opens a file dialog and copies the chosen audio file into `userData/sounds`, resolving
+  `{ file }` (a bare file name, stored in settings) or `null`. `agu.sounds.read(file)` returns its bytes; only
+  bare names inside that folder are accepted. "" in a sound setting means the built-in ping, which is
+  synthesized in the renderer.
 
 ## Layout
 

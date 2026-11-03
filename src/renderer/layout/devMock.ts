@@ -30,6 +30,12 @@ const DEFAULTS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  highlightRules: [],
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "",
+  highlightVolume: 70,
+  highlightSoundFocused: true,
 };
 
 function createMock(): AguBridge {
@@ -45,7 +51,7 @@ function createMock(): AguBridge {
   const settingsCbs = new Set<(s: Settings) => void>();
   const accountCbs = new Set<(s: AccountsState) => void>();
   const updaterCbs = new Set<(s: UpdaterState) => void>();
-  const log: Record<string, unknown[]> = { layoutSaves: [], opened: [], installs: [], subs: [], unsubs: [] };
+  const log: Record<string, unknown[]> = { layoutSaves: [], opened: [], installs: [], subs: [], unsubs: [], flashes: [] };
   let nextSub = 1;
 
   const emitFrame = (subId: string, frame: Frame) => frameCbs.forEach((cb) => cb(subId, frame));
@@ -207,10 +213,22 @@ function createMock(): AguBridge {
       async openExternal(url) {
         log.opened.push(url);
       },
+      async flash() {
+        log.flashes.push(Date.now());
+      },
+    },
+
+    sounds: {
+      async pick() {
+        return { file: "mock-sound.mp3" };
+      },
+      async read() {
+        throw new Error("No sound files in the mock.");
+      },
     },
   };
 
-  (window as any).__aguMock = { log, get layout() { return layout; }, get settings() { return settings; } };
+  (window as any).__aguMock = { log, emit: emitFrame, get layout() { return layout; }, get settings() { return settings; } };
   return bridge;
 }
 

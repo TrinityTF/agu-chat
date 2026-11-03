@@ -1,4 +1,4 @@
-// Settings dialog: Accounts, Appearance/chat, Updates, About.
+// Settings dialog: Accounts, Appearance/chat, Highlights, Updates, About.
 import { useEffect, useState, type ReactNode } from "react";
 import { agu } from "../bridge";
 import { useAccounts } from "../hooks";
@@ -7,13 +7,15 @@ import { PLATFORM_LABEL, PlatformIcon } from "../platformIcons";
 import { CopyIcon } from "../icons";
 import { Btn, Modal, Toggle, copyText, inputCls } from "./ui";
 import { useAppInfo, useLiveSettings, useUpdater } from "./useBridge";
+import { HighlightsSection } from "./HighlightsSection";
 
 export const REPO_URL = "https://github.com/TrinityTF/agu-chat";
 
-type Section = "accounts" | "appearance" | "updates" | "about";
+type Section = "accounts" | "appearance" | "highlights" | "updates" | "about";
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "appearance", label: "Appearance and chat" },
+  { id: "highlights", label: "Highlights" },
   { id: "updates", label: "Updates" },
   { id: "about", label: "About" },
 ];
@@ -50,6 +52,8 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
             <AccountsSection settings={settings} setSettings={setSettings} />
           ) : section === "appearance" ? (
             <AppearanceSection settings={settings} setSettings={setSettings} />
+          ) : section === "highlights" ? (
+            <HighlightsSection settings={settings} setSettings={setSettings} />
           ) : section === "updates" ? (
             <UpdatesSection settings={settings} setSettings={setSettings} />
           ) : (

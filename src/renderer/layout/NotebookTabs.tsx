@@ -4,6 +4,7 @@ import type { Tab } from "../protocol";
 import { GearIcon, XIcon } from "../icons";
 import { PopupMenu, type MenuItem } from "./ui";
 import { autoTitle, tabTitle } from "./tree";
+import type { Activity } from "../chat/ChatPane";
 
 export type TabActions = {
   select(id: string): void;
@@ -16,7 +17,18 @@ export type TabActions = {
   openSettings(): void;
 };
 
-export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: string; actions: TabActions }) {
+export function NotebookTabs({
+  tabs,
+  active,
+  actions,
+  unread = {},
+}: {
+  tabs: Tab[];
+  active: string;
+  actions: TabActions;
+  /** Unselected tabs that got live chat: "message" = new messages, "highlight" = a highlight or mention. */
+  unread?: Record<string, Activity>;
+}) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
@@ -74,6 +86,7 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
         {tabs.map((t, i) => {
           const selected = t.id === active;
           const isEditing = editing === t.id;
+          const mark = selected ? undefined : unread[t.id];
           return (
             <div
               key={t.id}
@@ -124,7 +137,11 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
                 "group relative flex max-w-[220px] shrink-0 cursor-default items-center gap-1 border-r border-[var(--color-line)] px-2.5 text-[12px] " +
                 (selected
                   ? "bg-[var(--color-panel)] text-[var(--color-text)]"
-                  : "text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]") +
+                  : mark === "highlight"
+                    ? "bg-[var(--color-mention)] text-[var(--color-text)] hover:bg-[var(--color-raised-2)]"
+                    : mark === "message"
+                      ? "text-[var(--color-text)] hover:bg-[var(--color-raised-2)]"
+                      : "text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]") +
                 (dragId === t.id ? " opacity-50" : "")
               }
             >
@@ -147,9 +164,17 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
                   aria-label="Tab name"
                 />
               ) : (
-                <span className="truncate" title={tabTitle(t)}>
-                  {tabTitle(t)}
-                </span>
+                <>
+                  {mark && (
+                    <span
+                      aria-label={mark === "highlight" ? "Highlighted messages" : "New messages"}
+                      className={"h-1.5 w-1.5 shrink-0 rounded-full " + (mark === "highlight" ? "bg-[var(--color-accent-soft)]" : "bg-[var(--color-faint)]")}
+                    />
+                  )}
+                  <span className="truncate" title={tabTitle(t)}>
+                    {tabTitle(t)}
+                  </span>
+                </>
               )}
               {!isEditing && (
                 <button
@@ -170,6 +195,7 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
                 </button>
               )}
               {selected && <span className="absolute inset-x-0 bottom-0 h-[2px] bg-[var(--color-accent)]" />}
+              {mark === "highlight" && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--color-accent-soft)]" />}
               {dragId && dropAt === i && <span className="absolute inset-y-0 left-0 w-[2px] bg-[var(--color-accent)]" />}
               {dragId && dropAt === i + 1 && i === tabs.length - 1 && <span className="absolute inset-y-0 right-0 w-[2px] bg-[var(--color-accent)]" />}
             </div>

@@ -146,7 +146,16 @@ export type RowBody =
   | { k: "x"; m: XMsg };
 
 /** One line of the message list. `sk` is the source key `${platform}:${channel}` as given in props. */
-export type Row = { key: string; ts: number; sk: string; platform: Platform; /** arrival counter, stable under trimming: alternating row shading keys off it */ ord?: number } & RowBody;
+export type Row = {
+  key: string;
+  ts: number;
+  sk: string;
+  platform: Platform;
+  /** arrival counter, stable under trimming: alternating row shading keys off it */
+  ord?: number;
+  /** came in with a history / snapshot batch (chatlog), not live: never alerts or marks a tab */
+  backlog?: boolean;
+} & RowBody;
 
 /** The person behind a row, for the user card and the "recent messages" list. */
 export type RowUser = { id: string; login: string; name: string; avatar?: string; color?: string };

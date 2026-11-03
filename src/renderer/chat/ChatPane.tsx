@@ -7,7 +7,10 @@
 // picker, settings popovers, Modes panel, second channel) is not part of the split.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAccounts, useSettings } from "../hooks";
-import type { ConnFrame, Settings, SourceRef } from "../protocol";
+import type { ConnFrame, HighlightRule, Settings, SourceRef } from "../protocol";
+import { alertOnce } from "../alerts";
+import { textMentionsLogin } from "./chatText";
+import { compileHighlights, matchInputOf } from "./highlights";
 import { EmoteTipLayer } from "./emoteTip";
 import { MessageList } from "./MessageList";
 import { ModActionPopover, type ModPopoverState } from "./ModActionPopover";
@@ -37,7 +40,12 @@ export type ChatPaneProps = {
   focused: boolean;
   /** Called whenever a source's latest conn frame changes, keyed `${platform}:${channel}` as given in `sources`. */
   onStatus?: (status: Record<string, ConnFrame>) => void;
+  /** Live chat arrived (not history): "highlight" when any of it matched a highlight rule or mentions you. */
+  onActivity?: (kind: Activity) => void;
 };
+
+/** What live chat a split got: plain messages, or at least one highlight / mention. */
+export type Activity = "message" | "highlight";
 
 // Used until the real settings arrive (keep in sync with DEFAULT_SETTINGS in src/main/store.js).
 const FALLBACK_SETTINGS: Settings = {
@@ -57,7 +65,15 @@ const FALLBACK_SETTINGS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  highlightRules: [],
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "",
+  highlightVolume: 70,
+  highlightSoundFocused: true,
 };
+
+const NO_RULES: HighlightRule[] = [];
 
 const EMPTY_SCOPED: ProviderScopedMap = { global: new Map(), channel: new Map() };
 const MAX_CARDS = 4;
@@ -80,7 +96,7 @@ function loadHiddenPins(): string[] {
   }
 }
 
-export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps) {
+export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: ChatPaneProps) {
   const rsLive = useSettings();
   const rs = rsLive ?? FALLBACK_SETTINGS;
   const accounts = useAccounts();
@@ -143,6 +159,33 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
   }, [twitchData, personal, rs.sevenTv, rs.bttv, rs.ffz]);
 
   const rows = snap.rows;
+
+  // ---- highlights (Settings > Highlights) ------------------------------------------------------------------
+  const highlighter = useMemo(() => compileHighlights(rs.highlightRules ?? NO_RULES), [rs.highlightRules]);
+  const ownLogin = useMemo(() => {
+    const out: Record<string, { id: string; login: string }> = {};
+    for (const [p, a] of Object.entries(accounts ?? {})) if (a?.user) out[p] = { id: a.user.id, login: (a.user.login || "").toLowerCase() };
+    return out;
+  }, [accounts]);
+  // Rows are immutable (an edit replaces the object), so a row's match is cached by the row object.
+  const ruleCache = useMemo(() => new WeakMap<Row, HighlightRule | null>(), [highlighter, ownLogin]);
+  /** The viewer's own message: never highlighted by a rule and never alerts. */
+  const isOwn = (r: Row): boolean => {
+    const me = ownLogin[r.platform];
+    if (!me || !(r.k === "msg" || r.k === "rumble" || r.k === "kick" || r.k === "youtube" || r.k === "x")) return false;
+    const u = r.m.user as { id?: string; login?: string };
+    return (!!me.id && u.id === me.id) || (!!me.login && (u.login || "").toLowerCase() === me.login);
+  };
+  const ruleOf = (r: Row): HighlightRule | null => {
+    if (!highlighter.size) return null;
+    let hit = ruleCache.get(r);
+    if (hit === undefined) {
+      const input = matchInputOf(r);
+      hit = input && !isOwn(r) ? highlighter.match(input) : null;
+      ruleCache.set(r, hit);
+    }
+    return hit;
+  };
 
   // The viewer's lead-moderator status is read off their own badge in this chat (there is no API for it).
   const leadOf = (sk: string): boolean => {
@@ -283,12 +326,40 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
     return rows.filter((r) => r.k !== "notice" || noticeVisible(r.n, bombs));
   }, [rows]);
 
+  // ---- alerts and tab activity: once per live row (history batches never ring) ----------------------------
+  const live = useRef({ rs, ruleOf, isOwn, meLoginLower, onActivity });
+  live.current = { rs, ruleOf, isOwn, meLoginLower, onActivity };
+  const seenOrd = useRef(0);
+  useEffect(() => {
+    const { rs, ruleOf, isOwn, meLoginLower, onActivity } = live.current;
+    let maxOrd = seenOrd.current;
+    let activity: Activity | null = null;
+    for (const r of rows) {
+      const ord = r.ord ?? 0;
+      if (ord <= seenOrd.current) continue;
+      if (ord > maxOrd) maxOrd = ord;
+      if (r.backlog || r.k === "modfeed" || isOwn(r)) continue;
+      if (r.k === "notice" && !noticeVisible(r.n, new Set())) continue;
+      activity ??= "message";
+      const mention = r.k === "msg" && textMentionsLogin(r.m.text, meLoginLower);
+      const rule = mention ? null : ruleOf(r);
+      if (!mention && !rule) continue;
+      activity = "highlight";
+      const key = `${r.sk.toLowerCase()}|${r.key.slice(r.sk.length)}`;
+      alertOnce(key, mention ? { sound: rs.mentionSound, soundFile: "", flash: rs.mentionFlash } : { sound: rule!.sound, soundFile: rule!.soundFile, flash: rule!.flash }, rs);
+    }
+    seenOrd.current = maxOrd;
+    if (activity) onActivity?.(activity);
+  }, [rows]);
+
   const renderRow = (r: Row): ReactNode => {
     switch (r.k) {
       case "msg": {
         const env = twitchEnvOf(r.sk);
         if (!env) return null;
-        return <TwitchMessageRow key={r.key} row={r} ctx={ctx} env={env} susp={store.sources.get(r.sk)?.suspicious.get(r.m.user.id)?.status} modMode={inlineMod} />;
+        return (
+          <TwitchMessageRow key={r.key} row={r} ctx={ctx} env={env} susp={store.sources.get(r.sk)?.suspicious.get(r.m.user.id)?.status} modMode={inlineMod} rule={ruleOf(r)} />
+        );
       }
       case "notice": {
         const env = twitchEnvOf(r.sk);
@@ -302,16 +373,16 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
       }
       case "rumble": {
         const env = coEnvOf(r.sk);
-        return env ? <RumbleRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} /> : null;
+        return env ? <RumbleRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} rule={ruleOf(r)} /> : null;
       }
       case "kick": {
         const env = coEnvOf(r.sk);
-        return env ? <KickRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} /> : null;
+        return env ? <KickRow key={r.key} row={r} ctx={ctx} env={env} modMode={inlineMod} rule={ruleOf(r)} /> : null;
       }
       case "youtube":
-        return <YouTubeRow key={r.key} row={r} ctx={ctx} />;
+        return <YouTubeRow key={r.key} row={r} ctx={ctx} rule={ruleOf(r)} />;
       case "x":
-        return <XRow key={r.key} row={r} ctx={ctx} />;
+        return <XRow key={r.key} row={r} ctx={ctx} rule={ruleOf(r)} />;
     }
   };
 

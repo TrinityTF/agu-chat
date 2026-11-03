@@ -4,6 +4,7 @@ import { agu } from "../bridge";
 import type { Layout, SourceRef, SplitNode, Tab } from "../protocol";
 import { NotebookTabs, type TabActions } from "./NotebookTabs";
 import { SplitView } from "./SplitView";
+import type { Activity } from "../chat/ChatPane";
 import type { SplitActions } from "./SplitHeader";
 import { ChannelDialog } from "./ChannelDialog";
 import { SettingsDialog } from "./SettingsDialog";
@@ -21,6 +22,8 @@ export function App() {
   const [focusByTab, setFocusByTab] = useState<Record<string, string>>({});
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [barDismissed, setBarDismissed] = useState<string | null>(null);
+  // Tabs that got live chat while not selected: "message" (a subtle marker) or "highlight" (a strong one).
+  const [unread, setUnread] = useState<Record<string, Activity>>({});
   const updater = useUpdater();
 
   // ---- load + debounced save ------------------------------------------------
@@ -74,6 +77,32 @@ export function App() {
     },
     [focusByTab],
   );
+
+  // ---- tab activity markers --------------------------------------------------------
+  const activeId = activeTab?.id ?? null;
+  const activeRef = useRef(activeId);
+  activeRef.current = activeId;
+  useEffect(() => {
+    if (!activeId) return;
+    setUnread((u) => {
+      if (!(activeId in u)) return u;
+      const next = { ...u };
+      delete next[activeId];
+      return next;
+    });
+  }, [activeId]);
+  const activityFns = useRef(new Map<string, (kind: Activity) => void>()).current;
+  const activityFor = (tabId: string) => {
+    let fn = activityFns.get(tabId);
+    if (!fn) {
+      fn = (kind) => {
+        if (tabId === activeRef.current) return;
+        setUnread((u) => (u[tabId] === kind || u[tabId] === "highlight" ? u : { ...u, [tabId]: kind }));
+      };
+      activityFns.set(tabId, fn);
+    }
+    return fn;
+  };
 
   // ---- tab / split operations (all take ids, so they stay stable) ------------------
   const updateTab = useCallback((tabId: string, fn: (t: Tab) => Tab) => {
@@ -242,7 +271,7 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col bg-[var(--color-app)]">
-      <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} />
+      <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} />
       {showBar && updater && (
         <div className="flex h-6 shrink-0 items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-accent-strong)] px-3 text-[12px] text-white">
           <span className="min-w-0 flex-1 truncate">Agu Chat {updater.version} is ready — Restart to update</span>
@@ -259,7 +288,7 @@ export function App() {
           const isActive = t.id === activeTab.id;
           return (
             <div key={t.id} className={"absolute inset-0 " + (isActive ? "" : "pointer-events-none invisible")} aria-hidden={!isActive} data-tab-panel={t.id}>
-              <SplitView root={t.root} focusedId={focusedOf(t)} tabActive={isActive} actions={splitActionsFor(t.id)} />
+              <SplitView root={t.root} focusedId={focusedOf(t)} tabActive={isActive} actions={splitActionsFor(t.id)} onActivity={activityFor(t.id)} />
             </div>
           );
         })}

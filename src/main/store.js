@@ -4,6 +4,7 @@ import { app, safeStorage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { sanitizeHighlightRules } from "./highlightRules.js";
 
 // Keep in sync with Settings in src/renderer/protocol.ts.
 export const DEFAULT_SETTINGS = {
@@ -23,7 +24,26 @@ export const DEFAULT_SETTINGS = {
   deletedMessages: "strike", // strike | hide | show
   showModButtons: true,
   showPlatformMarks: true,
+  highlightRules: [], // see src/main/highlightRules.js
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "", // a file in userData/sounds, "" = the built-in ping
+  highlightVolume: 70, // 0-100
+  highlightSoundFocused: true,
 };
+
+// Keys whose value is not a plain string/number/boolean: each gets its own check. A sanitizer returns the
+// cleaned value, or undefined to reject the patch for that key.
+const SANITIZE = {
+  highlightRules: sanitizeHighlightRules,
+  highlightVolume: (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : undefined),
+};
+
+function clean(k, v) {
+  if (SANITIZE[k]) return SANITIZE[k](v);
+  if (typeof v !== typeof DEFAULT_SETTINGS[k]) return undefined;
+  return typeof v === "string" ? v.trim() : v;
+}
 
 const dir = () => app.getPath("userData");
 const file = (name) => path.join(dir(), name);
@@ -50,15 +70,23 @@ let settings = null;
 
 export const settingsStore = {
   get() {
-    if (!settings) settings = { ...DEFAULT_SETTINGS, ...readJson("settings.json", {}) };
+    if (!settings) {
+      settings = { ...DEFAULT_SETTINGS };
+      const saved = readJson("settings.json", {});
+      for (const [k, v] of Object.entries(saved && typeof saved === "object" ? saved : {})) {
+        if (!(k in DEFAULT_SETTINGS)) continue;
+        const c = clean(k, v);
+        if (c !== undefined) settings[k] = c;
+      }
+    }
     return { ...settings };
   },
   set(patch) {
     const next = { ...this.get() };
     for (const [k, v] of Object.entries(patch || {})) {
       if (!(k in DEFAULT_SETTINGS)) continue;
-      if (typeof v !== typeof DEFAULT_SETTINGS[k]) continue;
-      next[k] = typeof v === "string" ? v.trim() : v;
+      const c = clean(k, v);
+      if (c !== undefined) next[k] = c;
     }
     settings = next;
     writeJson("settings.json", settings);

@@ -105,6 +105,12 @@ const settings: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  highlightRules: [],
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "",
+  highlightVolume: 70,
+  highlightSoundFocused: true,
 };
 
 const frameCbs = new Set<(id: string, f: Frame) => void>();
@@ -172,7 +178,8 @@ const agu: AguBridge = {
   },
   layout: { get: async () => null, set: async () => {} },
   updater: { get: async () => ({}) as any, check: async () => {}, install: async () => {}, onChange: () => () => {} },
-  app: { info: async () => ({ version: "dev", packaged: false }), openExternal: async () => {} },
+  app: { info: async () => ({ version: "dev", packaged: false }), openExternal: async () => {}, flash: async () => {} },
+  sounds: { pick: async () => null, read: async () => new Uint8Array() },
 };
 
 (window as any).agu = agu;
