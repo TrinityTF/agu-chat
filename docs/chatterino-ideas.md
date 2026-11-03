@@ -19,8 +19,8 @@ Line format: **feature** — value for Agu Chat — effort (S = a day or less, M
 
 1. ★1 Highlights with phrase/regex/user rules (M)
 2. ★2 Highlight sounds, taskbar flash and toasts (M)
-3. ★3 Ignores (users and phrases, with replacement) (M)
-4. ★4 Split search, Ctrl+F (S)
+3. ★3 Ignores (users and phrases, with replacement) (M) — done
+4. ★4 Split search, Ctrl+F (S) — done (filter only; match highlighting and "search all splits" are still open)
 5. ★5 Tab highlighting on mentions and new messages (S)
 6. ★6 Keyboard shortcuts and a hotkeys editor (M)
 7. ★7 Customizable mod buttons (M)

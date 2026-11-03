@@ -1,10 +1,11 @@
-// Settings dialog: Accounts, Appearance/chat, Highlights, Hotkeys, Mod buttons, Updates, About.
+// Settings dialog: Accounts, Appearance/chat, Highlights, Ignores, Hotkeys, Mod buttons, Updates, About.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { agu } from "../bridge";
 import { useAccounts } from "../hooks";
-import type { AccountState, DevicePrompt, ModButton, ModButtonAction, Platform, Settings, UpdaterState } from "../protocol";
+import { PLATFORMS, type AccountState, type DevicePrompt, type IgnoredPhrase, type ModButton, type ModButtonAction, type Platform, type Settings, type UpdaterState } from "../protocol";
+import { ignoreLogin, phraseError, toggleIgnoredUser } from "../chat/ignores";
 import { PLATFORM_LABEL, PlatformIcon } from "../platformIcons";
-import { ChevronIcon, CopyIcon, XIcon } from "../icons";
+import { ChevronIcon, CopyIcon, TrashIcon, XIcon } from "../icons";
 import { ModButtonFace, ModIcon } from "../chat/ModButtonFace";
 import {
   DEFAULT_MOD_BUTTONS,
@@ -27,11 +28,12 @@ import { HighlightsSection } from "./HighlightsSection";
 
 export const REPO_URL = "https://github.com/TrinityTF/agu-chat";
 
-type Section = "accounts" | "appearance" | "highlights" | "hotkeys" | "modButtons" | "updates" | "about";
+type Section = "accounts" | "appearance" | "highlights" | "ignores" | "hotkeys" | "modButtons" | "updates" | "about";
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "appearance", label: "Appearance and chat" },
   { id: "highlights", label: "Highlights" },
+  { id: "ignores", label: "Ignores" },
   { id: "hotkeys", label: "Hotkeys" },
   { id: "modButtons", label: "Mod buttons" },
   { id: "updates", label: "Updates" },
@@ -72,6 +74,8 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
             <AppearanceSection settings={settings} setSettings={setSettings} />
           ) : section === "highlights" ? (
             <HighlightsSection settings={settings} setSettings={setSettings} />
+          ) : section === "ignores" ? (
+            <IgnoresSection settings={settings} setSettings={setSettings} />
           ) : section === "hotkeys" ? (
             <HotkeysSection settings={settings} setSettings={setSettings} />
           ) : section === "modButtons" ? (
@@ -537,6 +541,209 @@ function AppearanceSection({ settings, setSettings }: { settings: Settings; setS
         </select>
       </Row>
       {bool("showModButtons", "Show mod buttons", "Inline buttons on rows when mod mode is on")}
+    </div>
+  );
+}
+
+// ---- ignores -------------------------------------------------------------------------------
+
+const smallSelect =
+  "rounded border border-[var(--color-line)] bg-[var(--color-app)] px-1.5 py-1 text-[12px] outline-none focus:border-[var(--color-accent)]";
+
+/** A two-state chip like a find bar's ".*" / "Aa" buttons. */
+function Chip({ on, onChange, label, title }: { on: boolean; onChange: (v: boolean) => void; label: string; title: string }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={on}
+      onClick={() => onChange(!on)}
+      className={
+        "shrink-0 rounded border px-1.5 py-1 font-mono text-[11px] leading-none " +
+        (on
+          ? "border-[var(--color-accent)] bg-[var(--color-mention)] text-[var(--color-text)]"
+          : "border-[var(--color-line)] text-[var(--color-faint)] hover:text-[var(--color-text)]")
+      }
+    >
+      {label}
+    </button>
+  );
+}
+
+function IconBtn({ title, onClick }: { title: string; onClick: () => void }) {
+  return (
+    <button type="button" title={title} aria-label={title} onClick={onClick} className="shrink-0 rounded p-1 text-[var(--color-faint)] hover:bg-[var(--color-raised-2)] hover:text-red-400">
+      <TrashIcon className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+const NEW_PHRASE: IgnoredPhrase = { pattern: "", regex: false, caseSensitive: false, action: "hide", replacement: "" };
+
+/** One phrase rule. Text fields are edited locally and saved on blur / Enter (an empty pattern is never saved). */
+function PhraseEditor({
+  value,
+  onSave,
+  onRemove,
+  adding,
+}: {
+  value: IgnoredPhrase;
+  onSave: (p: IgnoredPhrase) => void;
+  onRemove?: () => void;
+  adding?: boolean;
+}) {
+  const [draft, setDraft] = useState(value);
+  // Re-sync only when the saved rule itself changes (not on every unrelated settings broadcast).
+  const saved = JSON.stringify(value);
+  useEffect(() => setDraft(JSON.parse(saved)), [saved]);
+  const err = draft.pattern ? phraseError(draft) : null;
+  const commit = (p: IgnoredPhrase) => {
+    if (adding) return;
+    if (p.pattern && JSON.stringify(p) !== JSON.stringify(value)) onSave(p);
+  };
+  const add = () => {
+    if (!draft.pattern || err) return;
+    onSave(draft);
+    setDraft(NEW_PHRASE);
+  };
+  const set = (patch: Partial<IgnoredPhrase>, save: boolean) => {
+    const next = { ...draft, ...patch };
+    setDraft(next);
+    if (save) commit(next);
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "Enter") return;
+    if (adding) add();
+    else commit(draft);
+  };
+
+  return (
+    <div className="border-b border-[var(--color-line)]/60 py-1.5 last:border-0">
+      <div className="flex items-center gap-1.5">
+        <input
+          value={draft.pattern}
+          onChange={(e) => set({ pattern: e.target.value }, false)}
+          onBlur={() => commit(draft)}
+          onKeyDown={onKey}
+          placeholder={draft.regex ? "Regular expression" : "Phrase"}
+          spellCheck={false}
+          aria-label="Phrase"
+          className={`${inputCls} min-w-0 flex-1 ${draft.regex ? "font-mono" : ""} ${err ? "border-red-500/60" : ""}`}
+        />
+        <Chip on={draft.regex} onChange={(v) => set({ regex: v }, true)} label=".*" title="Regular expression" />
+        <Chip on={draft.caseSensitive} onChange={(v) => set({ caseSensitive: v }, true)} label="Aa" title="Match case" />
+        <select
+          value={draft.action}
+          onChange={(e) => set({ action: e.target.value as IgnoredPhrase["action"] }, true)}
+          className={smallSelect}
+          aria-label="What to do with a match"
+        >
+          <option value="hide">Hide message</option>
+          <option value="replace">Replace with</option>
+        </select>
+        {draft.action === "replace" && (
+          <input
+            value={draft.replacement}
+            onChange={(e) => set({ replacement: e.target.value }, false)}
+            onBlur={() => commit(draft)}
+            onKeyDown={onKey}
+            placeholder="(nothing)"
+            spellCheck={false}
+            aria-label="Replacement"
+            className={`${inputCls} !w-28 shrink-0`}
+          />
+        )}
+        {adding ? (
+          <Btn small primary disabled={!draft.pattern || !!err} onClick={add}>
+            Add
+          </Btn>
+        ) : (
+          onRemove && <IconBtn title="Remove" onClick={onRemove} />
+        )}
+      </div>
+      {err && <div className="mt-1 text-[11px] text-red-400">Invalid regular expression: {err}</div>}
+    </div>
+  );
+}
+
+function IgnoresSection({ settings, setSettings }: { settings: Settings; setSettings: SetSettings }) {
+  const users = settings.ignoredUsers ?? [];
+  const phrases = settings.ignoredPhrases ?? [];
+  const [platform, setPlatform] = useState<Platform>("twitch");
+  const [login, setLogin] = useState("");
+
+  const addUser = () => {
+    const l = ignoreLogin({ login });
+    if (!l) return;
+    setSettings({ ignoredUsers: toggleIgnoredUser(users, platform, l, true) });
+    setLogin("");
+  };
+  const sortedUsers = users
+    .map((u, i) => ({ u, i }))
+    .sort((a, b) => PLATFORMS.indexOf(a.u.platform) - PLATFORMS.indexOf(b.u.platform) || a.u.login.localeCompare(b.u.login));
+
+  return (
+    <div>
+      <H>Ignored users</H>
+      <div className="mb-2 text-[11px] text-[var(--color-faint)]">
+        Messages from these users are hidden in every split. You can also use "Ignore user" on a user card.
+      </div>
+      <div className="mb-2 flex items-center gap-1.5">
+        <select value={platform} onChange={(e) => setPlatform(e.target.value as Platform)} className={smallSelect} aria-label="Platform">
+          {PLATFORMS.map((p) => (
+            <option key={p} value={p}>
+              {PLATFORM_LABEL[p]}
+            </option>
+          ))}
+        </select>
+        <input
+          value={login}
+          onChange={(e) => setLogin(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addUser()}
+          placeholder={platform === "youtube" ? "Channel name" : "Username"}
+          spellCheck={false}
+          aria-label="Username to ignore"
+          className={`${inputCls} min-w-0 flex-1`}
+        />
+        <Btn small primary disabled={!ignoreLogin({ login })} onClick={addUser}>
+          Add
+        </Btn>
+      </div>
+      <Card>
+        {sortedUsers.length === 0 ? (
+          <div className="text-[var(--color-faint)]">No ignored users.</div>
+        ) : (
+          sortedUsers.map(({ u, i }) => (
+            <div key={`${u.platform}:${u.login}`} className="flex items-center gap-2 border-b border-[var(--color-line)]/60 py-1 last:border-0">
+              <PlatformIcon platform={u.platform} className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{u.login}</span>
+              <IconBtn title={`Stop ignoring ${u.login}`} onClick={() => setSettings({ ignoredUsers: users.filter((_, j) => j !== i) })} />
+            </div>
+          ))
+        )}
+      </Card>
+
+      <H>Ignored phrases</H>
+      <div className="mb-2 text-[11px] text-[var(--color-faint)]">
+        A message containing the phrase is hidden, or the matching text is replaced. <span className="font-mono">.*</span> treats the phrase as a regular
+        expression, <span className="font-mono">Aa</span> matches case.
+      </div>
+      <PhraseEditor value={NEW_PHRASE} adding onSave={(p) => setSettings({ ignoredPhrases: [...phrases, p] })} />
+      <Card>
+        {phrases.length === 0 ? (
+          <div className="text-[var(--color-faint)]">No ignored phrases.</div>
+        ) : (
+          phrases.map((p, i) => (
+            <PhraseEditor
+              key={i}
+              value={p}
+              onSave={(next) => setSettings({ ignoredPhrases: phrases.map((x, j) => (j === i ? next : x)) })}
+              onRemove={() => setSettings({ ignoredPhrases: phrases.filter((_, j) => j !== i) })}
+            />
+          ))
+        )}
+      </Card>
     </div>
   );
 }

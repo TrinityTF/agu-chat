@@ -6,12 +6,14 @@
 // sources (single channel or merged co-chat) from one ChatStore; the site's page chrome (headers, layout
 // picker, settings popovers, Modes panel, second channel) is not part of the split.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { agu } from "../bridge";
 import { useAccounts, useSettings } from "../hooks";
 import type { ConnFrame, HighlightRule, Settings, SourceRef } from "../protocol";
 import { alertOnce } from "../alerts";
 import { textMentionsLogin } from "./chatText";
 import { compileHighlights, matchInputOf } from "./highlights";
 import { EmoteTipLayer } from "./emoteTip";
+import { compileIgnores, filterIgnored, ignoreLogin, isUserIgnored, toggleIgnoredUser } from "./ignores";
 import { MessageList } from "./MessageList";
 import { ModActionPopover, type ModPopoverState } from "./ModActionPopover";
 import { fetchCoCaps, NO_CO_CAPS, ALL_FALSE_CAPS, badgeNames, REACH_ALL, modReach, type CoCaps, type ModReach } from "./modCaps";
@@ -75,6 +77,8 @@ const FALLBACK_SETTINGS: Settings = {
   highlightSoundFile: "",
   highlightVolume: 70,
   highlightSoundFocused: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 const NO_RULES: HighlightRule[] = [];
@@ -358,19 +362,40 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
     return rows.filter((r) => r.k !== "notice" || noticeVisible(r.n, bombs));
   }, [rows]);
 
+  // Ignored users / phrases. Results are cached per row object (rows are immutable; a change makes a new
+  // object), and the cache is thrown away when the rules change.
+  const ignores = useMemo(() => compileIgnores(rs.ignoredUsers, rs.ignoredPhrases), [rs.ignoredUsers, rs.ignoredPhrases]);
+  const ignoreCache = useMemo(() => new WeakMap<Row, Row | null>(), [ignores]);
+  const shown = useMemo(() => filterIgnored(visible, ignores, ignoreCache), [visible, ignores, ignoreCache]);
+
+  const setIgnored = useCallback(
+    (platform: SourceRef["platform"], login: string, on: boolean) => {
+      // Read the latest list from main so two splits toggling at once don't overwrite each other.
+      void agu.settings
+        .get()
+        .then((cur) => agu.settings.set({ ignoredUsers: toggleIgnoredUser(cur.ignoredUsers ?? [], platform, login, on) }))
+        .then(
+          () => toast(on ? `Ignoring ${login}` : `No longer ignoring ${login}`),
+          () => toast("Couldn't save the ignore list", "warn"),
+        );
+    },
+    [toast],
+  );
+
   // ---- alerts and tab activity: once per live row (history batches never ring) ----------------------------
-  const live = useRef({ rs, ruleOf, isOwn, meLoginLower, onActivity });
-  live.current = { rs, ruleOf, isOwn, meLoginLower, onActivity };
+  const isIgnored = useCallback((r: Row) => filterIgnored([r], ignores, ignoreCache).length === 0, [ignores, ignoreCache]);
+  const live = useRef({ rs, ruleOf, isOwn, isIgnored, meLoginLower, onActivity });
+  live.current = { rs, ruleOf, isOwn, isIgnored, meLoginLower, onActivity };
   const seenOrd = useRef(0);
   useEffect(() => {
-    const { rs, ruleOf, isOwn, meLoginLower, onActivity } = live.current;
+    const { rs, ruleOf, isOwn, isIgnored, meLoginLower, onActivity } = live.current;
     let maxOrd = seenOrd.current;
     let activity: Activity | null = null;
     for (const r of rows) {
       const ord = r.ord ?? 0;
       if (ord <= seenOrd.current) continue;
       if (ord > maxOrd) maxOrd = ord;
-      if (r.backlog || r.k === "modfeed" || isOwn(r)) continue;
+      if (r.backlog || r.k === "modfeed" || isOwn(r) || isIgnored(r)) continue; // ignored rows never ring
       if (r.k === "notice" && !noticeVisible(r.n, new Set())) continue;
       activity ??= "message";
       const mention = r.k === "msg" && textMentionsLogin(r.m.text, meLoginLower);
@@ -565,11 +590,12 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
           );
         })}
 
-      <MessageList rows={visible} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} />
+      <MessageList rows={shown} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} focused={focused} />
 
       {cards.map((c) => {
         const ref = refOf(c.sk);
         if (!ref) return null;
+        const ignoreAs = ignoreLogin(c.user);
         return (
           <UserCard
             key={c.id}
@@ -589,6 +615,8 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
             onFront={() => frontCard(c.id)}
             onMove={(l, t, a) => moveCard(c.id, l, t, a)}
             onTwitchDeleted={(id) => store.markDeleted(c.sk, id)}
+            ignored={!!ignoreAs && isUserIgnored(rs.ignoredUsers ?? [], c.platform, ignoreAs)}
+            onIgnore={ignoreAs ? (on) => setIgnored(c.platform, ignoreAs, on) : undefined}
           />
         );
       })}

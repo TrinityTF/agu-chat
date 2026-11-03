@@ -125,6 +125,13 @@ export const EyeOffIcon = (p: P) => (
   </Icon>
 );
 
+export const SearchIcon = (p: P) => (
+  <Icon {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </Icon>
+);
+
 export const XIcon = (p: P) => (
   <Icon {...p}>
     <path d="M18 6 6 18" />

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { sanitizeHighlightRules } from "./highlightRules.js";
+import { sanitizeIgnoredPhrases, sanitizeIgnoredUsers, sanitizeSetting } from "./settingsSanitize.js";
 
 // Keep in sync with Settings in src/renderer/protocol.ts.
 export const DEFAULT_SETTINGS = {
@@ -37,6 +38,8 @@ export const DEFAULT_SETTINGS = {
   highlightSoundFile: "", // a file in userData/sounds, "" = the built-in ping
   highlightVolume: 70, // 0-100
   highlightSoundFocused: true,
+  ignoredUsers: [], // [{ platform, login }] (see settingsSanitize.js)
+  ignoredPhrases: [], // [{ pattern, regex, caseSensitive, action: "hide" | "replace", replacement }]
 };
 
 const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -70,13 +73,14 @@ const SANITIZE = {
       }));
   },
   highlightRules: sanitizeHighlightRules,
+  ignoredUsers: (v) => sanitizeIgnoredUsers(v) ?? undefined,
+  ignoredPhrases: (v) => sanitizeIgnoredPhrases(v) ?? undefined,
   highlightVolume: (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : undefined),
 };
 
 function clean(k, v) {
   if (Object.hasOwn(SANITIZE, k)) return SANITIZE[k](v);
-  if (typeof v !== typeof DEFAULT_SETTINGS[k]) return undefined;
-  return typeof v === "string" ? v.trim() : v;
+  return sanitizeSetting(k, v, DEFAULT_SETTINGS); // scalars: must have the default's type
 }
 
 const dir = () => app.getPath("userData");

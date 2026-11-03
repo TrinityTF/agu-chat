@@ -52,6 +52,18 @@ export type HighlightRule = {
   flash: boolean;
 };
 
+/** A user whose messages are hidden, on one platform. `login` is lowercase, without "@". */
+export type IgnoredUser = { platform: Platform; login: string };
+/** A phrase (plain text or a regular expression) that hides a message or replaces the matched text. */
+export type IgnoredPhrase = {
+  pattern: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  action: "hide" | "replace";
+  /** Literal text put in place of each match when `action` is "replace". */
+  replacement: string;
+};
+
 // Keep in sync with DEFAULT_SETTINGS in src/main/store.js.
 export type Settings = {
   twitchClientId: string;
@@ -84,6 +96,8 @@ export type Settings = {
   highlightVolume: number;
   /** Play alert sounds while the window is focused too (the taskbar only flashes when it isn't). */
   highlightSoundFocused: boolean;
+  ignoredUsers: IgnoredUser[];
+  ignoredPhrases: IgnoredPhrase[];
 };
 
 export type ModButtonAction = "ban" | "timeout" | "delete" | "command";

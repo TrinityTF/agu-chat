@@ -39,6 +39,8 @@ const DEFAULTS: Settings = {
   highlightSoundFile: "",
   highlightVolume: 70,
   highlightSoundFocused: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 function createMock(): AguBridge {

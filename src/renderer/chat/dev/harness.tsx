@@ -114,6 +114,8 @@ const settings: Settings = {
   highlightSoundFile: "",
   highlightVolume: 70,
   highlightSoundFocused: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 const frameCbs = new Set<(id: string, f: Frame) => void>();
