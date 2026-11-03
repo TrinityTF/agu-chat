@@ -33,8 +33,8 @@ effect at once: it re-checks immediately. `<base>` is `package.json`'s version w
 - The run number only ever grows, so betas of the same base always sort in release order.
 
 Local builds: `npm run dist` builds the installer into `dist/` without publishing (version stays whatever
-`package.json` says, e.g. `Agu-Chat-Setup-0.0.1-beta.1.exe`). `npm run icon` re-renders `build/icon.png` from
-`build/icon.svg`.
+`package.json` says, e.g. `Agu-Chat-Setup-0.0.1-beta.1.exe`). The app icon is `build/icon.png` (1024x1024,
+transparent); electron-builder makes the .ico from it.
 
 ## What the app does (`src/main/updater.js`)
 
