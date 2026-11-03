@@ -8,6 +8,7 @@ import { modules } from "./platforms.js";
 import * as updater from "./updater.js";
 import { pickSound, readSound } from "./sounds.js";
 import { log } from "./log.js";
+import { loadWindowState, placeBounds, trackWindowState } from "./windowState.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DEV_URL = process.env.AGU_DEV_URL || "";
@@ -171,9 +172,13 @@ function popoutOptions(features) {
 }
 
 function createWindow() {
+  const saved = loadWindowState();
+  const work = [screen.getPrimaryDisplay(), ...screen.getAllDisplays().filter((d) => d.id !== screen.getPrimaryDisplay().id)].map((d) => d.workArea);
+  const at = placeBounds(saved, work);
   win = new BrowserWindow({
     width: 1280,
     height: 800,
+    ...(at || {}),
     minWidth: 280,
     minHeight: 300,
     frame: false,
@@ -188,6 +193,8 @@ function createWindow() {
       sandbox: true,
     },
   });
+  if (saved?.maximized) win.maximize();
+  trackWindowState(win);
   const id = win.id;
   win.on("focus", () => win?.flashFrame(false));
   win.on("maximize", () => win?.webContents.send("win:maximized", true));
