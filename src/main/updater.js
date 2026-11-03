@@ -71,8 +71,14 @@ function friendlyError(err) {
 const isNothingPublished = (err) => {
   // electron-updater wraps these (verified against GitHubProvider.js): an empty releases feed is "No published
   // versions on GitHub"; stable with no full release is "Unable to find latest version ... HttpError: 404".
+  // A bare "HttpError: 404" on the beta feed means the repo itself is missing (or private) — seen on a packaged
+  // build before the repo existed. Nothing to install either way, so it is not shown as an error.
   const message = String(err?.message || "");
-  return /No published versions/i.test(message) || (/Unable to find latest version/i.test(message) && /\b404\b/.test(message));
+  return (
+    /No published versions/i.test(message) ||
+    (/Unable to find latest version/i.test(message) && /\b404\b/.test(message)) ||
+    /^HttpError: 404\b/.test(message.trim())
+  );
 };
 
 const isCancel = (err) => err?.name === "CancellationError" || /cancel/i.test(String(err?.message || ""));
