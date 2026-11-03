@@ -18,6 +18,11 @@ and run it. Agu Chat keeps itself up to date after that.
 - **Moderation:** mod mode adds mod buttons to every message: ban, timeout and delete by default, or your own set (any timeout length, or a command such as `/warn {user} …`) in **Settings → Mod buttons**. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
 - **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **AutoMod:** approve or deny held messages right in chat.
+- **Highlights:** colour messages that contain a word or phrase, match a regular expression, or come from a
+  certain user, on every platform. Each rule can play a sound (a built-in ping or your own file) and flash the
+  taskbar. Messages that mention your Twitch name are highlighted too.
+- **Tab markers:** a tab you're not looking at shows a dot when new messages arrive, and lights up when one
+  of them is a highlight.
 - **Typing:** Tab completes emotes and names; `:` searches emotes, `@` mentions people, `/` lists commands; there's an emote picker, and Up brings back what you sent.
 - **Recent history** loads when you open a Twitch channel, so a new split isn't empty.
 - **Automatic updates** on the Beta or Stable channel.
@@ -59,6 +64,7 @@ Agu Chat uses your own free Twitch app to log in. You set it up once:
 | Mod mode | The sword button on a split's header |
 | User card | Click a name (cards can be dragged; several can be open) |
 | New line in a message | Shift+Enter |
+| Highlight rules and alert sounds | Settings → Highlights |
 | Settings | Ctrl+P or the gear icon |
 | Change shortcuts | Settings → Hotkeys: click `+` next to an action and press the keys |
 | Change mod buttons | Settings → Mod buttons |

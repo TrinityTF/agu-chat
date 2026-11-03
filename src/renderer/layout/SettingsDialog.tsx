@@ -1,4 +1,4 @@
-// Settings dialog: Accounts, Appearance/chat, Hotkeys, Mod buttons, Updates, About.
+// Settings dialog: Accounts, Appearance/chat, Highlights, Hotkeys, Mod buttons, Updates, About.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { agu } from "../bridge";
 import { useAccounts } from "../hooks";
@@ -23,13 +23,15 @@ import {
 import { HOTKEY_ACTIONS, actionLabel, eventToBinding, findConflicts, hotkeyRecording, isUsableBinding, resolveHotkeys, toOverrides, type HotkeyAction, type HotkeyTable } from "./hotkeys";
 import { Btn, Modal, Toggle, copyText, inputCls } from "./ui";
 import { useAppInfo, useLiveSettings, useUpdater } from "./useBridge";
+import { HighlightsSection } from "./HighlightsSection";
 
 export const REPO_URL = "https://github.com/TrinityTF/agu-chat";
 
-type Section = "accounts" | "appearance" | "hotkeys" | "modButtons" | "updates" | "about";
+type Section = "accounts" | "appearance" | "highlights" | "hotkeys" | "modButtons" | "updates" | "about";
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "appearance", label: "Appearance and chat" },
+  { id: "highlights", label: "Highlights" },
   { id: "hotkeys", label: "Hotkeys" },
   { id: "modButtons", label: "Mod buttons" },
   { id: "updates", label: "Updates" },
@@ -68,6 +70,8 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
             <AccountsSection settings={settings} setSettings={setSettings} />
           ) : section === "appearance" ? (
             <AppearanceSection settings={settings} setSettings={setSettings} />
+          ) : section === "highlights" ? (
+            <HighlightsSection settings={settings} setSettings={setSettings} />
           ) : section === "hotkeys" ? (
             <HotkeysSection settings={settings} setSettings={setSettings} />
           ) : section === "modButtons" ? (

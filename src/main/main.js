@@ -6,6 +6,7 @@ import { settingsStore, secretStore, layoutStore, events as storeEvents } from "
 import { SourceManager, makeApiRouter } from "./relay.js";
 import { modules } from "./platforms.js";
 import * as updater from "./updater.js";
+import { pickSound, readSound } from "./sounds.js";
 import { log } from "./log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -96,6 +97,14 @@ function wireIpc() {
   handle("app:openExternal", (_e, url) => {
     if (/^https?:\/\//i.test(String(url))) return shell.openExternal(String(url));
   });
+  // Highlight alerts: flash the taskbar button, but only when the user isn't already looking at the window.
+  handle("app:flash", (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (w && !w.isDestroyed() && !w.isFocused()) w.flashFrame(true);
+  });
+
+  handle("sounds:pick", (e) => pickSound(BrowserWindow.fromWebContents(e.sender)));
+  handle("sounds:read", (_e, file) => readSound(String(file)));
 }
 
 function createWindow() {
@@ -116,6 +125,7 @@ function createWindow() {
     },
   });
   const id = win.id;
+  win.on("focus", () => win?.flashFrame(false));
   win.on("closed", () => {
     relay.dropOwner(id);
     win = null;

@@ -46,5 +46,10 @@ contextBridge.exposeInMainWorld("agu", {
   app: {
     info: () => call("app:info"),
     openExternal: (url) => call("app:openExternal", url),
+    flash: () => call("app:flash"),
+  },
+  sounds: {
+    pick: () => call("sounds:pick"),
+    read: (file) => call("sounds:read", file),
   },
 });

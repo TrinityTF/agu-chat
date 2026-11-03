@@ -4,6 +4,7 @@ import { app, safeStorage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { sanitizeHighlightRules } from "./highlightRules.js";
 
 // Keep in sync with Settings in src/renderer/protocol.ts.
 export const DEFAULT_SETTINGS = {
@@ -30,14 +31,21 @@ export const DEFAULT_SETTINGS = {
     { id: "timeout", action: "timeout", icon: "clock", label: "", seconds: 600, command: "" },
     { id: "delete", action: "delete", icon: "trash", label: "", seconds: 0, command: "" },
   ],
+  highlightRules: [], // see src/main/highlightRules.js
+  mentionSound: false,
+  mentionFlash: true,
+  highlightSoundFile: "", // a file in userData/sounds, "" = the built-in ping
+  highlightVolume: 70, // 0-100
+  highlightSoundFocused: true,
 };
 
-// Keys whose default is an object or array: typeof can't tell them apart, so each gets a shape check that
-// returns a clean copy (or undefined to reject the value). The renderer validates the meaning on read.
 const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
 
-export const STRUCTURED = {
+// Keys whose value is not a plain string/number/boolean: each gets its own check. A sanitizer returns the
+// cleaned value, or undefined to reject the patch for that key.
+// The renderer validates the meaning of structured values on read; these only check their shape.
+const SANITIZE = {
   hotkeys(v) {
     if (!isPlainObject(v)) return undefined;
     const out = {};
@@ -61,7 +69,15 @@ export const STRUCTURED = {
         command: str(b.command, 500),
       }));
   },
+  highlightRules: sanitizeHighlightRules,
+  highlightVolume: (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : undefined),
 };
+
+function clean(k, v) {
+  if (Object.hasOwn(SANITIZE, k)) return SANITIZE[k](v);
+  if (typeof v !== typeof DEFAULT_SETTINGS[k]) return undefined;
+  return typeof v === "string" ? v.trim() : v;
+}
 
 const dir = () => app.getPath("userData");
 const file = (name) => path.join(dir(), name);
@@ -88,20 +104,23 @@ let settings = null;
 
 export const settingsStore = {
   get() {
-    if (!settings) settings = { ...structuredClone(DEFAULT_SETTINGS), ...readJson("settings.json", {}) };
-    return structuredClone(settings);
+    if (!settings) {
+      settings = structuredClone(DEFAULT_SETTINGS);
+      const saved = readJson("settings.json", {});
+      for (const [k, v] of Object.entries(saved && typeof saved === "object" ? saved : {})) {
+        if (!Object.hasOwn(DEFAULT_SETTINGS, k)) continue;
+        const c = clean(k, v);
+        if (c !== undefined) settings[k] = c;
+      }
+    }
+    return structuredClone(settings); // callers may mutate arrays/objects; never hand out the live ones
   },
   set(patch) {
     const next = { ...this.get() };
     for (const [k, v] of Object.entries(patch || {})) {
       if (!Object.hasOwn(DEFAULT_SETTINGS, k)) continue;
-      if (Object.hasOwn(STRUCTURED, k)) {
-        const clean = STRUCTURED[k](v);
-        if (clean !== undefined) next[k] = clean;
-        continue;
-      }
-      if (typeof v !== typeof DEFAULT_SETTINGS[k]) continue;
-      next[k] = typeof v === "string" ? v.trim() : v;
+      const c = clean(k, v);
+      if (c !== undefined) next[k] = c;
     }
     settings = next;
     writeJson("settings.json", settings);
