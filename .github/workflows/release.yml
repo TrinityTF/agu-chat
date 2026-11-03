@@ -1,0 +1,99 @@
+# Builds the Windows installer and publishes it as a GitHub release; installed copies of Agu Chat pick it up.
+#   * every push to main            -> beta release   "<base>-beta.<run number>" (GitHub prerelease, never "latest")
+#   * manual run, channel = stable  -> stable release "<base>"                    (full release, marked "latest")
+# Beta users follow prereleases and stable releases; stable users only follow full releases (docs/RELEASING.md).
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel (beta = prerelease, stable = full release)'
+        type: choice
+        options: [beta, stable]
+        default: beta
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'beta' }}
+    steps:
+      - name: Stable releases come from main only
+        if: env.CHANNEL == 'stable' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          echo "Stable releases must be run from the main branch."
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history and tags: version numbering and release notes read them
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Set version and release notes
+        id: release
+        shell: bash
+        run: node scripts/prepare-release.mjs "$CHANNEL" "${{ github.run_number }}"
+
+      # The draft release is created up front; electron-builder only uploads files into it
+      # (letting it create the release races between its parallel uploads).
+      - name: Create draft release
+        shell: bash
+        run: |
+          flags=""
+          if [ "${{ steps.release.outputs.prerelease }}" = "true" ]; then flags="--prerelease"; fi
+          gh release create "${{ steps.release.outputs.tag }}" --draft $flags --title "${{ steps.release.outputs.title }}" --target "$GITHUB_SHA" --notes-file build/release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build installer and upload it
+        shell: bash
+        run: npm run release # vite build, then electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check the update files were uploaded
+        shell: bash
+        run: |
+          assets="$(gh release view "${{ steps.release.outputs.tag }}" --json assets --jq '.assets[].name')"
+          echo "$assets"
+          echo "$assets" | grep -q '\.exe$' && echo "$assets" | grep -q '\.yml$' && echo "$assets" | grep -q '\.blockmap$'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Published only once every file is there, so the app never sees a half-uploaded release.
+      # Beta = prerelease and never "latest" (stable users' updater reads /releases/latest); stable = "latest".
+      - name: Publish release
+        shell: bash
+        run: |
+          if [ "${{ steps.release.outputs.prerelease }}" = "true" ]; then
+            gh release edit "${{ steps.release.outputs.tag }}" --draft=false --prerelease --latest=false
+          else
+            gh release edit "${{ steps.release.outputs.tag }}" --draft=false --prerelease=false --latest
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
