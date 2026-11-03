@@ -70,6 +70,9 @@ const FALLBACK_SETTINGS: Settings = {
   sevenTvCosmetics: true,
   deletedMessages: "strike",
   showModButtons: true,
+  showModActions: true,
+  showAutomod: true,
+  pauseChat: "scroll",
   showPlatformMarks: true,
   hotkeys: {},
   modButtons: DEFAULT_MOD_BUTTONS,
@@ -365,8 +368,10 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
   const visible = useMemo(() => {
     const bombs = new Set<string>();
     for (const r of rows) if (r.k === "notice" && r.n.giftId && /submysterygift$/.test(r.n.sourceMsgId || r.n.msgId)) bombs.add(r.n.giftId);
-    return rows.filter((r) => r.k !== "notice" || noticeVisible(r.n, bombs));
-  }, [rows]);
+    return rows.filter(
+      (r) => (r.k !== "notice" || noticeVisible(r.n, bombs)) && (r.k !== "modfeed" || rs.showModActions) && (r.k !== "automod" || rs.showAutomod),
+    );
+  }, [rows, rs.showModActions, rs.showAutomod]);
 
   // Ignored users / phrases. Results are cached per row object (rows are immutable; a change makes a new
   // object), and the cache is thrown away when the rules change.
@@ -596,7 +601,7 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
           );
         })}
 
-      <MessageList rows={shown} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} focused={focused} />
+      <MessageList rows={shown} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} focused={focused} pauseOn={rs.pauseChat} />
 
       {cards.map((c) => {
         const ref = refOf(c.sk);

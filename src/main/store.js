@@ -25,6 +25,9 @@ export const DEFAULT_SETTINGS = {
   sevenTvCosmetics: true,
   deletedMessages: "strike", // strike | hide | show
   showModButtons: true,
+  showModActions: true, // the mod log lines in chat (bans, timeouts, mode changes)
+  showAutomod: true, // AutoMod's held messages, with Allow / Deny
+  pauseChat: "scroll", // scroll | hover | alt: what holds the chat still, besides scrolling up
   showPlatformMarks: true,
   hotkeys: {}, // action id -> ["Ctrl+T", ...]; only the actions the user changed
   // Inline mod-mode buttons, in order. Same defaults as DEFAULT_MOD_BUTTONS in src/renderer/chat/modButtons.ts.

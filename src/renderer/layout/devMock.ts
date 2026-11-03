@@ -14,6 +14,10 @@ import type {
 } from "../protocol";
 import { DEFAULT_MOD_BUTTONS } from "../chat/modButtons";
 
+const mockModes = { emote_mode: false, follower_mode: false, follower_mode_duration: 0, slow_mode: true, slow_mode_wait_time: 30, subscriber_mode: false, unique_chat_mode: false };
+let mockShield = false;
+let mockTerms = [{ id: "1", text: "spoiler" }];
+
 const DEFAULTS: Settings = {
   twitchClientId: "",
   alwaysOnTop: false,
@@ -31,6 +35,9 @@ const DEFAULTS: Settings = {
   sevenTvCosmetics: true,
   deletedMessages: "strike",
   showModButtons: true,
+  showModActions: true,
+  showAutomod: true,
+  pauseChat: "scroll",
   showPlatformMarks: true,
   hotkeys: {},
   modButtons: DEFAULT_MOD_BUTTONS,
@@ -106,7 +113,25 @@ function createMock(): AguBridge {
       frameCbs.add(cb);
       return () => frameCbs.delete(cb);
     },
-    async api() {
+    // Just enough relay to try the Modes panel: a mod everywhere, with in-memory chat settings and terms.
+    async api(_source, path, init) {
+      const [p] = path.split("?");
+      const method = init?.method || "GET";
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      if (p === "/api/mod/caps") return { status: 200, body: { modes: true, shield: true, terms: true, ban: true, warn: true, delete: true, loggedIn: true, isMod: true } };
+      if (p === "/api/chat/settings") {
+        if (method === "POST") Object.assign(mockModes, body);
+        return { status: 200, body: { ...mockModes } };
+      }
+      if (p === "/api/chat/shield") {
+        if (method === "PUT") mockShield = !!body.is_active;
+        return { status: 200, body: { is_active: mockShield } };
+      }
+      if (p === "/api/chat/terms") {
+        if (method === "POST") mockTerms.push({ id: String(Date.now()), text: body.text });
+        if (method === "DELETE") mockTerms = mockTerms.filter((t) => t.id !== new URLSearchParams(path.split("?")[1]).get("id"));
+        return { status: 200, body: { terms: mockTerms } };
+      }
       return { status: 404, body: { error: "not found" } };
     },
 

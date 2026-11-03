@@ -83,6 +83,12 @@ export type Settings = {
   sevenTvCosmetics: boolean;
   deletedMessages: "strike" | "hide" | "show";
   showModButtons: boolean;
+  /** Mod log lines in chat: bans, timeouts, mode changes. */
+  showModActions: boolean;
+  /** AutoMod's held messages. */
+  showAutomod: boolean;
+  /** What holds the chat still besides scrolling up: nothing, the mouse over it, or holding Alt. */
+  pauseChat: "scroll" | "hover" | "alt";
   showPlatformMarks: boolean;
   /** Shortcut overrides: action id -> bindings ("Ctrl+Shift+W"). Actions not listed use their defaults. */
   hotkeys: Record<string, string[]>;

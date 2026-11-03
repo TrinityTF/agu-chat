@@ -463,12 +463,24 @@ function AppearanceSection({ settings, setSettings }: { settings: Settings; setS
   return (
     <div>
       <H>Window</H>
-      {bool("alwaysOnTop", "Always on top", "Keep Agu Chat above other windows (also the pin in the title bar)")}
+      {bool("alwaysOnTop", "Always on top", "Keep Agu Chat above other windows")}
 
       <H>Messages</H>
       {bool("timestamps", "Show timestamps")}
       {bool("timestampSeconds", "Timestamps with seconds", undefined, !settings.timestamps)}
       {bool("alternateRows", "Alternate row backgrounds")}
+      <Row label="Pause chat" hint="Scrolling up always pauses it">
+        <select
+          value={settings.pauseChat}
+          onChange={(e) => setSettings({ pauseChat: e.target.value as Settings["pauseChat"] })}
+          className={selectCls}
+          aria-label="Pause chat"
+        >
+          <option value="scroll">Scroll only</option>
+          <option value="hover">While the mouse is over it</option>
+          <option value="alt">While Alt is held</option>
+        </select>
+      </Row>
       <Row label="Font size" hint="Chat text, in pixels">
         <div className="flex items-center gap-2">
           <input
@@ -515,6 +527,8 @@ function AppearanceSection({ settings, setSettings }: { settings: Settings; setS
         </select>
       </Row>
       {bool("showModButtons", "Show mod buttons", "Inline buttons on rows when mod mode is on")}
+      {bool("showModActions", "Show moderation actions", "Bans, timeouts and mode changes as lines in chat")}
+      {bool("showAutomod", "Show AutoMod", "Messages AutoMod held, with Allow and Deny")}
     </div>
   );
 }

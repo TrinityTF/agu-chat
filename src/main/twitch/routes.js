@@ -297,10 +297,11 @@ async function automod({ source, body }) {
   return ok();
 }
 
-async function getSettings({ source }) {
+async function getSettings({ source, query }) {
   const { channelId } = await need(source);
   const hit = settingsCache.get(channelId);
-  if (hit && Date.now() - hit.at < SETTINGS_CACHE_MS) return ok(hit.data);
+  // ?fresh=1 (the Modes panel opening) skips the cache: another mod may have changed a mode since.
+  if (hit && !query?.get("fresh") && Date.now() - hit.at < SETTINGS_CACHE_MS) return ok(hit.data);
   const page = await helix("/chat/settings", { query: { broadcaster_id: channelId } });
   const data = pickChatSettings(page?.data?.[0]);
   settingsCache.set(channelId, { data, at: Date.now() });

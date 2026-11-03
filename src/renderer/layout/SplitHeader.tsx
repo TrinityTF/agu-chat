@@ -9,6 +9,7 @@ import { DotsIcon, GearIcon, SwordIcon } from "../icons";
 import { PopupMenu, anchorOf, type MenuItem } from "./ui";
 import { shortName, sourceKey, type Leaf } from "./tree";
 import { useHotkeyHint } from "./hotkeyContext";
+import { ModesButton } from "./ChannelModes";
 
 export type SplitActions = {
   focus(leafId: string): void;
@@ -192,6 +193,7 @@ export function SplitHeader({
         <span className="flex-1" />
       )}
 
+      <ModesButton sources={leaf.sources} />
       <button
         type="button"
         onClick={() => actions.toggleMod(leaf.id)}

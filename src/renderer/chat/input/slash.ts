@@ -69,7 +69,7 @@ export function splitArgs(s: string): string[] {
   return s.split(/\s+/).filter(Boolean);
 }
 
-async function postJson(source: SourceRef, path: string, body?: Record<string, unknown>, method = "POST") {
+export async function postJson(source: SourceRef, path: string, body?: Record<string, unknown>, method = "POST") {
   const r = await relayApi(source, path, { method, body: body !== undefined ? JSON.stringify(body) : undefined });
   if (!r.ok) {
     const t = await r.text();
