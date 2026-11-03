@@ -58,6 +58,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 | Add a split | `⋯` on a split's header → Add split right / below |
 | Resize splits | Drag the line between them |
 | Move a split | Drag its header onto another split's edge |
+| Merge splits | Drag a split's header (or a platform icon) onto the middle of another split |
 | Close a split | Ctrl+W |
 | Merge platforms | In the channel dialog, add several channels to one split |
 | Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |

@@ -196,6 +196,21 @@ export function App() {
         });
         focusLeaf(tabId, fresh.id); // a missing id falls back to the first split
       },
+      merge: (leafId, keys, targetId) => {
+        if (leafId === targetId) return;
+        updateRoot(tabId, (r) => {
+          const from = findLeaf(r, leafId);
+          const to = findLeaf(r, targetId);
+          if (!from || !to) return r;
+          const moving = keys ? from.sources.filter((s) => keys.includes(sourceKey(s))) : from.sources;
+          const have = new Set(to.sources.map(sourceKey));
+          const added = moving.filter((s) => !have.has(sourceKey(s)));
+          const staying = from.sources.filter((s) => !moving.includes(s));
+          const merged = mapLeaf(r, targetId, (l) => ({ ...l, sources: [...l.sources, ...added] }));
+          return staying.length ? mapLeaf(merged, leafId, (l) => ({ ...l, sources: staying })) : removeLeaf(merged, leafId);
+        });
+        focusLeaf(tabId, targetId);
+      },
       removeSource: (leafId, key) =>
         updateRoot(tabId, (r) => mapLeaf(r, leafId, (l) => (l.sources.length > 1 ? { ...l, sources: l.sources.filter((s) => sourceKey(s) !== key) } : l))),
       addFirst: () => setDialog({ kind: "add", tabId }),

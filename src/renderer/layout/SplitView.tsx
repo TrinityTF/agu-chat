@@ -171,19 +171,24 @@ export function SplitView({
   );
 }
 
-function edgeAt(e: React.DragEvent, el: HTMLElement): Edge {
+/** Where a drop lands: an edge makes a new split there, the middle merges into this split. */
+type Zone = Edge | "center";
+
+function zoneAt(e: React.DragEvent, el: HTMLElement, canMerge: boolean): Zone {
   const r = el.getBoundingClientRect();
   const x = (e.clientX - r.left) / r.width - 0.5;
   const y = (e.clientY - r.top) / r.height - 0.5;
+  if (canMerge && Math.abs(x) < 0.25 && Math.abs(y) < 0.25) return "center";
   if (Math.abs(x) > Math.abs(y)) return x < 0 ? "left" : "right";
   return y < 0 ? "top" : "bottom";
 }
 
-const HIGHLIGHT: Record<Edge, React.CSSProperties> = {
+const HIGHLIGHT: Record<Zone, React.CSSProperties> = {
   left: { left: 0, top: 0, width: "50%", height: "100%" },
   right: { right: 0, top: 0, width: "50%", height: "100%" },
   top: { left: 0, top: 0, width: "100%", height: "50%" },
   bottom: { left: 0, bottom: 0, width: "100%", height: "50%" },
+  center: { left: "25%", top: "25%", width: "50%", height: "50%" },
 };
 
 function LeafView({
@@ -206,12 +211,14 @@ function LeafView({
   onActivity?: (kind: Activity) => void;
 }) {
   const [status, setStatus] = useState<Record<string, ConnFrame>>({});
-  const [hover, setHover] = useState<Edge | null>(null);
+  const [hover, setHover] = useState<Zone | null>(null);
   const sig = leaf.sources.map(sourceKey).join("|");
   // A split can't be dropped on itself; its channels can (beside it), unless they are all it has.
   const dropTarget =
     !!dragging &&
     (dragging.kind === "split" ? dragging.leafId !== leaf.id : dragging.leafId !== leaf.id || dragging.keys.length < leaf.sources.length);
+  // Merging only means something into another split.
+  const canMerge = !!dragging && dragging.leafId !== leaf.id;
 
   return (
     <div
@@ -238,24 +245,27 @@ function LeafView({
           onDragOver={(e) => {
             e.preventDefault();
             e.dataTransfer.dropEffect = "move";
-            setHover(edgeAt(e, e.currentTarget));
+            setHover(zoneAt(e, e.currentTarget, canMerge));
           }}
           onDragLeave={() => setHover(null)}
           onDrop={(e) => {
             e.preventDefault();
-            const edge = edgeAt(e, e.currentTarget);
+            const zone = zoneAt(e, e.currentTarget, canMerge);
             setHover(null);
             setDragging(null);
-            if (dragging.kind === "split") actions.move(dragging.leafId, leaf.id, edge);
-            else actions.splitOut(dragging.leafId, dragging.keys, leaf.id, edge);
+            if (zone === "center") actions.merge(dragging.leafId, dragging.kind === "split" ? null : dragging.keys, leaf.id);
+            else if (dragging.kind === "split") actions.move(dragging.leafId, leaf.id, zone);
+            else actions.splitOut(dragging.leafId, dragging.keys, leaf.id, zone);
           }}
         >
           {hover && (
             <div
-              className="pointer-events-none absolute border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/25"
+              className="pointer-events-none absolute flex items-center justify-center rounded-sm border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/25"
               style={HIGHLIGHT[hover]}
               data-drop-edge={hover}
-            />
+            >
+              {hover === "center" && <span className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-semibold text-white">Merge into this split</span>}
+            </div>
           )}
         </div>
       )}

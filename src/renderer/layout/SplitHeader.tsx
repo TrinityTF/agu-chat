@@ -21,6 +21,8 @@ export type SplitActions = {
   /** Take these sources (sourceKey) out of `leafId` into a new split at `edge` of `targetId`. */
   splitOut(leafId: string, keys: string[], targetId: string, edge: "left" | "right" | "top" | "bottom"): void;
   removeSource(leafId: string, key: string): void;
+  /** Move sources (`keys`, or all of them when null) of `leafId` into `targetId`, merging the chats. */
+  merge(leafId: string, keys: string[] | null, targetId: string): void;
   addFirst(): void;
 };
 
