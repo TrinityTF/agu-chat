@@ -12,6 +12,7 @@ export type ConnFrame = {
   title?: string;
   canSend?: boolean;
   readOnlyReason?: string;
+  channelId?: string; // Twitch: the broadcaster id (7TV/BTTV/FFZ are keyed by it)
 };
 
 // Every other frame is the platform's own agu.lol relay frame ({type: "chat", msg}, ...).

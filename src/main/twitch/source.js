@@ -110,6 +110,7 @@ export class TwitchSource {
   _chatlog() {
     return {
       type: "chatlog",
+      channelId: this.channelId, // 7TV/BTTV/FFZ are keyed by it; known from the join ROOMSTATE
       messages: [...this.backlog],
       pinned: this.pinned,
       modfeed: [...this.modFeed],
@@ -131,6 +132,7 @@ export class TwitchSource {
 
   _connFrame() {
     const f = { type: "conn", state: this.state, detail: this.detail, ...this._sendability() };
+    if (this.channelId) f.channelId = this.channelId;
     if (this.live !== null) f.live = this.live;
     if (this.title) f.title = this.title;
     return f;
@@ -151,9 +153,11 @@ export class TwitchSource {
 
   _onJoined(roomId, { reconnect }) {
     if (this.stopped) return;
+    const hadId = this.channelId;
     this.channelId = roomId ? String(roomId) : this.channelId;
     this.roomState = null; // the join ROOMSTATE is a fresh baseline, never a diff
     this._setConn("open", "");
+    if (!hadId && this.channelId) this._emitConn(); // _setConn skips a same-state emit; the renderer still needs the id
     if (reconnect && Date.now() - this.backlogAt > BACKLOG_REFETCH_MIN_MS) void this._loadBacklog(); // fill the gap the outage left
     if (this.channelId) {
       void esub.attach(this);

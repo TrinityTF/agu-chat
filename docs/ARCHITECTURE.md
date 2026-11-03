@@ -82,6 +82,7 @@ type ConnFrame = {
   title?: string;       // stream title, when known
   canSend?: boolean;    // the logged-in account can post here from this app
   readOnlyReason?: string; // why not, in one line, shown in the input box
+  channelId?: string;   // Twitch only: broadcaster id (also on the chatlog hello)
 };
 ```
 
