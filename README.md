@@ -51,7 +51,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 
 | To do this | Do this |
 | --- | --- |
-| New tab | `+` or Ctrl+T |
+| New tab | `+` or Ctrl+T (opens next to the current tab) |
 | Rename a tab | Double-click it |
 | Close a tab | Select it, then its × or a middle click (asks first if it has channels) |
 | Switch tabs | Ctrl+Tab, Ctrl+1…9 |
@@ -64,13 +64,13 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 | Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |
 | Mod mode | The sword button on a split's header |
 | User card | Click a name: it opens in its own small window you can move anywhere, and several can be open |
-| Always on top | The pin in the title bar, or Settings → Appearance and chat |
-| All tabs | The arrow at the left edge of the tab bar lists every tab when they don't all fit |
+| Always on top | Settings → Appearance and chat |
+| All tabs | The arrow at the left edge of the tab bar lists every tab; the bar shows the ones that fit, always with the current tab |
 | Search a split | Ctrl+F, then type words and/or `from:name`; Esc closes it |
 | Ignore someone | "Ignore user" on their user card, or Settings → Ignores |
 | New line in a message | Shift+Enter |
 | Highlight rules and alert sounds | Settings → Highlights |
-| Settings | Ctrl+P or the gear icon |
+| Settings | Ctrl+P or the gear in the top-right split's header |
 | Change shortcuts | Settings → Hotkeys: click `+` next to an action and press the keys |
 | Change mod buttons | Settings → Mod buttons |
 

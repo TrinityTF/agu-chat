@@ -150,8 +150,11 @@ export function App() {
       add: () =>
         setLayout((l) => {
           if (!l) return l;
+          // A new tab opens right after the selected one.
           const t = newTab();
-          return { tabs: [...l.tabs, t], active: t.id };
+          const tabs = l.tabs.slice();
+          tabs.splice(l.tabs.findIndex((x) => x.id === l.active) + 1, 0, t);
+          return { tabs, active: t.id };
         }),
       close: (id) => {
         if (hasChannels(layoutRef.current?.tabs.find((t) => t.id === id))) setDialog({ kind: "closeTab", tabId: id });
@@ -174,12 +177,6 @@ export function App() {
           tabs.splice(to, 0, t);
           return { ...l, tabs };
         }),
-      openSettings: () => setDialog({ kind: "settings" }),
-      togglePin: () =>
-        agu.settings
-          .get()
-          .then((s) => agu.settings.set({ alwaysOnTop: !s.alwaysOnTop }))
-          .catch(() => {}),
     }),
     [updateTab, closeTabNow, closeOthersNow],
   );
@@ -233,6 +230,7 @@ export function App() {
       removeSource: (leafId, key) =>
         updateRoot(tabId, (r) => mapLeaf(r, leafId, (l) => (l.sources.length > 1 ? { ...l, sources: l.sources.filter((s) => sourceKey(s) !== key) } : l))),
       addFirst: () => setDialog({ kind: "add", tabId }),
+      openSettings: () => setDialog({ kind: "settings" }),
     }),
     [focusLeaf, updateRoot],
   );
@@ -346,7 +344,7 @@ export function App() {
   return (
     <HotkeysContext.Provider value={hotkeyTable}>
       <div className="flex h-full flex-col bg-[var(--color-app)]">
-        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} pinned={!!settings?.alwaysOnTop} />
+        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} />
         {showBar && updater && (
           <div className="flex h-6 shrink-0 items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-accent-strong)] px-3 text-[12px] text-white">
             <span className="min-w-0 flex-1 truncate">Agu Chat {updater.version} is ready — Restart to update</span>

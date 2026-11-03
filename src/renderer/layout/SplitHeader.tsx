@@ -5,7 +5,7 @@
 import { useState } from "react";
 import type { ConnFrame, Platform } from "../protocol";
 import { PLATFORM_LABEL, PlatformIcon } from "../platformIcons";
-import { DotsIcon, SwordIcon } from "../icons";
+import { DotsIcon, GearIcon, SwordIcon } from "../icons";
 import { PopupMenu, anchorOf, type MenuItem } from "./ui";
 import { shortName, sourceKey, type Leaf } from "./tree";
 import { useHotkeyHint } from "./hotkeyContext";
@@ -24,6 +24,7 @@ export type SplitActions = {
   /** Move sources (`keys`, or all of them when null) of `leafId` into `targetId`, merging the chats. */
   merge(leafId: string, keys: string[] | null, targetId: string): void;
   addFirst(): void;
+  openSettings(): void;
 };
 
 /** What a header chip carries while dragged (dataTransfer "application/x-agu-sources"). */
@@ -48,6 +49,7 @@ export function SplitHeader({
   onDragStart,
   onDragSources,
   onDragEnd,
+  settingsButton = false,
 }: {
   leaf: Leaf;
   status: Record<string, ConnFrame>;
@@ -56,10 +58,13 @@ export function SplitHeader({
   onDragStart: () => void;
   onDragSources: (d: SourceDrag) => void;
   onDragEnd: () => void;
+  /** The split in the window's top-right corner carries the Settings button. */
+  settingsButton?: boolean;
 }) {
   const [menu, setMenu] = useState<ReturnType<typeof anchorOf> | null>(null);
   const [chipMenu, setChipMenu] = useState<{ anchor: ReturnType<typeof anchorOf>; platform: Platform } | null>(null);
   const closeKey = useHotkeyHint("closeSplit");
+  const settingsKey = useHotkeyHint("openSettings");
 
   const rows = leaf.sources.map((s) => ({ s, st: status[sourceKey(s)] as ConnFrame | undefined }));
   const live = rows.find((r) => r.st?.live);
@@ -213,6 +218,20 @@ export function SplitHeader({
       >
         <DotsIcon className="h-3.5 w-3.5 rotate-90" />
       </button>
+      {settingsButton && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.currentTarget.blur();
+            actions.openSettings();
+          }}
+          title={settingsKey ? `Settings (${settingsKey})` : "Settings"}
+          aria-label="Settings"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-faint)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
+        >
+          <GearIcon className="h-3.5 w-3.5" />
+        </button>
+      )}
       {chipMenu && <PopupMenu anchor={chipMenu.anchor} items={chipItems(chipMenu.platform)} onClose={() => setChipMenu(null)} />}
       {menu && <PopupMenu anchor={menu} items={items} align="right" onClose={() => setMenu(null)} />}
     </div>

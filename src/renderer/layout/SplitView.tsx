@@ -67,10 +67,11 @@ export function SplitView({
 
   if (!root) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-[var(--color-panel)]">
+      <div className="flex h-full w-full items-center justify-center gap-2 bg-[var(--color-panel)]">
         <Btn primary onClick={actions.addFirst}>
           Add a channel
         </Btn>
+        <Btn onClick={actions.openSettings}>Settings</Btn>
       </div>
     );
   }
@@ -109,6 +110,8 @@ export function SplitView({
   };
 
   const multi = leaves.length > 1;
+  // The split whose header sits under the window's top-right corner gets the Settings button.
+  const corner = leaves.filter((l) => l.rect.y < 1e-6).reduce((a, b) => (b.rect.x + b.rect.w > a.rect.x + a.rect.w ? b : a), leaves[0])?.leaf.id;
 
   return (
     <div ref={hostRef} className="relative h-full w-full overflow-hidden bg-[var(--color-panel)]">
@@ -129,6 +132,7 @@ export function SplitView({
               dragging={dragging}
               setDragging={setDragging}
               onActivity={onActivity}
+              settingsButton={leaf.id === corner}
             />
           </div>
         );
@@ -200,6 +204,7 @@ function LeafView({
   dragging,
   setDragging,
   onActivity,
+  settingsButton,
 }: {
   leaf: Leaf;
   focused: boolean;
@@ -209,6 +214,7 @@ function LeafView({
   dragging: Dragging | null;
   setDragging: (d: Dragging | null) => void;
   onActivity?: (kind: Activity) => void;
+  settingsButton: boolean;
 }) {
   const [status, setStatus] = useState<Record<string, ConnFrame>>({});
   const [hover, setHover] = useState<Zone | null>(null);
@@ -234,6 +240,7 @@ function LeafView({
         onDragStart={() => setDragging({ kind: "split", leafId: leaf.id })}
         onDragSources={(d) => setDragging({ kind: "sources", ...d })}
         onDragEnd={() => setDragging(null)}
+        settingsButton={settingsButton}
       />
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <ChatPane key={sig} sources={leaf.sources} modMode={leaf.modMode} focused={focused && tabActive} onStatus={setStatus} onActivity={onActivity} />

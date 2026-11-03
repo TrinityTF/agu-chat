@@ -1,12 +1,15 @@
 // The notebook's tab bar, which is also the window's title bar (the window has no OS frame): select, add,
-// close the selected tab (x / middle-click), rename (double-click), drag to reorder, a list of every tab for when they overflow,
-// always-on-top, settings and the window buttons. Empty space drags the window; double-click maximizes.
-import { useEffect, useRef, useState } from "react";
+// close the selected tab (x / middle-click), rename (double-click), drag to reorder and the window buttons.
+// The bar never scrolls: when the tabs don't all fit it shows a run of them that always holds the selected one
+// (tabWindow.ts), and the arrow at the left edge lists every tab. Empty space drags the window; double-click
+// maximizes.
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Tab } from "../protocol";
 import { agu } from "../bridge";
-import { ChevronIcon, GearIcon, PinIcon, WinMaxIcon, WinMinIcon, WinRestoreIcon, XIcon } from "../icons";
+import { ChevronIcon, WinMaxIcon, WinMinIcon, WinRestoreIcon, XIcon } from "../icons";
 import { PopupMenu, anchorOf, type MenuItem } from "./ui";
 import { autoTitle, tabTitle } from "./tree";
+import { tabWindow } from "./tabWindow";
 import { useHotkeyHint } from "./hotkeyContext";
 import type { Activity } from "../chat/ChatPane";
 
@@ -18,47 +21,62 @@ export type TabActions = {
   rename(id: string, title: string): void;
   /** Move tab `id` to sit before the tab currently at `beforeIndex` (tabs.length = the end). */
   reorder(id: string, beforeIndex: number): void;
-  openSettings(): void;
-  togglePin(): void;
 };
+
+const ALL_W = 25; // the All tabs button, border included
 
 export function NotebookTabs({
   tabs,
   active,
   actions,
   unread = {},
-  pinned = false,
 }: {
   tabs: Tab[];
   active: string;
   actions: TabActions;
   /** Unselected tabs that got live chat: "message" = new messages, "highlight" = a highlight or mention. */
   unread?: Record<string, Activity>;
-  /** The window stays above other apps. */
-  pinned?: boolean;
 }) {
   const closeTabKey = useHotkeyHint("closeTab");
   const newTabKey = useHotkeyHint("newTab");
-  const settingsKey = useHotkeyHint("openSettings");
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null); // insertion index while dragging
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; tabId: string } | null>(null);
-  const stripRef = useRef<HTMLDivElement>(null);
-  const [overflow, setOverflow] = useState(false);
   const [list, setList] = useState<ReturnType<typeof anchorOf> | null>(null);
   const [maximized, setMaximized] = useState(false);
 
+  // ---- which tabs fit ----------------------------------------------------------------
+  const zoneRef = useRef<HTMLDivElement>(null);
+  const plusRef = useRef<HTMLButtonElement>(null);
+  const tabEls = useRef(new Map<string, HTMLElement>()).current;
+  const startRef = useRef(0);
+  const [view, setView] = useState({ start: 0, end: Number.MAX_SAFE_INTEGER });
+  const fitRef = useRef(() => {});
+  fitRef.current = () => {
+    const zone = zoneRef.current;
+    if (!zone) return;
+    const widths = tabs.map((t) => tabEls.get(t.id)?.offsetWidth ?? 120);
+    const full = zone.clientWidth - (plusRef.current?.offsetWidth ?? 28);
+    const total = widths.reduce((a, b) => a + b, 0);
+    const activeIdx = Math.max(0, tabs.findIndex((t) => t.id === active));
+    const next = total <= full ? { start: 0, end: tabs.length - 1 } : tabWindow(widths, full - ALL_W, activeIdx, startRef.current);
+    startRef.current = next.start;
+    setView((v) => (v.start === next.start && v.end === next.end ? v : next));
+  };
+  // After every render (a tab added, renamed, marked unread...) and on every resize.
+  useLayoutEffect(() => fitRef.current());
   useEffect(() => {
-    const el = stripRef.current;
+    const el = zoneRef.current;
     if (!el) return;
-    const check = () => setOverflow(el.scrollWidth > el.clientWidth + 1);
-    check();
-    const ro = new ResizeObserver(check);
+    const ro = new ResizeObserver(() => fitRef.current());
     ro.observe(el);
     return () => ro.disconnect();
-  }, [tabs]);
+  }, []);
+  const shown = (i: number) => i >= view.start && i <= view.end;
+  const hidden = tabs.filter((_, i) => !shown(i));
+  const hiddenMark = hidden.some((t) => unread[t.id] === "highlight") ? "highlight" : hidden.some((t) => unread[t.id]) ? "message" : undefined;
 
   useEffect(() => {
     agu.win
@@ -67,11 +85,6 @@ export function NotebookTabs({
       .catch(() => {});
     return agu.win.onMaximized(setMaximized);
   }, []);
-
-  useEffect(() => {
-    const el = stripRef.current?.querySelector<HTMLElement>(`[data-tab-id="${active}"]`);
-    el?.scrollIntoView({ inline: "nearest", block: "nearest" });
-  }, [active, tabs.length, overflow]); // overflow: the All tabs button showing up narrows the strip
 
   const startRename = (t: Tab) => {
     setDraft(t.title);
@@ -99,196 +112,181 @@ export function NotebookTabs({
     onClick: () => actions.select(t.id),
   }));
   const winBtn = "app-no-drag flex w-9 shrink-0 items-center justify-center text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]";
+  const dropEnd = Math.min(view.end, tabs.length - 1) + 1; // dropping on the empty bar: after the last shown tab
 
   return (
     <div className="flex h-7 shrink-0 select-none items-stretch border-b border-[var(--color-line)] bg-[var(--color-raised)]" role="tablist">
-      {overflow && (
+      <div ref={zoneRef} className="flex min-w-0 flex-1 items-stretch">
+        {hidden.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              const el = e.currentTarget;
+              setList((open) => (open ? null : anchorOf(el)));
+            }}
+            title={`All tabs (${hidden.length} more)`}
+            aria-label="All tabs"
+            className="relative flex w-6 shrink-0 items-center justify-center border-r border-[var(--color-line)] text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
+          >
+            <ChevronIcon className="h-3.5 w-3.5" />
+            {hiddenMark && (
+              <span className={"absolute right-1 top-1 h-1.5 w-1.5 rounded-full " + (hiddenMark === "highlight" ? "bg-[var(--color-accent-soft)]" : "bg-[var(--color-faint)]")} />
+            )}
+          </button>
+        )}
+        <div className="relative flex min-w-0 items-stretch overflow-hidden">
+          {tabs.map((t, i) => {
+            const selected = t.id === active;
+            const isEditing = editing === t.id;
+            const mark = selected ? undefined : unread[t.id];
+            const visible = shown(i);
+            return (
+              <div
+                key={t.id}
+                ref={(el) => {
+                  if (el) tabEls.set(t.id, el);
+                  else tabEls.delete(t.id);
+                }}
+                // Tabs that don't fit stay laid out off to the side, invisible, so their widths can be measured.
+                role={visible ? "tab" : undefined}
+                aria-hidden={visible ? undefined : true}
+                aria-selected={visible ? selected : undefined}
+                data-tab-id={visible ? t.id : undefined}
+                draggable={visible && !isEditing}
+                onClick={() => actions.select(t.id)}
+                onMouseDown={(e) => {
+                  if (e.button === 1) e.preventDefault();
+                }}
+                onAuxClick={(e) => {
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    if (selected) actions.close(t.id);
+                  }
+                }}
+                onDoubleClick={() => startRename(t)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu({ anchor: { x: e.clientX, y: e.clientY }, tabId: t.id });
+                }}
+                onDragStart={(e) => {
+                  e.dataTransfer.setData("application/x-agu-tab", t.id);
+                  e.dataTransfer.effectAllowed = "move";
+                  setDragId(t.id);
+                }}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setDropAt(null);
+                }}
+                onDragOver={(e) => {
+                  if (!dragId) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setDropAt(e.clientX < r.left + r.width / 2 ? i : i + 1);
+                }}
+                onDrop={(e) => {
+                  if (!dragId) return;
+                  e.preventDefault();
+                  const r = e.currentTarget.getBoundingClientRect();
+                  actions.reorder(dragId, e.clientX < r.left + r.width / 2 ? i : i + 1);
+                  setDragId(null);
+                  setDropAt(null);
+                }}
+                className={
+                  "flex max-w-[220px] shrink-0 cursor-default items-center gap-1 border-r border-[var(--color-line)] px-2.5 text-[12px] " +
+                  (visible ? "relative " : "pointer-events-none invisible absolute left-0 top-0 h-full ") +
+                  (selected
+                    ? "bg-[var(--color-panel)] text-[var(--color-text)]"
+                    : mark === "highlight"
+                      ? "bg-[var(--color-mention)] text-[var(--color-text)] hover:bg-[var(--color-raised-2)]"
+                      : mark === "message"
+                        ? "text-[var(--color-text)] hover:bg-[var(--color-raised-2)]"
+                        : "text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]") +
+                  (dragId === t.id ? " opacity-50" : "")
+                }
+              >
+                {isEditing ? (
+                  <input
+                    autoFocus
+                    value={draft}
+                    placeholder={autoTitle(t)}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onBlur={commit}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") commit();
+                      else if (e.key === "Escape") setEditing(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    className="w-32 rounded-sm border border-[var(--color-accent)] bg-[var(--color-app)] px-1 text-[12px] text-[var(--color-text)] outline-none"
+                    aria-label="Tab name"
+                  />
+                ) : (
+                  <>
+                    {mark && (
+                      <span
+                        aria-label={mark === "highlight" ? "Highlighted messages" : "New messages"}
+                        className={"h-1.5 w-1.5 shrink-0 rounded-full " + (mark === "highlight" ? "bg-[var(--color-accent-soft)]" : "bg-[var(--color-faint)]")}
+                      />
+                    )}
+                    <span className="truncate" title={tabTitle(t, true)}>
+                      {tabTitle(t)}
+                    </span>
+                  </>
+                )}
+                {selected && !isEditing && (
+                  <button
+                    type="button"
+                    aria-label="Close tab"
+                    title="Close tab"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      actions.close(t.id);
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-faint)] hover:bg-[var(--color-line)] hover:text-[var(--color-text)]"
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                )}
+                {selected && <span className="absolute inset-x-0 bottom-0 h-[2px] bg-[var(--color-accent)]" />}
+                {mark === "highlight" && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--color-accent-soft)]" />}
+                {dragId && dropAt === i && <span className="absolute inset-y-0 left-0 w-[2px] bg-[var(--color-accent)]" />}
+                {dragId && dropAt === i + 1 && i + 1 === dropEnd && <span className="absolute inset-y-0 right-0 w-[2px] bg-[var(--color-accent)]" />}
+              </div>
+            );
+          })}
+        </div>
         <button
+          ref={plusRef}
           type="button"
-          onClick={(e) => {
-            const el = e.currentTarget;
-            setList((open) => (open ? null : anchorOf(el)));
-          }}
-          title="All tabs"
-          aria-label="All tabs"
-          className="flex w-6 shrink-0 border-r border-[var(--color-line)] items-center justify-center text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
+          onClick={actions.add}
+          title={newTabKey ? `New tab (${newTabKey})` : "New tab"}
+          aria-label="New tab"
+          className="flex w-7 shrink-0 items-center justify-center text-[16px] leading-none text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
         >
-          <ChevronIcon className="h-3.5 w-3.5" />
+          +
         </button>
-      )}
-      <div
-        ref={stripRef}
-        className="no-scrollbar flex min-w-0 items-stretch overflow-x-auto"
-        onWheel={(e) => {
-          if (e.deltaY && stripRef.current) stripRef.current.scrollLeft += e.deltaY;
-        }}
-        onDragOver={(e) => {
-          // Dropping on the empty strip area sends the tab to the end.
-          if (dragId && e.target === e.currentTarget) {
+        <div
+          className="app-drag min-w-0 flex-1"
+          onDragOver={(e) => {
+            if (!dragId) return;
             e.preventDefault();
-            setDropAt(tabs.length);
-          }
-        }}
-        onDrop={(e) => {
-          if (dragId && e.target === e.currentTarget) {
+            setDropAt(dropEnd);
+          }}
+          onDrop={(e) => {
+            if (!dragId) return;
             e.preventDefault();
-            actions.reorder(dragId, tabs.length);
+            actions.reorder(dragId, dropEnd);
             setDragId(null);
             setDropAt(null);
-          }
-        }}
-      >
-        {tabs.map((t, i) => {
-          const selected = t.id === active;
-          const isEditing = editing === t.id;
-          const mark = selected ? undefined : unread[t.id];
-          return (
-            <div
-              key={t.id}
-              role="tab"
-              aria-selected={selected}
-              data-tab-id={t.id}
-              draggable={!isEditing}
-              onClick={() => actions.select(t.id)}
-              onMouseDown={(e) => {
-                if (e.button === 1) e.preventDefault();
-              }}
-              onAuxClick={(e) => {
-                if (e.button === 1) {
-                  e.preventDefault();
-                  if (selected) actions.close(t.id);
-                }
-              }}
-              onDoubleClick={() => startRename(t)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setMenu({ anchor: { x: e.clientX, y: e.clientY }, tabId: t.id });
-              }}
-              onDragStart={(e) => {
-                e.dataTransfer.setData("application/x-agu-tab", t.id);
-                e.dataTransfer.effectAllowed = "move";
-                setDragId(t.id);
-              }}
-              onDragEnd={() => {
-                setDragId(null);
-                setDropAt(null);
-              }}
-              onDragOver={(e) => {
-                if (!dragId) return;
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                const r = e.currentTarget.getBoundingClientRect();
-                setDropAt(e.clientX < r.left + r.width / 2 ? i : i + 1);
-              }}
-              onDrop={(e) => {
-                if (!dragId) return;
-                e.preventDefault();
-                const r = e.currentTarget.getBoundingClientRect();
-                actions.reorder(dragId, e.clientX < r.left + r.width / 2 ? i : i + 1);
-                setDragId(null);
-                setDropAt(null);
-              }}
-              className={
-                "group relative flex max-w-[220px] shrink-0 cursor-default items-center gap-1 border-r border-[var(--color-line)] px-2.5 text-[12px] " +
-                (selected
-                  ? "bg-[var(--color-panel)] text-[var(--color-text)]"
-                  : mark === "highlight"
-                    ? "bg-[var(--color-mention)] text-[var(--color-text)] hover:bg-[var(--color-raised-2)]"
-                    : mark === "message"
-                      ? "text-[var(--color-text)] hover:bg-[var(--color-raised-2)]"
-                      : "text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]") +
-                (dragId === t.id ? " opacity-50" : "")
-              }
-            >
-              {isEditing ? (
-                <input
-                  autoFocus
-                  value={draft}
-                  placeholder={autoTitle(t)}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onFocus={(e) => e.currentTarget.select()}
-                  onBlur={commit}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === "Enter") commit();
-                    else if (e.key === "Escape") setEditing(null);
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  className="w-32 rounded-sm border border-[var(--color-accent)] bg-[var(--color-app)] px-1 text-[12px] text-[var(--color-text)] outline-none"
-                  aria-label="Tab name"
-                />
-              ) : (
-                <>
-                  {mark && (
-                    <span
-                      aria-label={mark === "highlight" ? "Highlighted messages" : "New messages"}
-                      className={"h-1.5 w-1.5 shrink-0 rounded-full " + (mark === "highlight" ? "bg-[var(--color-accent-soft)]" : "bg-[var(--color-faint)]")}
-                    />
-                  )}
-                  <span className="truncate" title={tabTitle(t, true)}>
-                    {tabTitle(t)}
-                  </span>
-                </>
-              )}
-              {selected && !isEditing && (
-                <button
-                  type="button"
-                  aria-label="Close tab"
-                  title="Close tab"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    actions.close(t.id);
-                  }}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-faint)] hover:bg-[var(--color-line)] hover:text-[var(--color-text)]"
-                >
-                  <XIcon className="h-3 w-3" />
-                </button>
-              )}
-              {selected && <span className="absolute inset-x-0 bottom-0 h-[2px] bg-[var(--color-accent)]" />}
-              {mark === "highlight" && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--color-accent-soft)]" />}
-              {dragId && dropAt === i && <span className="absolute inset-y-0 left-0 w-[2px] bg-[var(--color-accent)]" />}
-              {dragId && dropAt === i + 1 && i === tabs.length - 1 && <span className="absolute inset-y-0 right-0 w-[2px] bg-[var(--color-accent)]" />}
-            </div>
-          );
-        })}
+          }}
+        />
       </div>
-      <button
-        type="button"
-        onClick={actions.add}
-        title={newTabKey ? `New tab (${newTabKey})` : "New tab"}
-        aria-label="New tab"
-        className="flex w-7 shrink-0 items-center justify-center text-[16px] leading-none text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
-      >
-        +
-      </button>
-      <div className="app-drag min-w-[28px] flex-1" />
-      <button
-        type="button"
-        onClick={actions.togglePin}
-        aria-pressed={pinned}
-        title={pinned ? "Always on top: on" : "Always on top: off"}
-        aria-label="Always on top"
-        className={
-          "flex w-7 shrink-0 items-center justify-center hover:bg-[var(--color-raised-2)] " +
-          (pinned ? "text-[var(--color-accent-soft)]" : "text-[var(--color-faint)] hover:text-[var(--color-text)]")
-        }
-      >
-        <PinIcon className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.currentTarget.blur();
-          actions.openSettings();
-        }}
-        title={settingsKey ? `Settings (${settingsKey})` : "Settings"}
-        aria-label="Settings"
-        className="flex w-8 shrink-0 items-center justify-center border-l border-[var(--color-line)] text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
-      >
-        <GearIcon className="h-4 w-4" />
-      </button>
+      {/* Always some bare title bar to grab the window by, however many tabs there are. */}
+      <div className="app-drag w-7 shrink-0" />
       <button type="button" onClick={() => agu.win.minimize().catch(() => {})} title="Minimize" aria-label="Minimize" className={winBtn}>
         <WinMinIcon className="h-3.5 w-3.5" />
       </button>
