@@ -1,5 +1,5 @@
 // The notebook's tab bar, which is also the window's title bar (the window has no OS frame): select, add,
-// close (x / middle-click), rename (double-click), drag to reorder, a list of every tab for when they overflow,
+// close the selected tab (x / middle-click), rename (double-click), drag to reorder, a list of every tab for when they overflow,
 // always-on-top, settings and the window buttons. Empty space drags the window; double-click maximizes.
 import { useEffect, useRef, useState } from "react";
 import type { Tab } from "../protocol";
@@ -71,7 +71,7 @@ export function NotebookTabs({
   useEffect(() => {
     const el = stripRef.current?.querySelector<HTMLElement>(`[data-tab-id="${active}"]`);
     el?.scrollIntoView({ inline: "nearest", block: "nearest" });
-  }, [active, tabs.length]);
+  }, [active, tabs.length, overflow]); // overflow: the All tabs button showing up narrows the strip
 
   const startRename = (t: Tab) => {
     setDraft(t.title);
@@ -86,7 +86,8 @@ export function NotebookTabs({
     const t = tabs.find((x) => x.id === id);
     return [
       { label: "Rename tab", onClick: () => t && startRename(t) },
-      { label: "Close tab", hint: closeTabKey, onClick: () => actions.close(id) },
+      // Only the selected tab can be closed, so a stray click never closes one you aren't looking at.
+      { label: "Close tab", hint: closeTabKey, disabled: id !== active, onClick: () => actions.close(id) },
       { label: "Close other tabs", disabled: tabs.length < 2, onClick: () => actions.closeOthers(id) },
     ];
   };
@@ -101,6 +102,20 @@ export function NotebookTabs({
 
   return (
     <div className="flex h-7 shrink-0 select-none items-stretch border-b border-[var(--color-line)] bg-[var(--color-raised)]" role="tablist">
+      {overflow && (
+        <button
+          type="button"
+          onClick={(e) => {
+            const el = e.currentTarget;
+            setList((open) => (open ? null : anchorOf(el)));
+          }}
+          title="All tabs"
+          aria-label="All tabs"
+          className="flex w-6 shrink-0 border-r border-[var(--color-line)] items-center justify-center text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
+        >
+          <ChevronIcon className="h-3.5 w-3.5" />
+        </button>
+      )}
       <div
         ref={stripRef}
         className="no-scrollbar flex min-w-0 items-stretch overflow-x-auto"
@@ -141,7 +156,7 @@ export function NotebookTabs({
               onAuxClick={(e) => {
                 if (e.button === 1) {
                   e.preventDefault();
-                  actions.close(t.id);
+                  if (selected) actions.close(t.id);
                 }
               }}
               onDoubleClick={() => startRename(t)}
@@ -216,7 +231,7 @@ export function NotebookTabs({
                   </span>
                 </>
               )}
-              {!isEditing && (
+              {selected && !isEditing && (
                 <button
                   type="button"
                   aria-label="Close tab"
@@ -226,10 +241,7 @@ export function NotebookTabs({
                     actions.close(t.id);
                   }}
                   onMouseDown={(e) => e.stopPropagation()}
-                  className={
-                    "flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-faint)] hover:bg-[var(--color-line)] hover:text-[var(--color-text)] " +
-                    (selected ? "" : "invisible group-hover:visible")
-                  }
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-faint)] hover:bg-[var(--color-line)] hover:text-[var(--color-text)]"
                 >
                   <XIcon className="h-3 w-3" />
                 </button>
@@ -251,20 +263,6 @@ export function NotebookTabs({
       >
         +
       </button>
-      {overflow && (
-        <button
-          type="button"
-          onClick={(e) => {
-            const el = e.currentTarget;
-            setList((open) => (open ? null : anchorOf(el)));
-          }}
-          title="All tabs"
-          aria-label="All tabs"
-          className="flex w-6 shrink-0 items-center justify-center text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
-        >
-          <ChevronIcon className="h-3.5 w-3.5" />
-        </button>
-      )}
       <div className="app-drag min-w-[28px] flex-1" />
       <button
         type="button"
@@ -306,7 +304,7 @@ export function NotebookTabs({
       <button type="button" onClick={() => agu.win.close().catch(() => {})} title="Close" aria-label="Close" className={winBtn + " hover:!bg-red-600 hover:!text-white"}>
         <XIcon className="h-3.5 w-3.5" />
       </button>
-      {list && <PopupMenu anchor={list} items={listItems} align="right" onClose={() => setList(null)} />}
+      {list && <PopupMenu anchor={list} items={listItems} onClose={() => setList(null)} />}
       {menu && <PopupMenu anchor={menu.anchor} items={menuItems(menu.tabId)} onClose={() => setMenu(null)} />}
     </div>
   );
