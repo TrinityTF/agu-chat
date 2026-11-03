@@ -1,19 +1,37 @@
-// Settings dialog: Accounts, Appearance/chat, Updates, About.
-import { useEffect, useState, type ReactNode } from "react";
+// Settings dialog: Accounts, Appearance/chat, Hotkeys, Mod buttons, Updates, About.
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { agu } from "../bridge";
 import { useAccounts } from "../hooks";
-import type { AccountState, DevicePrompt, Platform, Settings, UpdaterState } from "../protocol";
+import type { AccountState, DevicePrompt, ModButton, ModButtonAction, Platform, Settings, UpdaterState } from "../protocol";
 import { PLATFORM_LABEL, PlatformIcon } from "../platformIcons";
-import { CopyIcon } from "../icons";
+import { ChevronIcon, CopyIcon, XIcon } from "../icons";
+import { ModButtonFace, ModIcon } from "../chat/ModButtonFace";
+import {
+  DEFAULT_MOD_BUTTONS,
+  MAX_COMMAND,
+  MAX_LABEL,
+  MAX_MOD_BUTTONS,
+  MOD_BUTTON_ICONS,
+  TEMPLATE_HELP,
+  defaultIcon,
+  describeModButton,
+  formatDuration,
+  newModButtonId,
+  normalizeModButtons,
+  parseDuration,
+} from "../chat/modButtons";
+import { HOTKEY_ACTIONS, actionLabel, eventToBinding, findConflicts, hotkeyRecording, isUsableBinding, resolveHotkeys, toOverrides, type HotkeyAction, type HotkeyTable } from "./hotkeys";
 import { Btn, Modal, Toggle, copyText, inputCls } from "./ui";
 import { useAppInfo, useLiveSettings, useUpdater } from "./useBridge";
 
 export const REPO_URL = "https://github.com/TrinityTF/agu-chat";
 
-type Section = "accounts" | "appearance" | "updates" | "about";
+type Section = "accounts" | "appearance" | "hotkeys" | "modButtons" | "updates" | "about";
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "appearance", label: "Appearance and chat" },
+  { id: "hotkeys", label: "Hotkeys" },
+  { id: "modButtons", label: "Mod buttons" },
   { id: "updates", label: "Updates" },
   { id: "about", label: "About" },
 ];
@@ -50,6 +68,10 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
             <AccountsSection settings={settings} setSettings={setSettings} />
           ) : section === "appearance" ? (
             <AppearanceSection settings={settings} setSettings={setSettings} />
+          ) : section === "hotkeys" ? (
+            <HotkeysSection settings={settings} setSettings={setSettings} />
+          ) : section === "modButtons" ? (
+            <ModButtonsSection settings={settings} setSettings={setSettings} />
           ) : section === "updates" ? (
             <UpdatesSection settings={settings} setSettings={setSettings} />
           ) : (
@@ -512,6 +534,372 @@ function AppearanceSection({ settings, setSettings }: { settings: Settings; setS
       </Row>
       {bool("showModButtons", "Show mod buttons", "Inline buttons on rows when mod mode is on")}
     </div>
+  );
+}
+
+// ---- hotkeys ----------------------------------------------------------------------------
+
+const chipCls = "inline-flex items-center gap-1 rounded border px-1.5 py-px text-[11px] tabular-nums";
+
+function HotkeysSection({ settings, setSettings }: { settings: Settings; setSettings: SetSettings }) {
+  const table = resolveHotkeys(settings.hotkeys);
+  const conflicts = findConflicts(table);
+  const [recording, setRecording] = useState<HotkeyAction | null>(null);
+  const [hint, setHint] = useState("");
+  const [pending, setPending] = useState<{ action: HotkeyAction; binding: string; other: HotkeyAction } | null>(null);
+
+  const save = (next: HotkeyTable) => setSettings({ hotkeys: toOverrides(next) });
+  const tableRef = useRef(table);
+  tableRef.current = table;
+  const saveRef = useRef(save);
+  saveRef.current = save;
+
+  // Press-to-record: while on, the app's shortcuts and Esc-closes-dialog stand aside (hotkeyRecording).
+  useEffect(() => {
+    if (!recording) return;
+    hotkeyRecording.set(true);
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+        setRecording(null);
+        return;
+      }
+      const b = eventToBinding(e);
+      if (!b) return; // a modifier on its own: keep waiting
+      if (!isUsableBinding(b)) {
+        setHint(`${b} would get in the way of typing. Hold Ctrl or Alt, or use a function key.`);
+        return;
+      }
+      const t = tableRef.current;
+      setRecording(null);
+      setHint("");
+      if (t[recording].includes(b)) return;
+      const other = HOTKEY_ACTIONS.find((a) => a.id !== recording && t[a.id].includes(b));
+      if (other) setPending({ action: recording, binding: b, other: other.id });
+      else saveRef.current({ ...t, [recording]: [...t[recording], b] });
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      hotkeyRecording.set(false);
+    };
+  }, [recording]);
+
+  const groups = [...new Set(HOTKEY_ACTIONS.map((a) => a.group))];
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <H>Hotkeys</H>
+        <Btn small disabled={!Object.keys(toOverrides(table)).length} onClick={() => setSettings({ hotkeys: {} })}>
+          Reset all
+        </Btn>
+      </div>
+      <div className="mb-2 text-[11px] text-[var(--color-faint)]">Click + and press the new shortcut (Esc cancels). An action can have several shortcuts.</div>
+      {groups.map((g) => (
+        <div key={g} className="mb-3">
+          <div className="mb-1 text-[11px] uppercase tracking-wide text-[var(--color-faint)]">{g}</div>
+          {HOTKEY_ACTIONS.filter((a) => a.group === g).map((a) => {
+            const list = table[a.id];
+            const isDefault = list.length === a.defaults.length && list.every((b, i) => b === a.defaults[i]);
+            const rec = recording === a.id;
+            return (
+              <div key={a.id} className="border-b border-[var(--color-line)]/60 py-1 last:border-0" data-hotkey={a.id}>
+                <div className="flex items-center gap-2">
+                  <div className="w-40 shrink-0">{a.label}</div>
+                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+                    {list.map((b) => {
+                      const shared = conflicts.get(b)?.filter((x) => x !== a.id);
+                      return (
+                        <span
+                          key={b}
+                          className={`${chipCls} ${shared?.length ? "border-amber-500/60 text-amber-300" : "border-[var(--color-line)] bg-[var(--color-app)]"}`}
+                          title={shared?.length ? `Also bound to ${shared.map(actionLabel).join(", ")}` : undefined}
+                        >
+                          {b}
+                          <button
+                            type="button"
+                            aria-label={`Remove ${b}`}
+                            onClick={() => save({ ...table, [a.id]: list.filter((x) => x !== b) })}
+                            className="text-[var(--color-faint)] hover:text-red-400"
+                          >
+                            <XIcon className="h-2.5 w-2.5" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {!list.length && !rec && <span className="text-[11px] text-[var(--color-faint)]">none</span>}
+                    {rec ? (
+                      <span className={`${chipCls} animate-pulse border-[var(--color-accent)] text-[var(--color-accent-soft)]`}>Press keys…</span>
+                    ) : (
+                      <button
+                        type="button"
+                        title="Add a shortcut"
+                        aria-label={`Add a shortcut for ${a.label}`}
+                        onClick={() => {
+                          setPending(null);
+                          setHint("");
+                          setRecording(a.id);
+                        }}
+                        className={`${chipCls} border-dashed border-[var(--color-line)] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)]`}
+                      >
+                        +
+                      </button>
+                    )}
+                  </div>
+                  <Btn small disabled={isDefault} title={`Default: ${a.defaults.join(", ")}`} onClick={() => save({ ...table, [a.id]: a.defaults.slice() })}>
+                    Reset
+                  </Btn>
+                </div>
+                {rec && hint && <div className="mt-1 pl-42 text-[11px] text-amber-300">{hint}</div>}
+                {pending?.action === a.id && (
+                  <div className="mt-1 flex flex-wrap items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+                    <span className="min-w-0 flex-1">
+                      {pending.binding} is already used by "{actionLabel(pending.other)}".
+                    </span>
+                    <Btn
+                      small
+                      onClick={() => {
+                        save({ ...table, [pending.other]: table[pending.other].filter((x) => x !== pending.binding), [a.id]: [...list, pending.binding] });
+                        setPending(null);
+                      }}
+                    >
+                      Move it here
+                    </Btn>
+                    <Btn small onClick={() => setPending(null)}>
+                      Cancel
+                    </Btn>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---- mod buttons --------------------------------------------------------------------------
+
+const ACTION_LABEL: Record<ModButtonAction, string> = { ban: "Ban", timeout: "Timeout", delete: "Delete message", command: "Command" };
+
+function ModButtonsSection({ settings, setSettings }: { settings: Settings; setSettings: SetSettings }) {
+  const buttons = normalizeModButtons(settings.modButtons);
+  const save = (next: ModButton[]) => setSettings({ modButtons: next });
+  const patch = (id: string, p: Partial<ModButton>) => save(buttons.map((b) => (b.id === id ? { ...b, ...p } : b)));
+  const move = (i: number, d: -1 | 1) => {
+    const j = i + d;
+    if (j < 0 || j >= buttons.length) return;
+    const next = buttons.slice();
+    [next[i], next[j]] = [next[j], next[i]];
+    save(next);
+  };
+  const isDefault = JSON.stringify(buttons) === JSON.stringify(DEFAULT_MOD_BUTTONS);
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <H>Mod buttons</H>
+        <Btn small disabled={isDefault} onClick={() => save(DEFAULT_MOD_BUTTONS)}>
+          Reset to defaults
+        </Btn>
+      </div>
+      <div className="mb-2 text-[11px] text-[var(--color-faint)]">
+        Shown in this order at the start of every message when a split's mod mode is on. Ban, timeout and delete work wherever you can moderate; commands run
+        in Twitch chats.
+      </div>
+      <Card>
+        <div className="flex items-center gap-1 text-[13px]" aria-label="Preview">
+          <span className="inline-flex items-center gap-px">
+            {buttons.map((b) => (
+              <span key={b.id} title={describeModButton(b)} className="inline-flex h-4 min-w-4 items-center justify-center rounded text-[var(--color-faint)]">
+                <ModButtonFace button={b} />
+              </span>
+            ))}
+          </span>
+          <span className="font-semibold text-[var(--color-accent-soft)]">viewer</span>
+          <span className="text-[var(--color-muted)]">:</span>
+          <span>example message</span>
+        </div>
+        {!buttons.length && <div className="mt-1 text-[11px] text-[var(--color-faint)]">No buttons: rows show none in mod mode.</div>}
+      </Card>
+      {buttons.map((b, i) => (
+        <ModButtonEditor
+          key={b.id}
+          b={b}
+          first={i === 0}
+          last={i === buttons.length - 1}
+          onPatch={(p) => patch(b.id, p)}
+          onMove={(d) => move(i, d)}
+          onRemove={() => save(buttons.filter((x) => x.id !== b.id))}
+        />
+      ))}
+      <Btn
+        disabled={buttons.length >= MAX_MOD_BUTTONS}
+        onClick={() => save([...buttons, { id: newModButtonId(), action: "timeout", icon: "clock", label: "1m", seconds: 60, command: "" }])}
+        title="Adds a 1 minute timeout; change it below"
+      >
+        Add button
+      </Btn>
+    </div>
+  );
+}
+
+function ModButtonEditor({
+  b,
+  first,
+  last,
+  onPatch,
+  onMove,
+  onRemove,
+}: {
+  b: ModButton;
+  first: boolean;
+  last: boolean;
+  onPatch: (p: Partial<ModButton>) => void;
+  onMove: (d: -1 | 1) => void;
+  onRemove: () => void;
+}) {
+  const selectCls = "rounded border border-[var(--color-line)] bg-[var(--color-app)] px-1.5 py-1 text-[12px] outline-none focus:border-[var(--color-accent)]";
+  const iconBtn = "rounded p-1 text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)] disabled:opacity-30";
+  const setAction = (action: ModButtonAction) => {
+    // A new action gets that action's look (a "1m" label would mislabel a ban).
+    const p: Partial<ModButton> = { action, icon: defaultIcon(action), label: "" };
+    if (action === "timeout" && !b.seconds) p.seconds = 600;
+    if (action === "command" && !b.command) p.command = "/warn {user} Please follow the chat rules";
+    onPatch(p);
+  };
+  return (
+    <div className="mb-1.5 rounded border border-[var(--color-line)] bg-[var(--color-raised)] px-2 py-1.5" data-mod-button={b.id}>
+      <div className="flex items-center gap-1.5">
+        <span className="flex h-6 w-8 shrink-0 items-center justify-center rounded border border-[var(--color-line)] bg-[var(--color-app)] text-[13px] text-[var(--color-muted)]">
+          <ModButtonFace button={b} iconClass="h-3.5 w-3.5" />
+        </span>
+        <select value={b.action} onChange={(e) => setAction(e.target.value as ModButtonAction)} className={selectCls} aria-label="Action">
+          {(Object.keys(ACTION_LABEL) as ModButtonAction[]).map((a) => (
+            <option key={a} value={a}>
+              {ACTION_LABEL[a]}
+            </option>
+          ))}
+        </select>
+        <div className="min-w-0 flex-1">
+          {b.action === "timeout" ? (
+            <div className="flex items-center gap-2">
+              <div className="w-20 shrink-0">
+                <CommitInput
+                  key={`t${b.seconds}`}
+                  initial={formatDuration(b.seconds)}
+                  parse={(v) => parseDuration(v)}
+                  onCommit={(secs) => onPatch({ seconds: secs })}
+                  placeholder="10m"
+                  label="Timeout length"
+                  hint="30s, 10m, 1h, 1d, 1w"
+                />
+              </div>
+              <span className="truncate text-[11px] text-[var(--color-faint)]">30s, 10m, 1h, 1d, up to 2w</span>
+            </div>
+          ) : b.action === "command" ? (
+            <CommitInput
+              key={`c${b.command}`}
+              initial={b.command}
+              parse={(v) => (v.trim() ? v.trim().slice(0, MAX_COMMAND) : null)}
+              onCommit={(command) => onPatch({ command })}
+              placeholder="/timeout {user} 600"
+              label="Command"
+              hint={TEMPLATE_HELP}
+            />
+          ) : null}
+        </div>
+        <button type="button" className={iconBtn} disabled={first} onClick={() => onMove(-1)} aria-label="Move up" title="Move up">
+          <ChevronIcon className="h-3 w-3 rotate-180" />
+        </button>
+        <button type="button" className={iconBtn} disabled={last} onClick={() => onMove(1)} aria-label="Move down" title="Move down">
+          <ChevronIcon className="h-3 w-3" />
+        </button>
+        <button type="button" className={`${iconBtn} hover:!text-red-400`} onClick={onRemove} aria-label="Remove button" title="Remove">
+          <XIcon className="h-3 w-3" />
+        </button>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-[var(--color-faint)]">
+        <span className="mr-0.5">Icon</span>
+        {MOD_BUTTON_ICONS.map((ic) => {
+          const on = !b.label && b.icon === ic.id;
+          return (
+            <button
+              key={ic.id}
+              type="button"
+              title={ic.label}
+              aria-label={`Icon ${ic.label}`}
+              aria-pressed={on}
+              onClick={() => onPatch({ icon: ic.id, label: "" })}
+              className={
+                "flex h-5 w-5 items-center justify-center rounded border " +
+                (on ? "border-[var(--color-accent)] bg-[var(--color-mention)] text-[var(--color-text)]" : "border-transparent text-[var(--color-muted)] hover:bg-[var(--color-raised-2)]")
+              }
+            >
+              <ModIcon icon={ic.id} />
+            </button>
+          );
+        })}
+        <span className="ml-2 mr-0.5">or text</span>
+        <input
+          value={b.label}
+          maxLength={MAX_LABEL}
+          onChange={(e) => onPatch({ label: e.target.value.slice(0, MAX_LABEL), ...(e.target.value.trim() ? {} : { icon: b.icon || defaultIcon(b.action) }) })}
+          placeholder="1d"
+          spellCheck={false}
+          aria-label="Button text"
+          className="w-16 rounded border border-[var(--color-line)] bg-[var(--color-app)] px-1.5 py-0.5 text-[11px] text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+        />
+      </div>
+      {b.action === "command" && (
+        <div className="mt-1 text-[11px] text-[var(--color-faint)]">
+          A slash command or a chat message. Placeholders: {TEMPLATE_HELP}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A text box that saves on Enter / blur, and only a value `parse` accepts (red border otherwise). */
+function CommitInput<T>({
+  initial,
+  parse,
+  onCommit,
+  placeholder,
+  label,
+  hint,
+}: {
+  initial: string;
+  parse: (v: string) => T | null;
+  onCommit: (v: T) => void;
+  placeholder: string;
+  label: string;
+  hint?: string;
+}) {
+  const [v, setV] = useState(initial);
+  const bad = parse(v) === null;
+  const commit = () => {
+    const p = parse(v);
+    if (p === null) setV(initial);
+    else if (v !== initial) onCommit(p);
+  };
+  return (
+    <input
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+      placeholder={placeholder}
+      title={hint}
+      spellCheck={false}
+      aria-label={label}
+      aria-invalid={bad}
+      className={`${inputCls} ${bad ? "!border-red-500/70" : ""}`}
+    />
   );
 }
 

@@ -5,6 +5,7 @@ import { relayApi } from "../bridge";
 import type { SourceRef } from "../protocol";
 import type { Toast } from "./toast";
 import type { KickMsg, RumbleMsg } from "./types";
+import { formatDuration } from "./modButtons";
 
 async function failText(r: { status: number; text(): Promise<string> }, fallback: string): Promise<string> {
   const t = await r.text();
@@ -78,7 +79,7 @@ export async function rumbleModAction(source: SourceRef, action: "timeout" | "ba
       body: JSON.stringify(action === "delete" ? { action, messageId: msg.id } : { action, username: who, ...(action === "timeout" ? { seconds } : {}) }),
     });
     if (!r.ok) throw new Error((await r.text()) || "Rumble rejected the action");
-    toast(action === "timeout" ? `timed out ${who} on Rumble (${Math.round(seconds / 60)}m)` : action === "ban" ? `banned ${who} on Rumble` : "deleted on Rumble");
+    toast(action === "timeout" ? `timed out ${who} on Rumble (${formatDuration(seconds)})` : action === "ban" ? `banned ${who} on Rumble` : "deleted on Rumble");
   } catch (e) {
     toast((e as Error).message, "warn");
   }

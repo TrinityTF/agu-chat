@@ -50,6 +50,25 @@ export type Settings = {
   deletedMessages: "strike" | "hide" | "show";
   showModButtons: boolean;
   showPlatformMarks: boolean;
+  /** Shortcut overrides: action id -> bindings ("Ctrl+Shift+W"). Actions not listed use their defaults. */
+  hotkeys: Record<string, string[]>;
+  /** Inline mod-mode buttons, in display order. */
+  modButtons: ModButton[];
+};
+
+export type ModButtonAction = "ban" | "timeout" | "delete" | "command";
+export type ModButtonIcon = "ban" | "clock" | "trash" | "shield" | "warning" | "flag" | "eyeoff" | "chat" | "pin" | "check";
+export type ModButton = {
+  id: string;
+  action: ModButtonAction;
+  /** Drawn when `label` is empty. */
+  icon: ModButtonIcon | "";
+  /** Short text shown instead of the icon. */
+  label: string;
+  /** timeout only. */
+  seconds: number;
+  /** command only: a slash command or chat line with {user}, {msg-id}, ... placeholders. */
+  command: string;
 };
 
 export type SplitNode =

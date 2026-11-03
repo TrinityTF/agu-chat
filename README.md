@@ -15,7 +15,8 @@ and run it. Agu Chat keeps itself up to date after that.
 - **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges.
-- **Moderation:** mod mode adds ban, timeout and delete buttons to every message. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
+- **Moderation:** mod mode adds mod buttons to every message: ban, timeout and delete by default, or your own set (any timeout length, or a command such as `/warn {user} …`) in **Settings → Mod buttons**. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
+- **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **AutoMod:** approve or deny held messages right in chat.
 - **Typing:** Tab completes emotes and names; `:` searches emotes, `@` mentions people, `/` lists commands; there's an emote picker, and Up brings back what you sent.
 - **Recent history** loads when you open a Twitch channel, so a new split isn't empty.
@@ -59,6 +60,8 @@ Agu Chat uses your own free Twitch app to log in. You set it up once:
 | User card | Click a name (cards can be dragged; several can be open) |
 | New line in a message | Shift+Enter |
 | Settings | Ctrl+P or the gear icon |
+| Change shortcuts | Settings → Hotkeys: click `+` next to an action and press the keys |
+| Change mod buttons | Settings → Mod buttons |
 
 ## Updates
 

@@ -127,7 +127,12 @@ Never a token: tokens stay in main.
 The `Settings` type and defaults live in `src/renderer/protocol.ts` and
 `src/main/store.js` (keep them in sync). Notable keys: `twitchClientId` (the
 user's own Twitch app, Public client type), `updateChannel` (`"beta"` |
-`"stable"`), and the chat display options.
+`"stable"`), the chat display options, `hotkeys` (action id → bindings, only the
+actions the user changed; actions and defaults in `src/renderer/layout/hotkeys.ts`) and `modButtons` (the
+mod-mode row buttons in order; defaults and validation in `src/renderer/chat/modButtons.ts`). `settingsStore.set`
+accepts a key only when its value has the default's type; object/array keys instead go through a shape check
+in `STRUCTURED` (`store.js`), and the renderer validates their meaning when it reads them. `npm test` runs the
+`node --test` suites in `test/`.
 
 ## Layout
 

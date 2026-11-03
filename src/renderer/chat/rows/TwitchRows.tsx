@@ -157,11 +157,20 @@ function MessageRow({ row, ctx, env, susp, modMode }: { row: MsgRowT; ctx: RowCt
   const canDelete = caps.delete && reach.delete && !msg.deleted;
   const struck = msg.deleted && rs.deletedMessages === "strike";
 
+  // Command buttons need some mod right here; Twitch answers for the exact command.
+  const isMod = caps.ban || caps.delete || caps.warn;
   const mod = modMode ? (
     <ModButtons
-      onBan={canBan && !msg.deleted ? (target) => h.modPopover(target, "ban", row.sk, msg) : undefined}
-      onTimeout={canTimeout && !msg.deleted ? () => h.quickTimeout(row.sk, msg, 600) : undefined}
-      onDelete={canDelete ? () => h.deleteMsg(row.sk, msg.id) : undefined}
+      buttons={ctx.modList}
+      can={(b) =>
+        b.action === "ban" ? canBan && !msg.deleted : b.action === "timeout" ? canTimeout && !msg.deleted : b.action === "delete" ? canDelete : isMod
+      }
+      onRun={(b, target) => {
+        if (b.action === "ban") h.modPopover(target, "ban", row.sk, msg);
+        else if (b.action === "timeout") h.quickTimeout(row.sk, msg, b.seconds);
+        else if (b.action === "delete") h.deleteMsg(row.sk, msg.id);
+        else h.twitchCommand(row.sk, msg, b.command);
+      }}
     />
   ) : null;
 

@@ -1,10 +1,12 @@
 // The shared dense row shell (Chatterino look: no cards or bubbles, ~13px text, tight line height,
 // optional alternating background, optional HH:MM[:SS] timestamp in --color-faint, an optional platform
 // mark, then whatever the platform's row puts inline: mod buttons, badges, name, colon, message).
-import { memo, type CSSProperties, type ReactNode } from "react";
-import type { Platform } from "../../protocol";
+import type { CSSProperties, ReactNode } from "react";
+import type { ModButton, Platform } from "../../protocol";
 import { PlatformIcon } from "../../platformIcons";
-import { CopyIcon, ReplyIcon, TrashIcon, PinIcon, MinusCircleIcon, ClockIcon } from "../../icons";
+import { CopyIcon, ReplyIcon, TrashIcon, PinIcon } from "../../icons";
+import { describeModButton } from "../modButtons";
+import { ModButtonFace, modButtonTone } from "../ModButtonFace";
 import { fmtTime } from "../ui";
 import { LINE_HEIGHT } from "../parts";
 import type { RowCtx } from "./env";
@@ -105,38 +107,22 @@ export function HoverButtons({
   );
 }
 
-const modBtn = "inline-flex h-[1.15em] w-[1.15em] items-center justify-center rounded align-[-0.18em] text-faint hover:bg-raised-2";
+const modBtn = "inline-flex h-[1.15em] min-w-[1.15em] items-center justify-center rounded align-[-0.18em] text-faint hover:bg-raised-2";
 
-/** Chatterino-style inline mod buttons: ban, timeout (10m), delete. Each is optional (rights / reach). */
-export const ModButtons = memo(function ModButtons({
-  onBan,
-  onTimeout,
-  onDelete,
-  timeoutTitle = "Timeout 10m",
-}: {
-  onBan?: (target: HTMLElement) => void;
-  onTimeout?: () => void;
-  onDelete?: () => void;
-  timeoutTitle?: string;
-}) {
-  if (!onBan && !onTimeout && !onDelete) return null;
+/**
+ * Chatterino-style inline mod buttons, the user's list from settings (ban, timeout N, delete, commands) in
+ * order. `can` hides the ones this account can't use on this row (rights / reach / platform).
+ */
+export function ModButtons({ buttons, can, onRun }: { buttons: ModButton[]; can: (b: ModButton) => boolean; onRun: (b: ModButton, target: HTMLElement) => void }) {
+  const shown = buttons.filter(can);
+  if (!shown.length) return null;
   return (
     <span className="mr-1 inline-flex items-center gap-px select-none">
-      {onBan && (
-        <button type="button" title="Ban" onClick={(e) => onBan(e.currentTarget)} className={`${modBtn} hover:text-red-400`}>
-          <MinusCircleIcon className="h-3 w-3" />
+      {shown.map((b) => (
+        <button key={b.id} type="button" title={describeModButton(b)} onClick={(e) => onRun(b, e.currentTarget)} className={`${modBtn} ${modButtonTone(b)}`}>
+          <ModButtonFace button={b} />
         </button>
-      )}
-      {onTimeout && (
-        <button type="button" title={timeoutTitle} onClick={onTimeout} className={`${modBtn} hover:text-amber-400`}>
-          <ClockIcon className="h-3 w-3" />
-        </button>
-      )}
-      {onDelete && (
-        <button type="button" title="Delete message" onClick={onDelete} className={`${modBtn} hover:text-red-400`}>
-          <TrashIcon className="h-3 w-3" />
-        </button>
-      )}
+      ))}
     </span>
   );
-});
+}

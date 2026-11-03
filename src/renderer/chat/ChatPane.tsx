@@ -14,7 +14,7 @@ import { ModActionPopover, type ModPopoverState } from "./ModActionPopover";
 import { fetchCoCaps, NO_CO_CAPS, ALL_FALSE_CAPS, badgeNames, REACH_ALL, modReach, type CoCaps, type ModReach } from "./modCaps";
 import { kickModAction, pinMessage, resolveAutomod, rumbleModAction, setPinDuration, twitchAction, twitchDelete, unpinMessage } from "./modActions";
 import { buildKickInventory, buildRumbleInventory, buildTwitchInventory, EMPTY_INVENTORY, type Inventory } from "./input/inventory";
-import { SendBox, type SendSource } from "./input/SendBox";
+import { postText, SendBox, type SendSource } from "./input/SendBox";
 import { PinnedCard } from "./rows/PinnedCard";
 import { AutomodRow, ModFeedRow, NoticeRow, TwitchMessageRow } from "./rows/TwitchRows";
 import { KickRow, RumbleRow, XRow, YouTubeRow } from "./rows/CoChatRows";
@@ -26,6 +26,8 @@ import { noticeVisible } from "./twitch/events";
 import { EMPTY_TWITCH_DATA, useTwitchData, type TwitchData } from "./twitch/useTwitchData";
 import type { Row } from "./types";
 import { useChatFeed } from "./useChatFeed";
+import { DEFAULT_MOD_BUTTONS, expandTemplate, formatDuration, normalizeModButtons } from "./modButtons";
+import { confirmedCommand, parseUserArg, runSlashCommand, splitArgs } from "./input/slash";
 import { UserCard, type UserCardState } from "./UserCard";
 
 export type ChatPaneProps = {
@@ -57,6 +59,8 @@ const FALLBACK_SETTINGS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  hotkeys: {},
+  modButtons: DEFAULT_MOD_BUTTONS,
 };
 
 const EMPTY_SCOPED: ProviderScopedMap = { global: new Map(), channel: new Map() };
@@ -239,7 +243,34 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
       },
       quickTimeout(sk, msg, seconds) {
         const ref = refOf(sk);
-        if (ref) void twitchAction(ref, { action: "timeout", userId: msg.user.id, duration: seconds }, `timed out ${msg.user.name} (${Math.round(seconds / 60)}m)`, toast);
+        if (ref) void twitchAction(ref, { action: "timeout", userId: msg.user.id, duration: seconds }, `timed out ${msg.user.name} (${formatDuration(seconds)})`, toast);
+      },
+      twitchCommand(sk, msg, template) {
+        const ref = refOf(sk);
+        if (!ref) return;
+        const line = expandTemplate(template, { user: msg.user.login, name: msg.user.name, userId: msg.user.id, msgId: msg.id, channel: ref.channel, msg: msg.text }).trim();
+        if (!line) return;
+        void (async () => {
+          try {
+            if (line.startsWith("/") && !/^\/me(\s|$)/i.test(line)) {
+              const m = /^\/(\S+)\s*([\s\S]*)$/.exec(line);
+              const cmd = m ? m[1].toLowerCase() : "";
+              if (cmd === "clear" || cmd === "raid") {
+                const login = parseUserArg(splitArgs(m?.[2] ?? "")[0] || "");
+                if (cmd === "raid" && !login) return toast("Usage: /raid <user>", "warn");
+                if (!window.confirm(cmd === "clear" ? "Clear the whole chat?" : `Raid ${login}?`)) return;
+                await confirmedCommand(ref, cmd === "clear" ? { kind: "clear" } : { kind: "raid", login }, toast);
+                return;
+              }
+              await runSlashCommand(line, { source: ref, toast, lastMessageId: () => msg.id, pinnedId: () => store.sources.get(sk)?.pinned?.id ?? null });
+            } else {
+              const err = await postText(ref, "/api/chat/send", line.slice(0, 500));
+              if (err) toast(err, "warn");
+            }
+          } catch (e) {
+            toast((e as Error).message, "warn");
+          }
+        })();
       },
       modPopover(target, kind, sk, msg) {
         const container = panelRef.current;
@@ -260,9 +291,9 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
         const res = await resolveAutomod(ref, id, action, toast);
         if (res === "gone") store.markAutomodExpired(sk, id);
       },
-      rumbleMod(sk, action, msg) {
+      rumbleMod(sk, action, msg, seconds) {
         const ref = refOf(sk);
-        if (ref) void rumbleModAction(ref, action, msg, toast);
+        if (ref) void rumbleModAction(ref, action, msg, toast, seconds);
       },
       kickMod(sk, action, msg, seconds) {
         const ref = refOf(sk);
@@ -274,7 +305,8 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
 
   const showPlatform = rs.showPlatformMarks || sources.length > 1;
   const inlineMod = modMode && rs.showModButtons;
-  const ctx: RowCtx = useMemo(() => ({ rs, h, showPlatform, modButtons: inlineMod }), [rs, h, showPlatform, inlineMod]);
+  const modList = useMemo(() => normalizeModButtons(rs.modButtons), [rs.modButtons]);
+  const ctx: RowCtx = useMemo(() => ({ rs, h, showPlatform, modButtons: inlineMod, modList }), [rs, h, showPlatform, inlineMod, modList]);
 
   // ---- rows ---------------------------------------------------------------------------------------------------
   const visible = useMemo(() => {

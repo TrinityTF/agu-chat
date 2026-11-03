@@ -3,6 +3,7 @@
 // main does) and renders one or two ChatPane splits. Not part of the production bundle (not imported by
 // index.html).
 import type { AguBridge, Frame, Settings, SourceRef } from "../../protocol";
+import { DEFAULT_MOD_BUTTONS } from "../modButtons";
 
 const now = Date.now();
 const user = (id: string, login: string, color = "") => ({ id, login, name: login[0].toUpperCase() + login.slice(1), color });
@@ -105,6 +106,8 @@ const settings: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  hotkeys: {},
+  modButtons: DEFAULT_MOD_BUTTONS,
 };
 
 const frameCbs = new Set<(id: string, f: Frame) => void>();

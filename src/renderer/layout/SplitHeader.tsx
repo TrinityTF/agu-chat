@@ -6,6 +6,7 @@ import { PLATFORM_LABEL, PlatformIcon } from "../platformIcons";
 import { DotsIcon, SwordIcon } from "../icons";
 import { PopupMenu, anchorOf, type MenuItem } from "./ui";
 import { shortName, sourceKey, type Leaf } from "./tree";
+import { useHotkeyHint } from "./hotkeyContext";
 
 export type SplitActions = {
   focus(leafId: string): void;
@@ -42,6 +43,7 @@ export function SplitHeader({
   onDragEnd: () => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const closeKey = useHotkeyHint("closeSplit");
 
   const rows = leaf.sources.map((s) => ({ s, st: status[sourceKey(s)] as ConnFrame | undefined }));
   const live = rows.find((r) => r.st?.live);
@@ -52,7 +54,7 @@ export function SplitHeader({
     { label: "Add split right", onClick: () => actions.split(leaf.id, "right") },
     { label: "Add split below", onClick: () => actions.split(leaf.id, "below") },
     "sep",
-    { label: "Close split", hint: "Ctrl+W", danger: true, onClick: () => actions.close(leaf.id) },
+    { label: "Close split", hint: closeKey, danger: true, onClick: () => actions.close(leaf.id) },
   ];
 
   return (

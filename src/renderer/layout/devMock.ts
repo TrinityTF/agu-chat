@@ -12,6 +12,7 @@ import type {
   SourceRef,
   UpdaterState,
 } from "../protocol";
+import { DEFAULT_MOD_BUTTONS } from "../chat/modButtons";
 
 const DEFAULTS: Settings = {
   twitchClientId: "",
@@ -30,6 +31,8 @@ const DEFAULTS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  hotkeys: {},
+  modButtons: DEFAULT_MOD_BUTTONS,
 };
 
 function createMock(): AguBridge {

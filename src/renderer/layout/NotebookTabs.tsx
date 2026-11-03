@@ -4,6 +4,7 @@ import type { Tab } from "../protocol";
 import { GearIcon, XIcon } from "../icons";
 import { PopupMenu, type MenuItem } from "./ui";
 import { autoTitle, tabTitle } from "./tree";
+import { useHotkeyHint } from "./hotkeyContext";
 
 export type TabActions = {
   select(id: string): void;
@@ -17,6 +18,9 @@ export type TabActions = {
 };
 
 export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: string; actions: TabActions }) {
+  const closeTabKey = useHotkeyHint("closeTab");
+  const newTabKey = useHotkeyHint("newTab");
+  const settingsKey = useHotkeyHint("openSettings");
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
@@ -42,7 +46,7 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
     const t = tabs.find((x) => x.id === id);
     return [
       { label: "Rename tab", onClick: () => t && startRename(t) },
-      { label: "Close tab", hint: "Ctrl+Shift+W", onClick: () => actions.close(id) },
+      { label: "Close tab", hint: closeTabKey, onClick: () => actions.close(id) },
       { label: "Close other tabs", disabled: tabs.length < 2, onClick: () => actions.closeOthers(id) },
     ];
   };
@@ -179,7 +183,7 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
       <button
         type="button"
         onClick={actions.add}
-        title="New tab (Ctrl+T)"
+        title={newTabKey ? `New tab (${newTabKey})` : "New tab"}
         aria-label="New tab"
         className="flex w-7 shrink-0 items-center justify-center text-[16px] leading-none text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
       >
@@ -192,7 +196,7 @@ export function NotebookTabs({ tabs, active, actions }: { tabs: Tab[]; active: s
           e.currentTarget.blur();
           actions.openSettings();
         }}
-        title="Settings (Ctrl+P)"
+        title={settingsKey ? `Settings (${settingsKey})` : "Settings"}
         aria-label="Settings"
         className="flex w-8 shrink-0 items-center justify-center border-l border-[var(--color-line)] text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
       >
