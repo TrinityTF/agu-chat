@@ -57,8 +57,8 @@ export function SplitHeader({
   onDragSources: (d: SourceDrag) => void;
   onDragEnd: () => void;
 }) {
-  const [menu, setMenu] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const [chipMenu, setChipMenu] = useState<{ anchor: { x: number; y: number; w: number; h: number }; platform: Platform } | null>(null);
+  const [menu, setMenu] = useState<ReturnType<typeof anchorOf> | null>(null);
+  const [chipMenu, setChipMenu] = useState<{ anchor: ReturnType<typeof anchorOf>; platform: Platform } | null>(null);
   const closeKey = useHotkeyHint("closeSplit");
 
   const rows = leaf.sources.map((s) => ({ s, st: status[sourceKey(s)] as ConnFrame | undefined }));
@@ -145,8 +145,8 @@ export function SplitHeader({
                   onDragEnd();
                 }}
                 onClick={(e) => {
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setChipMenu({ anchor: { x: r.left, y: r.top, w: r.width, h: r.height }, platform: g.platform });
+                  const el = e.currentTarget;
+                  setChipMenu((open) => (open?.platform === g.platform ? null : { anchor: anchorOf(el), platform: g.platform }));
                 }}
                 title={[...g.rows.map(dotTip), "Click to split out, or drag onto a split edge"].join("\n")}
                 data-chip={g.platform}
@@ -203,7 +203,10 @@ export function SplitHeader({
       </button>
       <button
         type="button"
-        onClick={(e) => setMenu(anchorOf(e.currentTarget))}
+        onClick={(e) => {
+          const el = e.currentTarget;
+          setMenu((open) => (open ? null : anchorOf(el)));
+        }}
         title="Split menu"
         aria-label="Split menu"
         className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-faint)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"

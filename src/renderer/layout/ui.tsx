@@ -80,13 +80,16 @@ export function PopupMenu({
   onClose,
   align = "left",
 }: {
-  anchor: { x: number; y: number; w?: number; h?: number };
+  /** `el`: the button that opened it. Pressing it again is left to that button, so it can toggle the menu shut. */
+  anchor: { x: number; y: number; w?: number; h?: number; el?: Element };
   items: MenuItem[];
   onClose: () => void;
   align?: "left" | "right";
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const anchorEl = useRef<Element | undefined>(anchor.el);
+  anchorEl.current = anchor.el;
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -101,6 +104,7 @@ export function PopupMenu({
 
   useEffect(() => {
     const down = (e: MouseEvent) => {
+      if (anchorEl.current?.contains(e.target as Node)) return;
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     const key = (e: KeyboardEvent) => {
@@ -168,7 +172,7 @@ export function PopupMenu({
 /** Opens a PopupMenu below the element that was clicked. */
 export function anchorOf(el: Element) {
   const r = el.getBoundingClientRect();
-  return { x: r.left, y: r.top, w: r.width, h: r.height };
+  return { x: r.left, y: r.top, w: r.width, h: r.height, el };
 }
 
 export function Btn({

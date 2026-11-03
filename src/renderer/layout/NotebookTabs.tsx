@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Tab } from "../protocol";
 import { agu } from "../bridge";
 import { ChevronIcon, GearIcon, PinIcon, WinMaxIcon, WinMinIcon, WinRestoreIcon, XIcon } from "../icons";
-import { PopupMenu, type MenuItem } from "./ui";
+import { PopupMenu, anchorOf, type MenuItem } from "./ui";
 import { autoTitle, tabTitle } from "./tree";
 import { useHotkeyHint } from "./hotkeyContext";
 import type { Activity } from "../chat/ChatPane";
@@ -47,7 +47,7 @@ export function NotebookTabs({
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; tabId: string } | null>(null);
   const stripRef = useRef<HTMLDivElement>(null);
   const [overflow, setOverflow] = useState(false);
-  const [list, setList] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [list, setList] = useState<ReturnType<typeof anchorOf> | null>(null);
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -255,8 +255,8 @@ export function NotebookTabs({
         <button
           type="button"
           onClick={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            setList({ x: r.left, y: r.top, w: r.width, h: r.height });
+            const el = e.currentTarget;
+            setList((open) => (open ? null : anchorOf(el)));
           }}
           title="All tabs"
           aria-label="All tabs"
