@@ -1,0 +1,79 @@
+{
+  "name": "agu-chat",
+  "productName": "Agu Chat",
+  "version": "0.0.1-beta.1",
+  "description": "Multiplatform live chat client for Twitch, Kick, YouTube, Rumble and X",
+  "author": "Esmount",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TrinityTF/agu-chat.git"
+  },
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build:renderer": "vite build",
+    "start": "npm run build:renderer && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "npm run build:renderer && electron-builder --win --publish never",
+    "release": "npm run build:renderer && electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^44.4.1",
+    "electron-builder": "^26.15.3",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.4"
+  },
+  "build": {
+    "appId": "lol.agu.chat",
+    "productName": "Agu Chat",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/preload/**/*",
+      "out/renderer/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Agu Chat",
+      "runAfterFinish": true,
+      "artifactName": "Agu-Chat-Setup-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "releaseType": "draft"
+    }
+  }
+}

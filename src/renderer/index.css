@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+/* Agu Chat theme: Chatterino-like dark base with the agu.lol purple accents
+   (modtools.agu.lol web/src/index.css + bits.tsx). Use these tokens, not raw hex. */
+@theme {
+  --color-app: #0b0b10;        /* window background */
+  --color-panel: #111117;      /* split / chat background */
+  --color-panel-alt: #15151c;  /* alternating message rows */
+  --color-raised: #16161d;     /* headers, inputs, popovers */
+  --color-raised-2: #1c1c24;   /* hover */
+  --color-line: #26262f;       /* 1px borders between splits */
+  --color-accent: #9147ff;     /* Twitch / agu purple */
+  --color-accent-soft: #a970ff;
+  --color-accent-strong: #9333ea;
+  --color-text: #e4e4e7;
+  --color-muted: #a1a1aa;
+  --color-faint: #71717a;
+  --color-mention: rgba(145, 71, 255, 0.18);
+  --color-kick: #53fc18;
+  --color-youtube: #ff0033;
+  --color-rumble: #85c742;
+  --color-x: #ffffff;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--color-app);
+  color: var(--color-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+select,
+option {
+  background-color: #16161d;
+  color: #eee;
+}
+
+/* Thin Chatterino-style scrollbars. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2c2c36;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a46;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

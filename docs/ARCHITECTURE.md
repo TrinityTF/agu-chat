@@ -1,0 +1,176 @@
+# Agu Chat architecture
+
+This is the contract between the pieces. Change it only when both sides change.
+
+Agu Chat is an Electron app. The **main process** (Node, ESM) connects straight
+to each platform and acts as an in-process "local relay": it speaks the same
+frames the agu.lol chat page already understands, so renderer code ported from
+`modtools.agu.lol/web/src/app/pages/Chat.tsx` (and `KickChat.tsx`,
+`YouTubeChat.tsx`, `RumbleChat.tsx`, `XChat.tsx`) keeps working with small
+changes. Nothing talks to agu.lol or api.agu.lol.
+
+```
+renderer (React, sandboxed)  <--  window.agu (preload, contextBridge)  -->  main (Node)
+  notebook / splits / chat                 IPC                       relay: sources + api router
+                                                                     platforms: twitch kick youtube rumble x
+                                                                     store: settings.json + secrets (safeStorage)
+                                                                     updater: electron-updater, beta/stable
+```
+
+## Layout of the repo
+
+| path | what |
+| --- | --- |
+| `src/main/main.js` | app lifecycle, the window, IPC wiring |
+| `src/main/store.js` | settings (`settings.json`) and secrets (`secrets.bin`, encrypted with `safeStorage`) |
+| `src/main/relay.js` | `SourceManager` (ref-counted live sources) and the `api` router |
+| `src/main/platforms.js` | the list of platform modules |
+| `src/main/<platform>/index.js` | one module per platform (see "Platform module") |
+| `src/main/vendor/` | files copied from `modtools.agu.lol/render/lib/`, each with a header naming its origin |
+| `src/main/updater.js` | GitHub Releases updates, beta/stable channel |
+| `src/preload/preload.cjs` | the `window.agu` bridge (CommonJS: sandboxed preloads cannot be ESM) |
+| `src/renderer/` | the React app (Vite root). `layout/` = notebook, splits, dialogs. `chat/` = message view, input, user card |
+| `src/renderer/bridge.ts` | typed access to `window.agu`, plus `relayApi()` |
+| `src/renderer/protocol.ts` | the shared types below, in TypeScript |
+
+## Sources
+
+A **source** is one platform's chat for one channel:
+
+```ts
+type Platform = "twitch" | "kick" | "youtube" | "rumble" | "x";
+type SourceRef = { platform: Platform; channel: string };
+```
+
+`channel` is what the user typed: a Twitch login, a Kick slug, a YouTube
+`@handle` / channel id / video URL, a Rumble channel or video URL, an X
+username. Each platform module normalizes it (`normalizeChannel`), and the
+source key is `${platform}:${normalized}`.
+
+The renderer calls `agu.subscribe(source)` and gets a `subId`. Frames for that
+subscription arrive through `agu.onFrame((subId, frame) => ...)`. Several splits
+showing the same channel share ONE upstream connection: `SourceManager`
+ref-counts subscribers, replays the current snapshot to each new subscriber,
+and stops the source `LINGER_MS` (30s) after its last subscriber leaves.
+
+### Frames
+
+Every frame is a plain object with a `type`. Each platform emits **the same
+frames its agu.lol relay socket sends today**, so the ported row renderers keep
+working:
+
+- Twitch: what `/ws/chat` sends (`render/lib/ircRelay.js`): `chatlog` hello
+  (`messages`, `pinned`, `modfeed`, `automod`, `suspicious`, `esub`, ...),
+  `chat`, `chatnotice`, `clearchat`, `clearmsg`, `pin`, `modfeed`, `automod`,
+  `suspicious`, `esub`, ... Messages carry `platform: "twitch"`.
+- Rumble: what `/ws/rumble` sends: `chatlog`, `chat`, `status`, `delete`,
+  `mute`, `pin`, `emotes`.
+- Kick, YouTube, X: what `/ws/kick`, `/ws/youtube`, `/ws/x` send (see
+  `render/server.js` and each `render/lib/<platform>.js`).
+
+On top of that, **every source emits a uniform connection frame**, so a split
+header can show state without knowing the platform:
+
+```ts
+type ConnFrame = {
+  type: "conn";
+  state: "connecting" | "open" | "offline" | "error" | "unavailable";
+  detail?: string;      // human readable: "Chat is disabled for this live stream.", "Not live", ...
+  live?: boolean;       // when the platform knows
+  title?: string;       // stream title, when known
+  canSend?: boolean;    // the logged-in account can post here from this app
+  readOnlyReason?: string; // why not, in one line, shown in the input box
+};
+```
+
+## The api router (request / response)
+
+`agu.api(source, path, init)` → `{ status, body }`. The paths and bodies are
+the agu.lol relay's HTTP API (`render/server.js`), with one difference: the
+channel comes from `source`, not from a session. Platform modules register
+their own routes. The renderer's `relayApi(source, path, init)` wraps this in a
+`Response`-like object (`ok`, `status`, `json()`), so ported code that did
+`const r = await relayApi("/api/mod/action", {method: "POST", body: JSON.stringify(x)})`
+keeps its shape with a `source` added.
+
+Twitch routes (same semantics as `render/server.js`): `/api/chat/send`,
+`/api/mod/action`, `/api/mod/caps`, `/api/mod/user`, `/api/mod/automod`,
+`/api/chat/settings`, `/api/chat/shield`, `/api/chat/announce`,
+`/api/chat/shoutout`, `/api/chat/raid`, `/api/chat/terms`, `/api/chat/rules`,
+`/api/chat/badges`, `/api/chat/twitch-emotes`, `/api/chatters`.
+Pins go through `/api/mod/action` (`pin` / `unpin`) as on the site.
+
+Rumble: `/api/rumble/send`, `/api/rumble/action`, `/api/rumble/caps`.
+Kick: `/api/kick/send`, `/api/kick/action`, `/api/kick/caps` (only if sending works, see README).
+
+An unknown path answers `{ status: 404, body: { error: "not found" } }`.
+
+## Accounts
+
+`agu.accounts.get()` → `{ twitch, kick, youtube, rumble, x }`, each
+`{ connected: boolean, user?: { id, login, name }, scopes?: string[], pending?: DevicePrompt, error?: string }`.
+Never a token: tokens stay in main.
+
+- `agu.accounts.login("twitch")` starts the OAuth **device code flow** and
+  resolves with `{ userCode, verificationUri, expiresAt }`. Main polls in the
+  background and emits `accounts` changes. `agu.accounts.cancel("twitch")`.
+- `agu.accounts.login("rumble", { username, password })` may resolve
+  `{ twoFactor: true }`; then `login("rumble", { code })` finishes it.
+- `agu.accounts.logout(platform)`.
+
+## Settings
+
+`agu.settings.get()` / `agu.settings.set(patch)` / `agu.settings.onChange(cb)`.
+The `Settings` type and defaults live in `src/renderer/protocol.ts` and
+`src/main/store.js` (keep them in sync). Notable keys: `twitchClientId` (the
+user's own Twitch app, Public client type), `updateChannel` (`"beta"` |
+`"stable"`), and the chat display options.
+
+## Layout
+
+`agu.layout.get()` / `agu.layout.set(layout)` persist the notebook to
+`layout.json` in userData:
+
+```ts
+type SplitNode =
+  | { kind: "leaf"; id: string; sources: SourceRef[]; modMode: boolean }
+  | { kind: "row" | "col"; id: string; children: SplitNode[]; sizes: number[] }; // sizes are fractions summing to 1
+type Tab = { id: string; title: string; root: SplitNode | null };
+type Layout = { tabs: Tab[]; active: string };
+```
+
+A leaf with one source is a single channel; with several it is a merged
+co-chat (messages interleaved by time, each row marked with its platform).
+
+## Platform module
+
+`src/main/<platform>/index.js` exports:
+
+```js
+export const platform = "kick";
+export function normalizeChannel(input) -> string            // throws Error(userMessage) if unusable
+export function createSource({ channel, emit, ctx }) -> {
+  start(),                 // open upstream; emit({type:"conn", state:"connecting"}) first
+  stop(),                  // close everything, clear timers
+  snapshot() -> Frame[],   // frames a NEW subscriber needs (usually one chatlog + the latest conn)
+}
+export const routes = { "POST /api/kick/send": async ({ source, body, ctx }) => ({ status, body }) }  // optional
+export const accounts = { state(), login(args), cancel(), logout() }  // optional
+export function init(ctx) {}  // optional, called once at startup
+```
+
+`ctx` gives a module what it may use from the app: `ctx.settings.get()`,
+`ctx.secrets.get(key)` / `set(key, value)` / `delete(key)`,
+`ctx.accountsChanged()`, `ctx.log(...)`, `ctx.userAgent` and
+`ctx.platforms.twitch.getUserToken()` (other modules may need it).
+
+## Rules that carry over from render/README.md
+
+- Rumble: only `wn0.rumble.com` (then `web7` for chat), never the apex. Never
+  try to get past a Cloudflare challenge: no TLS impersonation, no scripted
+  browsers, no browser user agent strings.
+- Kick: send our own honest product UA (`ctx.userAgent`), never a browser UA.
+- YouTube: one poll per source, honour `timeoutMs`, back off on failure.
+- X: guest token only, read-only, no paid v2 calls, no bot token in the app.
+- Twitch: device code flow with the user's own **Public** client id. Never use
+  another app's client id (twitch.tv's own web client id included).
