@@ -1,11 +1,14 @@
 // Draws its children into a separate OS window, so a user card can be dragged anywhere on screen, outside the app.
 // main.js lets about:blank windows named "agu-popout:<id>" open (frameless, owned by the main window). The window
 // runs this renderer's JS, so React state, handlers and stores work as if it were inline; the styles are copied in.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { agu } from "../bridge";
 
 const open = new Map<string, Window>();
+
+/** True once the user resized the pop-out by hand: its content should fill the window instead of sizing it. */
+export const PopoutFill = createContext(false);
 
 /** Bring an already open pop-out to the front. False when there is none. */
 export function focusPopout(id: string): boolean {
@@ -52,6 +55,7 @@ export function PopoutWindow({
   children: ReactNode;
 }) {
   const [host, setHost] = useState<HTMLElement | null>(null);
+  const [fill, setFill] = useState(false);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -109,5 +113,16 @@ export function PopoutWindow({
     if (w && !w.closed) w.document.title = title;
   }, [id, title, host]);
 
-  return host ? createPortal(children, host) : null;
+  useEffect(() => {
+    setFill(false);
+    return agu.win.onPopoutUserSized((name) => name === `agu-popout:${id}` && setFill(true));
+  }, [id]);
+
+  useEffect(() => {
+    if (!host) return;
+    const d = host.ownerDocument;
+    for (const el of [d.documentElement, d.body, host]) el.style.height = fill ? "100%" : "";
+  }, [host, fill]);
+
+  return host ? createPortal(<PopoutFill.Provider value={fill}>{children}</PopoutFill.Provider>, host) : null;
 }

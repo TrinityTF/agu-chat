@@ -131,12 +131,13 @@ function applyAlwaysOnTop(on) {
 // itself, so they share its state. Frameless, owned by the main window, free to move anywhere on screen.
 const popouts = new Map(); // frameName -> BrowserWindow
 
-// A pop-out's height follows its content; its width stays whatever it is (the user may have resized it).
-// Done here with content sizes, because a renderer-side resizeTo(outerWidth, ..) grew the window a few
-// pixels on every call until it filled the screen.
+// A pop-out's height follows its content until the user resizes it by hand; from then on it keeps their size
+// and the card fills it. Done here with content sizes, because a renderer-side resizeTo(outerWidth, ..) grew
+// the window a few pixels on every call until it filled the screen.
+const userSized = new WeakSet();
 function fitPopout(name, height) {
   const w = popouts.get(String(name));
-  if (!w || w.isDestroyed()) return;
+  if (!w || w.isDestroyed() || userSized.has(w)) return;
   const [cw, ch] = w.getContentSize();
   const max = screen.getDisplayMatching(w.getBounds()).workAreaSize.height - 40;
   const h = Math.max(120, Math.min(Math.round(Number(height) || 0), max));
@@ -220,6 +221,12 @@ function createWindow() {
     const name = details?.frameName || "";
     if (name.startsWith("agu-popout:")) {
       popouts.set(name, child);
+      // will-resize fires only for a resize by hand, never for setContentSize.
+      child.on("will-resize", () => {
+        if (userSized.has(child)) return;
+        userSized.add(child);
+        win?.webContents.send("win:popoutUserSized", name);
+      });
       child.on("closed", () => popouts.get(name) === child && popouts.delete(name));
     }
     child.webContents.setWindowOpenHandler(({ url }) => {

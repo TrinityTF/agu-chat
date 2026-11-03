@@ -186,7 +186,7 @@ const agu: AguBridge = {
   updater: { get: async () => ({}) as any, check: async () => {}, install: async () => {}, onChange: () => () => {} },
   app: { info: async () => ({ version: "dev", packaged: false }), openExternal: async () => {}, flash: async () => {} },
   sounds: { pick: async () => null, read: async () => new Uint8Array() },
-  win: { minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {}, isMaximized: async () => false, onMaximized: () => () => {}, fitPopout: async () => {} },
+  win: { minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {}, isMaximized: async () => false, onMaximized: () => () => {}, fitPopout: async () => {}, onPopoutUserSized: () => () => {} },
 };
 
 (window as any).agu = agu;

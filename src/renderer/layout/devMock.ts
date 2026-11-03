@@ -234,6 +234,9 @@ function createMock(): AguBridge {
         return () => {};
       },
       async fitPopout() {},
+      onPopoutUserSized() {
+        return () => {};
+      },
     },
 
     sounds: {

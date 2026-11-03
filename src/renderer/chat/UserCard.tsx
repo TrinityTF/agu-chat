@@ -5,7 +5,7 @@
 // split is in mod mode and the account has the rights; Rumble / Kick get profile link + their mod
 // actions; YouTube / X get the profile + recent messages), recent messages come from this split's rows,
 // Esc closes the topmost card (handled by the pane), `alt` second-channel support dropped.
-import { useCallback, useEffect, useRef, useState, type PointerEvent as RPointerEvent, type RefObject } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type PointerEvent as RPointerEvent, type RefObject } from "react";
 import { relayApi } from "../bridge";
 import { PlatformIcon, PLATFORM_LABEL } from "../platformIcons";
 import type { Platform, SourceRef } from "../protocol";
@@ -15,6 +15,7 @@ import { twitchAction } from "./modActions";
 import type { Handlers, TwitchEnv, CoEnv } from "./rows/env";
 import { MessageText } from "./parts";
 import { splitKickEmotes, splitRumbleEmotes } from "./rows/CoChatRows";
+import { PopoutFill } from "./PopoutWindow";
 import { buildParts } from "./twitch/parts";
 import type { Toast } from "./toast";
 import type { ChatMsg, Row, RowUser, SuspiciousUser } from "./types";
@@ -115,6 +116,7 @@ export function UserCard({
   const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const isTwitch = state.platform === "twitch";
   const [data, setData] = useState<ModUserResp | null>(null);
+  const fill = useContext(PopoutFill) && windowed; // resized by hand: fill the window
   const [relogin, setRelogin] = useState(false);
   const [loading, setLoading] = useState(isTwitch);
   const [reasonMode, setReasonMode] = useState(false);
@@ -256,7 +258,9 @@ export function UserCard({
       onMouseDownCapture={windowed ? undefined : onFront}
       className={
         windowed
-          ? "w-full overflow-hidden border border-line bg-raised text-xs text-text"
+          ? fill
+            ? "flex h-full w-full flex-col overflow-y-auto border border-line bg-raised text-xs text-text"
+            : "w-full overflow-hidden border border-line bg-raised text-xs text-text"
           : "absolute z-30 w-72 overflow-hidden rounded-md border border-line bg-raised text-xs text-text shadow-2xl shadow-black/60"
       }
       style={windowed ? undefined : { left: state.left, top: state.top, transform: state.above ? "translateY(-100%)" : undefined }}
@@ -493,7 +497,7 @@ export function UserCard({
         </div>
       )}
 
-      <div className="max-h-52 overflow-y-auto p-2.5">
+      <div className={(fill ? "min-h-0 flex-1" : "max-h-52") + " overflow-y-auto p-2.5"}>
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-faint">Recent messages in {PLATFORM_LABEL[state.platform]}</div>
         {recent.length === 0 ? (
           <p className="text-faint">No recent messages.</p>
