@@ -6,9 +6,11 @@
 // sources (single channel or merged co-chat) from one ChatStore; the site's page chrome (headers, layout
 // picker, settings popovers, Modes panel, second channel) is not part of the split.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { agu } from "../bridge";
 import { useAccounts, useSettings } from "../hooks";
 import type { ConnFrame, Settings, SourceRef } from "../protocol";
 import { EmoteTipLayer } from "./emoteTip";
+import { compileIgnores, filterIgnored, ignoreLogin, isUserIgnored, toggleIgnoredUser } from "./ignores";
 import { MessageList } from "./MessageList";
 import { ModActionPopover, type ModPopoverState } from "./ModActionPopover";
 import { fetchCoCaps, NO_CO_CAPS, ALL_FALSE_CAPS, badgeNames, REACH_ALL, modReach, type CoCaps, type ModReach } from "./modCaps";
@@ -57,6 +59,8 @@ const FALLBACK_SETTINGS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 const EMPTY_SCOPED: ProviderScopedMap = { global: new Map(), channel: new Map() };
@@ -283,6 +287,26 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
     return rows.filter((r) => r.k !== "notice" || noticeVisible(r.n, bombs));
   }, [rows]);
 
+  // Ignored users / phrases. Results are cached per row object (rows are immutable; a change makes a new
+  // object), and the cache is thrown away when the rules change.
+  const ignores = useMemo(() => compileIgnores(rs.ignoredUsers, rs.ignoredPhrases), [rs.ignoredUsers, rs.ignoredPhrases]);
+  const ignoreCache = useMemo(() => new WeakMap<Row, Row | null>(), [ignores]);
+  const shown = useMemo(() => filterIgnored(visible, ignores, ignoreCache), [visible, ignores, ignoreCache]);
+
+  const setIgnored = useCallback(
+    (platform: SourceRef["platform"], login: string, on: boolean) => {
+      // Read the latest list from main so two splits toggling at once don't overwrite each other.
+      void agu.settings
+        .get()
+        .then((cur) => agu.settings.set({ ignoredUsers: toggleIgnoredUser(cur.ignoredUsers ?? [], platform, login, on) }))
+        .then(
+          () => toast(on ? `Ignoring ${login}` : `No longer ignoring ${login}`),
+          () => toast("Couldn't save the ignore list", "warn"),
+        );
+    },
+    [toast],
+  );
+
   const renderRow = (r: Row): ReactNode => {
     switch (r.k) {
       case "msg": {
@@ -462,11 +486,12 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
           );
         })}
 
-      <MessageList rows={visible} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} />
+      <MessageList rows={shown} renderRow={renderRow} empty={empty} onHold={(held) => store.setHeld(held)} focused={focused} />
 
       {cards.map((c) => {
         const ref = refOf(c.sk);
         if (!ref) return null;
+        const ignoreAs = ignoreLogin(c.user);
         return (
           <UserCard
             key={c.id}
@@ -486,6 +511,8 @@ export function ChatPane({ sources, modMode, focused, onStatus }: ChatPaneProps)
             onFront={() => frontCard(c.id)}
             onMove={(l, t, a) => moveCard(c.id, l, t, a)}
             onTwitchDeleted={(id) => store.markDeleted(c.sk, id)}
+            ignored={!!ignoreAs && isUserIgnored(rs.ignoredUsers ?? [], c.platform, ignoreAs)}
+            onIgnore={ignoreAs ? (on) => setIgnored(c.platform, ignoreAs, on) : undefined}
           />
         );
       })}

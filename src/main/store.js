@@ -4,6 +4,7 @@ import { app, safeStorage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { loadSettings, sanitizeSetting } from "./settingsSanitize.js";
 
 // Keep in sync with Settings in src/renderer/protocol.ts.
 export const DEFAULT_SETTINGS = {
@@ -23,6 +24,8 @@ export const DEFAULT_SETTINGS = {
   deletedMessages: "strike", // strike | hide | show
   showModButtons: true,
   showPlatformMarks: true,
+  ignoredUsers: [], // [{ platform, login }] (see settingsSanitize.js)
+  ignoredPhrases: [], // [{ pattern, regex, caseSensitive, action: "hide" | "replace", replacement }]
 };
 
 const dir = () => app.getPath("userData");
@@ -50,15 +53,14 @@ let settings = null;
 
 export const settingsStore = {
   get() {
-    if (!settings) settings = { ...DEFAULT_SETTINGS, ...readJson("settings.json", {}) };
-    return { ...settings };
+    if (!settings) settings = loadSettings(readJson("settings.json", {}), DEFAULT_SETTINGS);
+    return structuredClone(settings);
   },
   set(patch) {
     const next = { ...this.get() };
     for (const [k, v] of Object.entries(patch || {})) {
-      if (!(k in DEFAULT_SETTINGS)) continue;
-      if (typeof v !== typeof DEFAULT_SETTINGS[k]) continue;
-      next[k] = typeof v === "string" ? v.trim() : v;
+      const value = sanitizeSetting(k, v, DEFAULT_SETTINGS);
+      if (value !== undefined) next[k] = value;
     }
     settings = next;
     writeJson("settings.json", settings);

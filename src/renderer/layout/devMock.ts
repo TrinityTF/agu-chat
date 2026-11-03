@@ -30,6 +30,8 @@ const DEFAULTS: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 function createMock(): AguBridge {

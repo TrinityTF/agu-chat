@@ -127,7 +127,12 @@ Never a token: tokens stay in main.
 The `Settings` type and defaults live in `src/renderer/protocol.ts` and
 `src/main/store.js` (keep them in sync). Notable keys: `twitchClientId` (the
 user's own Twitch app, Public client type), `updateChannel` (`"beta"` |
-`"stable"`), and the chat display options.
+`"stable"`), the chat display options, and the ignore lists `ignoredUsers`
+(`{ platform, login }[]`) and `ignoredPhrases` (`{ pattern, regex, caseSensitive, action, replacement }[]`).
+Main validates every value against `DEFAULT_SETTINGS`: a scalar must have the default's type, and a list
+needs a sanitizer in `src/main/settingsSanitize.js` (malformed entries are dropped, also when loading).
+Ignores are applied in the renderer (`chat/ignores.ts`) before rows are drawn; split search is
+`chat/search.ts`. Pure logic like this is tested with `npm test` (`node --test`, files in `test/`).
 
 ## Layout
 

@@ -105,6 +105,8 @@ const settings: Settings = {
   deletedMessages: "strike",
   showModButtons: true,
   showPlatformMarks: true,
+  ignoredUsers: [],
+  ignoredPhrases: [],
 };
 
 const frameCbs = new Set<(id: string, f: Frame) => void>();
