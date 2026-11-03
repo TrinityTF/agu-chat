@@ -67,6 +67,8 @@ export type IgnoredPhrase = {
 // Keep in sync with DEFAULT_SETTINGS in src/main/store.js.
 export type Settings = {
   twitchClientId: string;
+  /** Keep the window above other apps. */
+  alwaysOnTop: boolean;
   updateChannel: "beta" | "stable";
   timestamps: boolean;
   timestampSeconds: boolean;
@@ -159,6 +161,13 @@ export interface AguBridge {
     openExternal(url: string): Promise<void>;
     /** Flash the taskbar button until the window is focused (does nothing while it is focused). */
     flash(): Promise<void>;
+  };
+  win: {
+    minimize(): Promise<void>;
+    toggleMaximize(): Promise<void>;
+    close(): Promise<void>;
+    isMaximized(): Promise<boolean>;
+    onMaximized(cb: (maximized: boolean) => void): () => void;
   };
   sounds: {
     /** Let the user choose an audio file; it is copied into the app's sounds folder. null = cancelled. */

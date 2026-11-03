@@ -45,17 +45,21 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
   const [settings, setSettings] = useLiveSettings();
 
   return (
-    <Modal title="Settings" onClose={onClose} width={780}>
-      <div className="flex h-[min(72vh,540px)] text-[12px]">
-        <nav className="w-40 shrink-0 border-r border-[var(--color-line)] bg-[var(--color-app)] py-2">
+    <Modal title="Settings" onClose={onClose} width={780} fullOnSmall>
+      {/* Narrow windows (and phones later): the section list becomes a scrolling row above the page. */}
+      <div className="flex h-[min(72vh,540px)] text-[12px] max-sm:h-full max-sm:flex-col">
+        <nav className="no-scrollbar w-40 shrink-0 border-r border-[var(--color-line)] bg-[var(--color-app)] py-2 max-sm:flex max-sm:w-full max-sm:overflow-x-auto max-sm:border-b max-sm:border-r-0 max-sm:py-0">
           {SECTIONS.map((s) => (
             <button
               key={s.id}
               type="button"
-              onClick={() => setSection(s.id)}
+              onClick={(e) => {
+                setSection(s.id);
+                e.currentTarget.scrollIntoView({ inline: "nearest", block: "nearest" });
+              }}
               aria-current={section === s.id}
               className={
-                "block w-full border-l-2 px-3 py-1.5 text-left " +
+                "block w-full border-l-2 px-3 py-1.5 text-left max-sm:w-auto max-sm:shrink-0 max-sm:whitespace-nowrap max-sm:border-b-2 max-sm:border-l-0 max-sm:py-2 " +
                 (section === s.id
                   ? "border-[var(--color-accent)] bg-[var(--color-raised)] text-[var(--color-text)]"
                   : "border-transparent text-[var(--color-muted)] hover:bg-[var(--color-raised)] hover:text-[var(--color-text)]")
@@ -65,7 +69,7 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
             </button>
           ))}
         </nav>
-        <div className="min-w-0 flex-1 overflow-y-auto p-4">
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 max-sm:p-3">
           {!settings ? (
             <div className="text-[var(--color-faint)]">Loading…</div>
           ) : section === "accounts" ? (
@@ -491,6 +495,9 @@ function AppearanceSection({ settings, setSettings }: { settings: Settings; setS
 
   return (
     <div>
+      <H>Window</H>
+      {bool("alwaysOnTop", "Always on top", "Keep Agu Chat above other windows (also the pin in the title bar)")}
+
       <H>Messages</H>
       {bool("timestamps", "Show timestamps")}
       {bool("timestampSeconds", "Timestamps with seconds", undefined, !settings.timestamps)}

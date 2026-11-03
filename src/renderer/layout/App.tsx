@@ -12,7 +12,7 @@ import { useUpdater } from "./useBridge";
 import { useSettings } from "../hooks";
 import { bindingMap, eventToBinding, hotkeyRecording, resolveHotkeys } from "./hotkeys";
 import { HotkeysContext } from "./hotkeyContext";
-import { defaultLayout, findLeaf, insertAt, leaves, mapLeaf, moveLeaf, newLeaf, newTab, removeLeaf, sanitizeLayout, setSizes, type Edge } from "./tree";
+import { defaultLayout, findLeaf, insertAt, leaves, mapLeaf, moveLeaf, newLeaf, newTab, removeLeaf, sanitizeLayout, setSizes, sourceKey, type Edge } from "./tree";
 
 type Dialog =
   | { kind: "add"; tabId: string }
@@ -156,6 +156,11 @@ export function App() {
           return { ...l, tabs };
         }),
       openSettings: () => setDialog({ kind: "settings" }),
+      togglePin: () =>
+        agu.settings
+          .get()
+          .then((s) => agu.settings.set({ alwaysOnTop: !s.alwaysOnTop }))
+          .catch(() => {}),
     }),
     [updateTab],
   );
@@ -172,6 +177,27 @@ export function App() {
         updateRoot(tabId, (r) => moveLeaf(r, srcId, targetId, edge));
         focusLeaf(tabId, srcId);
       },
+      splitOut: (leafId, keys, targetId, edge: Edge) => {
+        const fresh = newLeaf([]); // id known now: the updater below runs later
+        updateRoot(tabId, (r) => {
+          const from = findLeaf(r, leafId);
+          if (!from) return r;
+          const moving = from.sources.filter((s) => keys.includes(sourceKey(s)));
+          const staying = from.sources.filter((s) => !keys.includes(sourceKey(s)));
+          if (!moving.length) return r;
+          // All of them: that is just moving the split.
+          if (!staying.length) return targetId === leafId ? r : moveLeaf(r, leafId, targetId, edge);
+          return insertAt(
+            mapLeaf(r, leafId, (l) => ({ ...l, sources: staying })),
+            targetId,
+            { ...fresh, sources: moving },
+            edge,
+          );
+        });
+        focusLeaf(tabId, fresh.id); // a missing id falls back to the first split
+      },
+      removeSource: (leafId, key) =>
+        updateRoot(tabId, (r) => mapLeaf(r, leafId, (l) => (l.sources.length > 1 ? { ...l, sources: l.sources.filter((s) => sourceKey(s) !== key) } : l))),
       addFirst: () => setDialog({ kind: "add", tabId }),
     }),
     [focusLeaf, updateRoot],
@@ -286,7 +312,7 @@ export function App() {
   return (
     <HotkeysContext.Provider value={hotkeyTable}>
       <div className="flex h-full flex-col bg-[var(--color-app)]">
-        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} />
+        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} pinned={!!settings?.alwaysOnTop} />
         {showBar && updater && (
           <div className="flex h-6 shrink-0 items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-accent-strong)] px-3 text-[12px] text-white">
             <span className="min-w-0 flex-1 truncate">Agu Chat {updater.version} is ready — Restart to update</span>

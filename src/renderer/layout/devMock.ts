@@ -16,8 +16,9 @@ import { DEFAULT_MOD_BUTTONS } from "../chat/modButtons";
 
 const DEFAULTS: Settings = {
   twitchClientId: "",
+  alwaysOnTop: false,
   updateChannel: "beta",
-  timestamps: true,
+  timestamps: false,
   timestampSeconds: false,
   alternateRows: true,
   fontSize: 13,
@@ -220,6 +221,18 @@ function createMock(): AguBridge {
       },
       async flash() {
         log.flashes.push(Date.now());
+      },
+    },
+
+    win: {
+      async minimize() {},
+      async toggleMaximize() {},
+      async close() {},
+      async isMaximized() {
+        return false;
+      },
+      onMaximized() {
+        return () => {};
       },
     },
 

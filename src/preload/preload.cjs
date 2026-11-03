@@ -48,6 +48,13 @@ contextBridge.exposeInMainWorld("agu", {
     openExternal: (url) => call("app:openExternal", url),
     flash: () => call("app:flash"),
   },
+  win: {
+    minimize: () => call("win:minimize"),
+    toggleMaximize: () => call("win:toggleMaximize"),
+    close: () => call("win:close"),
+    isMaximized: () => call("win:isMaximized"),
+    onMaximized: (cb) => listen("win:maximized", cb),
+  },
   sounds: {
     pick: () => call("sounds:pick"),
     read: (file) => call("sounds:read", file),

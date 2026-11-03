@@ -6,7 +6,7 @@
 import { useMemo, useRef, useState } from "react";
 import type { ConnFrame, SplitNode } from "../protocol";
 import { ChatPane, type Activity } from "../chat/ChatPane";
-import { SplitHeader, type SplitActions } from "./SplitHeader";
+import { SplitHeader, type SourceDrag, type SplitActions } from "./SplitHeader";
 import { Btn } from "./ui";
 import { sourceKey, type Edge, type Leaf } from "./tree";
 
@@ -42,6 +42,9 @@ function computeLayout(root: SplitNode | null) {
 
 const pct = (v: number) => `${(v * 100).toFixed(4)}%`;
 
+/** A whole split being moved (its header), or some of a split's channels (a header chip). */
+type Dragging = { kind: "split"; leafId: string } | ({ kind: "sources" } & SourceDrag);
+
 export function SplitView({
   root,
   focusedId,
@@ -57,7 +60,7 @@ export function SplitView({
   onActivity?: (kind: Activity) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [dragging, setDragging] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<Dragging | null>(null);
   const { leaves, dividers } = useMemo(() => computeLayout(root), [root]);
   // Stable DOM order, so React never has to move a pane's element (moving resets its scroll offset).
   const ordered = useMemo(() => leaves.slice().sort((a, b) => (a.leaf.id < b.leaf.id ? -1 : 1)), [leaves]);
@@ -198,13 +201,17 @@ function LeafView({
   outline: boolean;
   tabActive: boolean;
   actions: SplitActions;
-  dragging: string | null;
-  setDragging: (id: string | null) => void;
+  dragging: Dragging | null;
+  setDragging: (d: Dragging | null) => void;
   onActivity?: (kind: Activity) => void;
 }) {
   const [status, setStatus] = useState<Record<string, ConnFrame>>({});
   const [hover, setHover] = useState<Edge | null>(null);
   const sig = leaf.sources.map(sourceKey).join("|");
+  // A split can't be dropped on itself; its channels can (beside it), unless they are all it has.
+  const dropTarget =
+    !!dragging &&
+    (dragging.kind === "split" ? dragging.leafId !== leaf.id : dragging.leafId !== leaf.id || dragging.keys.length < leaf.sources.length);
 
   return (
     <div
@@ -217,14 +224,15 @@ function LeafView({
         status={status}
         focused={focused}
         actions={actions}
-        onDragStart={() => setDragging(leaf.id)}
+        onDragStart={() => setDragging({ kind: "split", leafId: leaf.id })}
+        onDragSources={(d) => setDragging({ kind: "sources", ...d })}
         onDragEnd={() => setDragging(null)}
       />
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <ChatPane key={sig} sources={leaf.sources} modMode={leaf.modMode} focused={focused && tabActive} onStatus={setStatus} onActivity={onActivity} />
       </div>
 
-      {dragging && dragging !== leaf.id && (
+      {dragging && dropTarget && (
         <div
           className="absolute inset-0 z-30"
           onDragOver={(e) => {
@@ -238,7 +246,8 @@ function LeafView({
             const edge = edgeAt(e, e.currentTarget);
             setHover(null);
             setDragging(null);
-            actions.move(dragging, leaf.id, edge);
+            if (dragging.kind === "split") actions.move(dragging.leafId, leaf.id, edge);
+            else actions.splitOut(dragging.leafId, dragging.keys, leaf.id, edge);
           }}
         >
           {hover && (

@@ -63,8 +63,11 @@ Agu Chat uses your own free Twitch app to log in. You set it up once:
 | Move a split | Drag its header onto another split's edge |
 | Close a split | Ctrl+W |
 | Merge platforms | In the channel dialog, add several channels to one split |
+| Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |
 | Mod mode | The sword button on a split's header |
-| User card | Click a name (cards can be dragged; several can be open) |
+| User card | Click a name: it opens in its own small window you can move anywhere, and several can be open |
+| Always on top | The pin in the title bar, or Settings → Appearance and chat |
+| All tabs | The arrow next to `+` lists every tab when they don't all fit |
 | Search a split | Ctrl+F, then type words and/or `from:name`; Esc closes it |
 | Ignore someone | "Ignore user" on their user card, or Settings → Ignores |
 | New line in a message | Shift+Enter |

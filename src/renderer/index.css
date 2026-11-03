@@ -73,3 +73,11 @@ option {
 button {
   cursor: default;
 }
+
+/* Frameless window: these areas move the window; controls inside them opt out. */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}

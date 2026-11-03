@@ -20,7 +20,18 @@ import type { Toast } from "./toast";
 import type { ChatMsg, Row, RowUser, SuspiciousUser } from "./types";
 import { btnDanger, btnGhost, btnPrimary, fmtTime, inputCls } from "./ui";
 
-export type UserCardState = { id: string; sk: string; platform: Platform; user: RowUser; left: number; top: number; above: boolean };
+export type UserCardState = {
+  id: string;
+  sk: string;
+  platform: Platform;
+  user: RowUser;
+  left: number;
+  top: number;
+  above: boolean;
+  /** Where its pop-out window opens, in screen pixels. */
+  screenX: number;
+  screenY: number;
+};
 
 type ModUserResp = {
   user: { id: string; login: string; displayName: string; avatar: string; createdAt: string };
@@ -77,6 +88,7 @@ export function UserCard({
   onTwitchDeleted,
   ignored,
   onIgnore,
+  windowed = false,
 }: {
   state: UserCardState;
   source: SourceRef;
@@ -98,6 +110,8 @@ export function UserCard({
   ignored: boolean;
   /** Add to / remove from the ignore list; absent when the user has no name to ignore by. */
   onIgnore?: (on: boolean) => void;
+  /** Drawn inside its own OS window (PopoutWindow): fills it, and the header moves the window. */
+  windowed?: boolean;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
@@ -125,6 +139,10 @@ export function UserCard({
       if (r.status === 403 && (await r.text()).includes("relogin")) {
         setRelogin(true);
         setData(null);
+        return;
+      }
+      if (r.status === 401) {
+        setData(null); // logged out: the card just has no account info
         return;
       }
       if (!r.ok) throw new Error(await r.text());
@@ -236,22 +254,26 @@ export function UserCard({
   return (
     <div
       ref={ref}
-      onMouseDownCapture={onFront}
-      className="absolute z-30 w-72 overflow-hidden rounded-md border border-line bg-raised text-xs text-text shadow-2xl shadow-black/60"
-      style={{ left: state.left, top: state.top, transform: state.above ? "translateY(-100%)" : undefined }}
+      onMouseDownCapture={windowed ? undefined : onFront}
+      className={
+        windowed
+          ? "w-full overflow-hidden border border-line bg-raised text-xs text-text"
+          : "absolute z-30 w-72 overflow-hidden rounded-md border border-line bg-raised text-xs text-text shadow-2xl shadow-black/60"
+      }
+      style={windowed ? undefined : { left: state.left, top: state.top, transform: state.above ? "translateY(-100%)" : undefined }}
     >
       <div
-        className="flex cursor-grab items-center gap-2.5 border-b border-line p-2.5 active:cursor-grabbing"
-        onPointerDown={onHeaderPointerDown}
-        onPointerMove={onHeaderPointerMove}
-        onPointerUp={onHeaderPointerUp}
+        className={"flex items-center gap-2.5 border-b border-line p-2.5 " + (windowed ? "app-drag" : "cursor-grab active:cursor-grabbing")}
+        onPointerDown={windowed ? undefined : onHeaderPointerDown}
+        onPointerMove={windowed ? undefined : onHeaderPointerMove}
+        onPointerUp={windowed ? undefined : onHeaderPointerUp}
       >
         <Avatar src={data?.user.avatar || state.user.avatar} name={display} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <PlatformIcon platform={state.platform} className="h-3.5 w-3.5 shrink-0" />
             {profile ? (
-              <a href={profile} target="_blank" rel="noopener noreferrer" onPointerDown={(e) => e.stopPropagation()} className="truncate text-sm font-semibold text-text hover:underline">
+              <a href={profile} target="_blank" rel="noopener noreferrer" onPointerDown={(e) => e.stopPropagation()} className="app-no-drag truncate text-sm font-semibold text-text hover:underline">
                 {display || login}
               </a>
             ) : (
@@ -260,7 +282,7 @@ export function UserCard({
           </div>
           {display && login && display.toLowerCase() !== login.toLowerCase() && <div className="text-[11px] text-faint">@{login}</div>}
         </div>
-        <button type="button" title="Close (Esc)" onPointerDown={(e) => e.stopPropagation()} onClick={onClose} className="rounded p-1 text-faint hover:text-text">
+        <button type="button" title="Close (Esc)" onPointerDown={(e) => e.stopPropagation()} onClick={onClose} className="app-no-drag rounded p-1 text-faint hover:text-text">
           <XIcon className="h-4 w-4" />
         </button>
       </div>

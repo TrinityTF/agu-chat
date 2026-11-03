@@ -1,7 +1,10 @@
-// The notebook's tab bar: select, add, close (x / middle-click), rename (double-click), drag to reorder.
+// The notebook's tab bar, which is also the window's title bar (the window has no OS frame): select, add,
+// close (x / middle-click), rename (double-click), drag to reorder, a list of every tab for when they overflow,
+// always-on-top, settings and the window buttons. Empty space drags the window; double-click maximizes.
 import { useEffect, useRef, useState } from "react";
 import type { Tab } from "../protocol";
-import { GearIcon, XIcon } from "../icons";
+import { agu } from "../bridge";
+import { ChevronIcon, GearIcon, PinIcon, WinMaxIcon, WinMinIcon, WinRestoreIcon, XIcon } from "../icons";
 import { PopupMenu, type MenuItem } from "./ui";
 import { autoTitle, tabTitle } from "./tree";
 import { useHotkeyHint } from "./hotkeyContext";
@@ -16,6 +19,7 @@ export type TabActions = {
   /** Move tab `id` to sit before the tab currently at `beforeIndex` (tabs.length = the end). */
   reorder(id: string, beforeIndex: number): void;
   openSettings(): void;
+  togglePin(): void;
 };
 
 export function NotebookTabs({
@@ -23,12 +27,15 @@ export function NotebookTabs({
   active,
   actions,
   unread = {},
+  pinned = false,
 }: {
   tabs: Tab[];
   active: string;
   actions: TabActions;
   /** Unselected tabs that got live chat: "message" = new messages, "highlight" = a highlight or mention. */
   unread?: Record<string, Activity>;
+  /** The window stays above other apps. */
+  pinned?: boolean;
 }) {
   const closeTabKey = useHotkeyHint("closeTab");
   const newTabKey = useHotkeyHint("newTab");
@@ -39,6 +46,27 @@ export function NotebookTabs({
   const [dropAt, setDropAt] = useState<number | null>(null); // insertion index while dragging
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; tabId: string } | null>(null);
   const stripRef = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState(false);
+  const [list, setList] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [maximized, setMaximized] = useState(false);
+
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const check = () => setOverflow(el.scrollWidth > el.clientWidth + 1);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tabs]);
+
+  useEffect(() => {
+    agu.win
+      .isMaximized()
+      .then(setMaximized)
+      .catch(() => {});
+    return agu.win.onMaximized(setMaximized);
+  }, []);
 
   useEffect(() => {
     const el = stripRef.current?.querySelector<HTMLElement>(`[data-tab-id="${active}"]`);
@@ -62,6 +90,14 @@ export function NotebookTabs({
       { label: "Close other tabs", disabled: tabs.length < 2, onClick: () => actions.closeOthers(id) },
     ];
   };
+
+  const listItems: MenuItem[] = tabs.map((t) => ({
+    label: tabTitle(t),
+    active: t.id === active,
+    hint: t.id !== active && unread[t.id] ? (unread[t.id] === "highlight" ? "highlight" : "new") : undefined,
+    onClick: () => actions.select(t.id),
+  }));
+  const winBtn = "app-no-drag flex w-9 shrink-0 items-center justify-center text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]";
 
   return (
     <div className="flex h-7 shrink-0 select-none items-stretch border-b border-[var(--color-line)] bg-[var(--color-raised)]" role="tablist">
@@ -215,7 +251,34 @@ export function NotebookTabs({
       >
         +
       </button>
-      <div className="flex-1" />
+      {overflow && (
+        <button
+          type="button"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setList({ x: r.left, y: r.top, w: r.width, h: r.height });
+          }}
+          title="All tabs"
+          aria-label="All tabs"
+          className="flex w-6 shrink-0 items-center justify-center text-[var(--color-muted)] hover:bg-[var(--color-raised-2)] hover:text-[var(--color-text)]"
+        >
+          <ChevronIcon className="h-3.5 w-3.5" />
+        </button>
+      )}
+      <div className="app-drag min-w-[28px] flex-1" />
+      <button
+        type="button"
+        onClick={actions.togglePin}
+        aria-pressed={pinned}
+        title={pinned ? "Always on top: on" : "Always on top: off"}
+        aria-label="Always on top"
+        className={
+          "flex w-7 shrink-0 items-center justify-center hover:bg-[var(--color-raised-2)] " +
+          (pinned ? "text-[var(--color-accent-soft)]" : "text-[var(--color-faint)] hover:text-[var(--color-text)]")
+        }
+      >
+        <PinIcon className="h-3.5 w-3.5" />
+      </button>
       <button
         type="button"
         onClick={(e) => {
@@ -228,6 +291,22 @@ export function NotebookTabs({
       >
         <GearIcon className="h-4 w-4" />
       </button>
+      <button type="button" onClick={() => agu.win.minimize().catch(() => {})} title="Minimize" aria-label="Minimize" className={winBtn}>
+        <WinMinIcon className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={() => agu.win.toggleMaximize().catch(() => {})}
+        title={maximized ? "Restore" : "Maximize"}
+        aria-label={maximized ? "Restore" : "Maximize"}
+        className={winBtn}
+      >
+        {maximized ? <WinRestoreIcon className="h-3.5 w-3.5" /> : <WinMaxIcon className="h-3 w-3" />}
+      </button>
+      <button type="button" onClick={() => agu.win.close().catch(() => {})} title="Close" aria-label="Close" className={winBtn + " hover:!bg-red-600 hover:!text-white"}>
+        <XIcon className="h-3.5 w-3.5" />
+      </button>
+      {list && <PopupMenu anchor={list} items={listItems} align="right" onClose={() => setList(null)} />}
       {menu && <PopupMenu anchor={menu.anchor} items={menuItems(menu.tabId)} onClose={() => setMenu(null)} />}
     </div>
   );

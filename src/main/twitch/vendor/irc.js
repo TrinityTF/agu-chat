@@ -1,4 +1,5 @@
-// Vendored from modtools.agu.lol render/lib/irc.js (render commit 7704aec). Changes: none (header only).
+// Vendored from modtools.agu.lol render/lib/irc.js (render commit 7704aec). Changes: parseIrcLine also reads a
+// last parameter sent without the ':' prefix (recent-messages sends one-word messages that way).
 // copied from src/do.js — keep in sync
 //
 // IRC line parsing plus the PRIVMSG -> ChatMsg and USERNOTICE -> Notice
@@ -43,6 +44,8 @@ export function parseIrcLine(line) {
   const parts = head.split(" ");
   out.command = parts[0];
   out.channel = (parts.find((p) => p.startsWith("#")) || "").slice(1);
+  // IRC only needs the ':' when the last parameter has spaces: `PRIVMSG #chan word` is valid.
+  if (trailIdx < 0 && parts.length >= 3) out.text = parts[parts.length - 1];
   return out;
 }
 

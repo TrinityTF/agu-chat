@@ -417,3 +417,24 @@ export const CrownIcon = ({ className = "h-4 w-4", style }: P) => (
     <path d="M3 7l4.5 3.5L12 4l4.5 6.5L21 7l-1.8 11H4.8zM4.6 20h14.8v1.5H4.6z" />
   </svg>
 );
+
+// ---- Window controls (thin strokes, like the OS caption buttons they replace) ----
+
+export const WinMinIcon = (p: P) => (
+  <Icon strokeWidth={1.5} {...p}>
+    <path d="M5 12h14" />
+  </Icon>
+);
+
+export const WinMaxIcon = (p: P) => (
+  <Icon strokeWidth={1.5} {...p}>
+    <rect x="5" y="5" width="14" height="14" rx="1" />
+  </Icon>
+);
+
+export const WinRestoreIcon = (p: P) => (
+  <Icon strokeWidth={1.5} {...p}>
+    <rect x="5" y="8" width="11" height="11" rx="1" />
+    <path d="M8 8V6a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-2" />
+  </Icon>
+);

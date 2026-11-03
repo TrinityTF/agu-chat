@@ -10,8 +10,9 @@ import { sanitizeIgnoredPhrases, sanitizeIgnoredUsers, sanitizeSetting } from ".
 // Keep in sync with Settings in src/renderer/protocol.ts.
 export const DEFAULT_SETTINGS = {
   twitchClientId: "",
+  alwaysOnTop: false,
   updateChannel: "beta", // "beta" = GitHub prereleases too, "stable" = full releases only
-  timestamps: true,
+  timestamps: false,
   timestampSeconds: false,
   alternateRows: true,
   fontSize: 13,
@@ -41,6 +42,8 @@ export const DEFAULT_SETTINGS = {
   ignoredUsers: [], // [{ platform, login }] (see settingsSanitize.js)
   ignoredPhrases: [], // [{ pattern, regex, caseSensitive, action: "hide" | "replace", replacement }]
 };
+
+const SETTINGS_VERSION = 2;
 
 const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
@@ -111,6 +114,8 @@ export const settingsStore = {
     if (!settings) {
       settings = structuredClone(DEFAULT_SETTINGS);
       const saved = readJson("settings.json", {});
+      // v2 turned timestamps off by default; older files saved every key, so their `true` was just the old default.
+      if (saved && typeof saved === "object" && (saved.v ?? 1) < 2) delete saved.timestamps;
       for (const [k, v] of Object.entries(saved && typeof saved === "object" ? saved : {})) {
         if (!Object.hasOwn(DEFAULT_SETTINGS, k)) continue;
         const c = clean(k, v);
@@ -127,7 +132,7 @@ export const settingsStore = {
       if (c !== undefined) next[k] = c;
     }
     settings = next;
-    writeJson("settings.json", settings);
+    writeJson("settings.json", { ...settings, v: SETTINGS_VERSION });
     events.emit("settings", this.get());
     return this.get();
   },

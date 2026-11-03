@@ -11,12 +11,15 @@ export function Modal({
   children,
   width = 520,
   footer,
+  fullOnSmall = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   width?: number;
   footer?: ReactNode;
+  /** Below 640px wide, fill the window under the title bar instead of floating. */
+  fullOnSmall?: boolean;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -32,7 +35,7 @@ export function Modal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4"
+      className={"fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4" + (fullOnSmall ? " max-sm:p-0 max-sm:pt-7" : "")}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -40,7 +43,10 @@ export function Modal({
       <div
         role="dialog"
         aria-label={title}
-        className="flex max-h-full flex-col overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-raised)] shadow-2xl"
+        className={
+          "flex max-h-full flex-col overflow-hidden rounded-lg border border-[var(--color-line)] bg-[var(--color-raised)] shadow-2xl" +
+          (fullOnSmall ? " max-sm:h-full max-sm:!w-full max-sm:rounded-none max-sm:border-0" : "")
+        }
         style={{ width, maxWidth: "100%" }}
       >
         <div className="flex items-center justify-between border-b border-[var(--color-line)] px-3 py-2">
@@ -63,7 +69,8 @@ export function Modal({
 }
 
 export type MenuItem =
-  | { label: string; onClick: () => void; danger?: boolean; disabled?: boolean; hint?: string }
+  | { label: string; onClick: () => void; danger?: boolean; disabled?: boolean; hint?: string; icon?: ReactNode; active?: boolean }
+  | { heading: string }
   | "sep";
 
 /** A popup menu anchored at a screen rectangle (fixed positioning, so split borders never clip it). */
@@ -119,13 +126,17 @@ export function PopupMenu({
     <div
       ref={ref}
       role="menu"
-      className="fixed z-[90] min-w-[170px] rounded border border-[var(--color-line)] bg-[var(--color-raised)] py-1 text-[12px] shadow-xl"
+      className="fixed z-[90] max-h-[70vh] min-w-[170px] max-w-[calc(100vw-8px)] overflow-y-auto rounded border border-[var(--color-line)] bg-[var(--color-raised)] py-1 text-[12px] shadow-xl"
       style={{ left: pos?.left ?? -9999, top: pos?.top ?? -9999 }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {items.map((it, i) =>
         it === "sep" ? (
           <div key={i} className="my-1 h-px bg-[var(--color-line)]" />
+        ) : "heading" in it ? (
+          <div key={i} className="truncate px-3 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-faint)]">
+            {it.heading}
+          </div>
         ) : (
           <button
             key={i}
@@ -138,10 +149,13 @@ export function PopupMenu({
             }}
             className={
               "flex w-full items-center justify-between gap-4 px-3 py-1 text-left hover:bg-[var(--color-raised-2)] disabled:opacity-40 " +
-              (it.danger ? "text-red-400" : "text-[var(--color-text)]")
+              (it.danger ? "text-red-400" : it.active ? "font-semibold text-[var(--color-accent-soft)]" : "text-[var(--color-text)]")
             }
           >
-            <span>{it.label}</span>
+            <span className="flex min-w-0 items-center gap-1.5">
+              {it.icon}
+              <span className="truncate">{it.label}</span>
+            </span>
             {it.hint && <span className="text-[11px] text-[var(--color-faint)]">{it.hint}</span>}
           </button>
         ),

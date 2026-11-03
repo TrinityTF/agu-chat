@@ -34,6 +34,7 @@ import { useChatFeed } from "./useChatFeed";
 import { DEFAULT_MOD_BUTTONS, expandTemplate, formatDuration, normalizeModButtons } from "./modButtons";
 import { confirmedCommand, parseUserArg, runSlashCommand, splitArgs } from "./input/slash";
 import { UserCard, type UserCardState } from "./UserCard";
+import { PopoutWindow, focusPopout } from "./PopoutWindow";
 
 export type ChatPaneProps = {
   /** One source = a single channel; several = a merged co-chat. */
@@ -54,8 +55,9 @@ export type Activity = "message" | "highlight";
 // Used until the real settings arrive (keep in sync with DEFAULT_SETTINGS in src/main/store.js).
 const FALLBACK_SETTINGS: Settings = {
   twitchClientId: "",
+  alwaysOnTop: false,
   updateChannel: "beta",
-  timestamps: true,
+  timestamps: false,
   timestampSeconds: false,
   alternateRows: true,
   fontSize: 13,
@@ -250,6 +252,7 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
         const id = `${sk}|${user.id || user.name.toLowerCase()}`;
         const rect = target.getBoundingClientRect();
         const cRect = container.getBoundingClientRect();
+        if (focusPopout(id)) return;
         setCards((prev) => {
           const existing = prev.findIndex((c) => c.id === id);
           if (existing >= 0) {
@@ -267,7 +270,10 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
           if (left > maxLeft) left = Math.max(8, maxLeft);
           if (left < 8) left = 8;
           const above = relTop > cRect.height / 2;
-          const card: UserCardState = { id, sk, platform: st.ref.platform, user, left, top: above ? relTop - 4 : relTop + rect.height + 4, above };
+          // The pop-out window opens beside the name: below it, or above it in the lower half (cards run ~380px tall).
+          const screenX = window.screenX + rect.left + stagger;
+          const screenY = window.screenY + (above ? rect.top - 380 : rect.bottom + 4) + stagger;
+          const card: UserCardState = { id, sk, platform: st.ref.platform, user, left, top: above ? relTop - 4 : relTop + rect.height + 4, above, screenX, screenY };
           const next = prev.length >= MAX_CARDS ? prev.slice(1) : prev.slice();
           next.push(card);
           return next;
@@ -597,8 +603,9 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
         if (!ref) return null;
         const ignoreAs = ignoreLogin(c.user);
         return (
+          <PopoutWindow key={c.id} id={c.id} x={c.screenX} y={c.screenY} width={300} title={`${c.user.name} - Agu Chat`} onClose={() => closeCard(c.id)}>
           <UserCard
-            key={c.id}
+            windowed
             state={c}
             source={ref}
             panelRef={panelRef}
@@ -618,6 +625,7 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
             ignored={!!ignoreAs && isUserIgnored(rs.ignoredUsers ?? [], c.platform, ignoreAs)}
             onIgnore={ignoreAs ? (on) => setIgnored(c.platform, ignoreAs, on) : undefined}
           />
+          </PopoutWindow>
         );
       })}
 

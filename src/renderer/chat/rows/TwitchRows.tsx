@@ -16,6 +16,7 @@ import { nameColor } from "../twitch/colors";
 import { paintStyle, use7TvStyle } from "../twitch/cosmetics";
 import { BUILTIN_REDEEMS, DEFAULT_EVENTS, noticeKind } from "../twitch/events";
 import { buildParts } from "../twitch/parts";
+import { dropReplyMention } from "../twitch/replyMention";
 import type { ChatMsg, ChatUser, HeldMsg, ModFeedEntry, Notice, Row, SuspiciousUser } from "../types";
 import type { RowCtx, TwitchEnv } from "./env";
 import { HoverButtons, ModButtons, RowFrame } from "./RowFrame";
@@ -167,7 +168,8 @@ function MessageRow({
   const highlighted = msg.msgId === "highlighted-message";
   const mentionsMe = textMentionsLogin(msg.text, env.meLoginLower);
   const hl = rowHighlight(msg, mentionsMe, susp, rule);
-  const parts = buildParts(msg.text, msg.emotes, env.emotes, env.known ?? EMPTY_KNOWN, msg.gifs);
+  const built = buildParts(msg.text, msg.emotes, env.emotes, env.known ?? EMPTY_KNOWN, msg.gifs);
+  const parts = msg.reply ? dropReplyMention(built, msg.reply.user) : built;
   const reach = modReach(env.viewer, { id: msg.user.id, badges: msg.badges });
   const caps = env.caps;
   const canBan = caps.ban && reach.ban;

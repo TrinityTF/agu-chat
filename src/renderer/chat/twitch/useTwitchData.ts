@@ -79,7 +79,7 @@ export function useTwitchData(
           const d = await r.json();
           if (!d) return;
           try {
-            sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: d }));
+            if (d.global?.length) sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: d })); // never pin an empty answer
           } catch {
             /* quota */
           }

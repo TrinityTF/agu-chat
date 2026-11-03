@@ -83,6 +83,7 @@ function wireIpc() {
   storeEvents.on("settings", (s) => {
     broadcast("settings:changed", s);
     updater.setChannel(s.updateChannel);
+    applyAlwaysOnTop(s.alwaysOnTop);
   });
 
   handle("layout:get", () => layoutStore.get());
@@ -103,16 +104,64 @@ function wireIpc() {
     if (w && !w.isDestroyed() && !w.isFocused()) w.flashFrame(true);
   });
 
+  // The window has no OS frame: the tab bar draws these buttons.
+  const own = (e) => BrowserWindow.fromWebContents(e.sender);
+  handle("win:minimize", (e) => own(e)?.minimize());
+  handle("win:toggleMaximize", (e) => {
+    const w = own(e);
+    if (w) w.isMaximized() ? w.unmaximize() : w.maximize();
+  });
+  handle("win:close", (e) => own(e)?.close());
+  handle("win:isMaximized", (e) => !!own(e)?.isMaximized());
+
   handle("sounds:pick", (e) => pickSound(BrowserWindow.fromWebContents(e.sender)));
   handle("sounds:read", (_e, file) => readSound(String(file)));
+}
+
+function applyAlwaysOnTop(on) {
+  if (!win || win.isDestroyed()) return;
+  // "floating" keeps it above normal windows without fighting full-screen games for the very top.
+  win.setAlwaysOnTop(!!on, "floating");
+  for (const child of win.getChildWindows()) child.setAlwaysOnTop(!!on, "floating");
+}
+
+// Pop-out cards (user cards): the renderer opens about:blank windows named "agu-popout:<id>" and draws into them
+// itself, so they share its state. Frameless, owned by the main window, free to move anywhere on screen.
+function popoutOptions(features) {
+  // window.open's "left=..,top=..,width=..,height=.." is applied here so it can't be lost in Electron's merge.
+  const f = Object.fromEntries(
+    String(features || "")
+      .split(",")
+      .map((kv) => kv.split("=").map((s) => s.trim()))
+      .filter(([k, v]) => k && /^-?\d+$/.test(v || ""))
+      .map(([k, v]) => [k, Number(v)]),
+  );
+  return {
+    ...(f.left !== undefined && f.top !== undefined ? { x: f.left, y: f.top } : {}),
+    width: Math.max(240, f.width || 300),
+    height: Math.max(120, f.height || 200),
+    frame: false,
+    resizable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    parent: win ?? undefined,
+    alwaysOnTop: !!win?.isAlwaysOnTop(),
+    backgroundColor: "#16161d",
+    minWidth: 240,
+    minHeight: 120,
+    autoHideMenuBar: true,
+  };
 }
 
 function createWindow() {
   win = new BrowserWindow({
     width: 1280,
     height: 800,
-    minWidth: 420,
+    minWidth: 280,
     minHeight: 300,
+    frame: false,
     backgroundColor: "#0b0b10",
     title: "Agu Chat",
     icon: path.join(here, "../../build/icon.png"),
@@ -126,12 +175,16 @@ function createWindow() {
   });
   const id = win.id;
   win.on("focus", () => win?.flashFrame(false));
+  win.on("maximize", () => win?.webContents.send("win:maximized", true));
+  win.on("unmaximize", () => win?.webContents.send("win:maximized", false));
+  win.once("ready-to-show", () => applyAlwaysOnTop(settingsStore.get().alwaysOnTop));
   win.on("closed", () => {
     relay.dropOwner(id);
     win = null;
   });
   // Links open in the user's browser, never inside the app.
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  win.webContents.setWindowOpenHandler(({ url, frameName, features }) => {
+    if (url === "about:blank" && frameName.startsWith("agu-popout:")) return { action: "allow", overrideBrowserWindowOptions: popoutOptions(features) };
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: "deny" };
   });
@@ -139,6 +192,17 @@ function createWindow() {
     if (DEV_URL && url.startsWith(DEV_URL)) return;
     e.preventDefault();
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+  // Pop-outs never navigate either: a link clicked in a user card goes to the browser too.
+  win.webContents.on("did-create-window", (child) => {
+    child.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+      return { action: "deny" };
+    });
+    child.webContents.on("will-navigate", (e, url) => {
+      e.preventDefault();
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    });
   });
   if (DEV_URL) win.loadURL(DEV_URL);
   else win.loadFile(path.join(here, "../../out/renderer/index.html"));

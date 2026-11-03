@@ -91,8 +91,9 @@ const xLog: Frame = {
 
 const settings: Settings = {
   twitchClientId: "",
+  alwaysOnTop: false,
   updateChannel: "beta",
-  timestamps: true,
+  timestamps: false,
   timestampSeconds: false,
   alternateRows: true,
   fontSize: 13,
@@ -185,6 +186,7 @@ const agu: AguBridge = {
   updater: { get: async () => ({}) as any, check: async () => {}, install: async () => {}, onChange: () => () => {} },
   app: { info: async () => ({ version: "dev", packaged: false }), openExternal: async () => {}, flash: async () => {} },
   sounds: { pick: async () => null, read: async () => new Uint8Array() },
+  win: { minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {}, isMaximized: async () => false, onMaximized: () => () => {} },
 };
 
 (window as any).agu = agu;

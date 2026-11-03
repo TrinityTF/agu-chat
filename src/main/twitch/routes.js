@@ -5,7 +5,7 @@
 // Errors follow the site: 403 "relogin" when the token lacks the scope, 502 "Twitch error: ..."
 // when Twitch refuses; the error text sits in {error}. Logged out is 401 "Log in to Twitch".
 // Badges, emotes and rules never fail for a logged-out user: they answer empty so chat still renders.
-import { HttpError } from "./http.js";
+import { HttpError, requestJson } from "./http.js";
 import { helix, helixAll, loginRequired, userByLogin } from "./helix.js";
 import * as auth from "./auth.js";
 import { access as getAccess } from "./access.js";
@@ -34,7 +34,7 @@ const MOD_ACTION_SCOPES = {
 };
 
 const settingsCache = new Map(); // channelId -> {data, at}
-const badgesCache = new Map();
+const badgesCache = new Map(); // login -> {data, at}
 const emotesCache = new Map(); // `${userId}:${channelId}` -> {data, at}
 let globalBadges = null; // {data, at}
 
@@ -391,19 +391,36 @@ async function rules() {
   return ok({ rules: [] });
 }
 
-async function badges({ source }) {
-  const login = loginOf(source);
-  const empty = ok({ global: [], channel: [] });
-  if (!auth.current()) return empty;
+// Helix answers badges only with a token. Logged out (or when Helix refuses), the public ivr.fi mirror of the
+// same Helix data fills in, so mod/sub/VIP badges show for anonymous readers too.
+const IVR = "https://api.ivr.fi/v2/twitch/badges";
+
+async function helixBadges(login) {
   const channelId = await channelIdOf(login).catch(() => null);
-  const hit = channelId && badgesCache.get(channelId);
-  if (hit && Date.now() - hit.at < BADGES_CACHE_MS) return ok(hit.data);
   if (!globalBadges || Date.now() - globalBadges.at > BADGES_CACHE_MS) {
     globalBadges = { data: (await helix("/chat/badges/global"))?.data || [], at: Date.now() };
   }
   const channel = channelId ? (await helix("/chat/badges", { query: { broadcaster_id: channelId } }))?.data || [] : [];
-  const data = { global: globalBadges.data, channel };
-  if (channelId) badgesCache.set(channelId, { data, at: Date.now() });
+  return { global: globalBadges.data, channel };
+}
+
+async function ivrBadges(login) {
+  const [global, channel] = await Promise.all([
+    requestJson(`${IVR}/global`),
+    requestJson(`${IVR}/channel?login=${encodeURIComponent(login)}`).catch(() => []),
+  ]);
+  return { global: Array.isArray(global) ? global : [], channel: Array.isArray(channel) ? channel : [] };
+}
+
+async function badges({ source }) {
+  const login = loginOf(source);
+  const hit = badgesCache.get(login);
+  if (hit && Date.now() - hit.at < BADGES_CACHE_MS) return ok(hit.data);
+  let data = null;
+  if (auth.current()) data = await helixBadges(login).catch(() => null);
+  if (!data?.global.length) data = await ivrBadges(login).catch(() => null);
+  if (!data?.global.length) return ok({ global: [], channel: [] }); // not cached: the next pane retries
+  badgesCache.set(login, { data, at: Date.now() });
   return ok(data);
 }
 
