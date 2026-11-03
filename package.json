@@ -16,7 +16,6 @@
     "build:renderer": "vite build",
     "start": "npm run build:renderer && electron .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build:renderer && electron-builder --win --publish never",
     "release": "npm run build:renderer && electron-builder --win --publish always"
   },
