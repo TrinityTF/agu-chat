@@ -76,7 +76,6 @@ export function UserCard({
   rows,
   twitch,
   co,
-  modMode,
   caps,
   reach,
   suspicious,
@@ -96,7 +95,6 @@ export function UserCard({
   rows: Row[];
   twitch?: TwitchEnv;
   co?: CoEnv;
-  modMode: boolean;
   caps: ModCaps;
   reach: ModReach;
   suspicious: SuspiciousUser | undefined;
@@ -249,7 +247,8 @@ export function UserCard({
   const login = data?.user.login || state.user.login;
   const display = data?.user.displayName || state.user.name;
   const profile = login && PROFILE_URL[state.platform] ? PROFILE_URL[state.platform]!(login) : "";
-  const showTwitchMod = isTwitch && modMode && (reach.ban || reach.timeout || reach.warn || !!banned) && (caps.ban || caps.warn);
+  // Mod actions show for anyone who can moderate here, mod mode or not (mod mode only adds the inline row buttons).
+  const showTwitchMod = isTwitch && (reach.ban || reach.timeout || reach.warn || !!banned) && (caps.ban || caps.warn);
 
   return (
     <div
@@ -441,7 +440,7 @@ export function UserCard({
         </div>
       )}
 
-      {state.platform === "rumble" && modMode && co?.caps.canModerate && lastRow?.k === "rumble" && (
+      {state.platform === "rumble" && co?.caps.canModerate && lastRow?.k === "rumble" && (
         <div className="flex flex-wrap gap-1.5 border-b border-line p-2.5">
           <button type="button" className={btnGhost} onClick={() => h.rumbleMod(state.sk, "timeout", lastRow.m)}>
             Timeout 5m
@@ -452,7 +451,7 @@ export function UserCard({
         </div>
       )}
 
-      {state.platform === "kick" && modMode && co?.caps.canModerate && !!state.user.id && lastRow?.k === "kick" && (
+      {state.platform === "kick" && co?.caps.canModerate && !!state.user.id && lastRow?.k === "kick" && (
         <div className="border-b border-line p-2.5">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-faint">Timeout</div>
           <div className="mb-2 flex flex-wrap gap-1">

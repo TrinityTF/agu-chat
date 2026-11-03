@@ -92,7 +92,7 @@ export function NotebookTabs({
   };
 
   const listItems: MenuItem[] = tabs.map((t) => ({
-    label: tabTitle(t),
+    label: tabTitle(t, true),
     active: t.id === active,
     hint: t.id !== active && unread[t.id] ? (unread[t.id] === "highlight" ? "highlight" : "new") : undefined,
     onClick: () => actions.select(t.id),
@@ -211,7 +211,7 @@ export function NotebookTabs({
                       className={"h-1.5 w-1.5 shrink-0 rounded-full " + (mark === "highlight" ? "bg-[var(--color-accent-soft)]" : "bg-[var(--color-faint)]")}
                     />
                   )}
-                  <span className="truncate" title={tabTitle(t)}>
+                  <span className="truncate" title={tabTitle(t, true)}>
                     {tabTitle(t)}
                   </span>
                 </>

@@ -3,6 +3,7 @@
 // runs this renderer's JS, so React state, handlers and stores work as if it were inline; the styles are copied in.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { agu } from "../bridge";
 
 const open = new Map<string, Window>();
 
@@ -74,11 +75,14 @@ export function PopoutWindow({
     const root = d.createElement("div");
     d.body.appendChild(root);
 
-    // Fit the window to its content (the card grows when its info loads or a panel opens).
+    // Fit the window's height to its content (the card grows when its info loads or a panel opens).
     const RO = (w as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver;
+    let lastH = 0;
     const ro = new RO(() => {
       const h = Math.ceil(root.getBoundingClientRect().height);
-      if (h > 0) w.resizeTo(w.outerWidth || width, Math.min(h, scr.availHeight - 40));
+      if (h <= 0 || h === lastH) return;
+      lastH = h;
+      agu.win.fitPopout(`agu-popout:${id}`, h).catch(() => {});
     });
     ro.observe(root);
 

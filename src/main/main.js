@@ -1,5 +1,5 @@
 // Agu Chat main process: the window, IPC, and the local relay.
-import { app, BrowserWindow, ipcMain, shell, Menu } from "electron";
+import { app, BrowserWindow, ipcMain, shell, Menu, screen } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { settingsStore, secretStore, layoutStore, events as storeEvents } from "./store.js";
@@ -113,6 +113,7 @@ function wireIpc() {
   });
   handle("win:close", (e) => own(e)?.close());
   handle("win:isMaximized", (e) => !!own(e)?.isMaximized());
+  handle("win:fitPopout", (_e, name, height) => fitPopout(name, height));
 
   handle("sounds:pick", (e) => pickSound(BrowserWindow.fromWebContents(e.sender)));
   handle("sounds:read", (_e, file) => readSound(String(file)));
@@ -127,6 +128,20 @@ function applyAlwaysOnTop(on) {
 
 // Pop-out cards (user cards): the renderer opens about:blank windows named "agu-popout:<id>" and draws into them
 // itself, so they share its state. Frameless, owned by the main window, free to move anywhere on screen.
+const popouts = new Map(); // frameName -> BrowserWindow
+
+// A pop-out's height follows its content; its width stays whatever it is (the user may have resized it).
+// Done here with content sizes, because a renderer-side resizeTo(outerWidth, ..) grew the window a few
+// pixels on every call until it filled the screen.
+function fitPopout(name, height) {
+  const w = popouts.get(String(name));
+  if (!w || w.isDestroyed()) return;
+  const [cw, ch] = w.getContentSize();
+  const max = screen.getDisplayMatching(w.getBounds()).workAreaSize.height - 40;
+  const h = Math.max(120, Math.min(Math.round(Number(height) || 0), max));
+  if (h !== ch) w.setContentSize(cw, h);
+}
+
 function popoutOptions(features) {
   // window.open's "left=..,top=..,width=..,height=.." is applied here so it can't be lost in Electron's merge.
   const f = Object.fromEntries(
@@ -194,7 +209,12 @@ function createWindow() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
   // Pop-outs never navigate either: a link clicked in a user card goes to the browser too.
-  win.webContents.on("did-create-window", (child) => {
+  win.webContents.on("did-create-window", (child, details) => {
+    const name = details?.frameName || "";
+    if (name.startsWith("agu-popout:")) {
+      popouts.set(name, child);
+      child.on("closed", () => popouts.get(name) === child && popouts.delete(name));
+    }
     child.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(url)) shell.openExternal(url);
       return { action: "deny" };

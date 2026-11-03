@@ -47,15 +47,27 @@ export function shortName(s: SourceRef): string {
   return c;
 }
 
+/** Every channel in the tab, once each ("EsfandTV" and "@esfandtv" count as one). */
 export function autoTitle(tab: Tab): string {
-  const names = leaves(tab.root).flatMap((l) => l.sources.map(shortName));
-  const uniq = [...new Set(names)];
-  return uniq.length ? uniq.join(", ") : "New tab";
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const n of leaves(tab.root).flatMap((l) => l.sources.map(shortName))) {
+    const k = n.replace(/^@/, "").toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    names.push(n);
+  }
+  return names.length ? names.join(", ") : "New tab";
 }
 
-/** A tab with an empty title shows the channels it contains. */
-export function tabTitle(tab: Tab): string {
-  return tab.title.trim() || autoTitle(tab);
+/** A tab with an empty title shows the channels it contains: the first, then "…" when there are more (the full list is its tooltip). */
+export function tabTitle(tab: Tab, full = false): string {
+  const own = tab.title.trim();
+  if (own) return own;
+  const all = autoTitle(tab);
+  if (full) return all;
+  const comma = all.indexOf(", ");
+  return comma < 0 ? all : `${all.slice(0, comma)}, …`;
 }
 
 // ---- normalisation --------------------------------------------------------

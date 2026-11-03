@@ -168,6 +168,8 @@ export interface AguBridge {
     close(): Promise<void>;
     isMaximized(): Promise<boolean>;
     onMaximized(cb: (maximized: boolean) => void): () => void;
+    /** Set a pop-out window's content height (its width is left alone). */
+    fitPopout(name: string, height: number): Promise<void>;
   };
   sounds: {
     /** Let the user choose an audio file; it is copied into the app's sounds folder. null = cancelled. */

@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld("agu", {
     close: () => call("win:close"),
     isMaximized: () => call("win:isMaximized"),
     onMaximized: (cb) => listen("win:maximized", cb),
+    fitPopout: (name, height) => call("win:fitPopout", name, height),
   },
   sounds: {
     pick: () => call("sounds:pick"),

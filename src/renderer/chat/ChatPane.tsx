@@ -612,7 +612,6 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
             rows={rows}
             twitch={twitchEnvOf(c.sk)}
             co={coEnvOf(c.sk)}
-            modMode={modMode}
             caps={(twitchData[c.sk] ?? EMPTY_TWITCH_DATA).caps ?? ALL_FALSE_CAPS}
             reach={reachFor(c)}
             suspicious={store.sources.get(c.sk)?.suspicious.get(c.user.id)}

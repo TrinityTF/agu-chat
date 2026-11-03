@@ -233,6 +233,7 @@ function createMock(): AguBridge {
       onMaximized() {
         return () => {};
       },
+      async fitPopout() {},
     },
 
     sounds: {
