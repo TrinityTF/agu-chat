@@ -867,7 +867,7 @@ function HotkeysSection({ settings, setSettings }: { settings: Settings; setSett
 
 // ---- mod buttons --------------------------------------------------------------------------
 
-const ACTION_LABEL: Record<ModButtonAction, string> = { ban: "Ban", timeout: "Timeout", delete: "Delete message", command: "Command" };
+const ACTION_LABEL: Record<ModButtonAction, string> = { ban: "Ban", timeout: "Timeout", warn: "Warn", delete: "Delete message", command: "Command" };
 
 function ModButtonsSection({ settings, setSettings }: { settings: Settings; setSettings: SetSettings }) {
   const buttons = normalizeModButtons(settings.modButtons);

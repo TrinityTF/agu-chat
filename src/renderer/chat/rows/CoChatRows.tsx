@@ -144,8 +144,8 @@ export const RumbleRow = memo(function RumbleRow({ row, ctx, env, modMode, rule 
     modMode && canMod ? (
       <ModButtons
         buttons={ctx.modList}
-        can={(b) => b.action !== "command"}
-        onRun={(b) => b.action !== "command" && h.rumbleMod(row.sk, b.action, msg, b.seconds)}
+        can={(b) => b.action !== "command" && b.action !== "warn"}
+        onRun={(b) => b.action !== "command" && b.action !== "warn" && h.rumbleMod(row.sk, b.action, msg, b.seconds)}
       />
     ) : null;
   return (
@@ -267,8 +267,8 @@ export const KickRow = memo(function KickRow({ row, ctx, env, modMode, rule }: {
     modMode && (canMod || canDelete) ? (
       <ModButtons
         buttons={ctx.modList}
-        can={(b) => (b.action === "delete" ? canDelete : b.action !== "command" && canMod)}
-        onRun={(b) => b.action !== "command" && h.kickMod(row.sk, b.action, msg, b.action === "timeout" ? b.seconds : undefined)}
+        can={(b) => (b.action === "delete" ? canDelete : b.action !== "command" && b.action !== "warn" && canMod)}
+        onRun={(b) => b.action !== "command" && b.action !== "warn" && h.kickMod(row.sk, b.action, msg, b.action === "timeout" ? b.seconds : undefined)}
       />
     ) : null;
   return (

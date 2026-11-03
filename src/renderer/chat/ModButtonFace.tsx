@@ -28,5 +28,5 @@ export function ModButtonFace({ button, iconClass = "h-3 w-3" }: { button: ModBu
 }
 
 export function modButtonTone(b: ModButton): string {
-  return b.action === "timeout" ? "hover:text-amber-400" : b.action === "command" ? "hover:text-accent-soft" : "hover:text-red-400";
+  return b.action === "timeout" || b.action === "warn" ? "hover:text-amber-400" : b.action === "command" ? "hover:text-accent-soft" : "hover:text-red-400";
 }

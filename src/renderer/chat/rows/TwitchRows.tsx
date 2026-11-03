@@ -183,11 +183,20 @@ function MessageRow({
     <ModButtons
       buttons={ctx.modList}
       can={(b) =>
-        b.action === "ban" ? canBan && !msg.deleted : b.action === "timeout" ? canTimeout && !msg.deleted : b.action === "delete" ? canDelete : isMod
+        b.action === "ban"
+          ? canBan && !msg.deleted
+          : b.action === "timeout"
+            ? canTimeout && !msg.deleted
+            : b.action === "warn"
+              ? caps.warn && reach.warn && !msg.deleted
+              : b.action === "delete"
+                ? canDelete
+                : isMod
       }
       onRun={(b, target) => {
         if (b.action === "ban") h.modPopover(target, "ban", row.sk, msg);
         else if (b.action === "timeout") h.quickTimeout(row.sk, msg, b.seconds);
+        else if (b.action === "warn") h.modPopover(target, "warn", row.sk, msg);
         else if (b.action === "delete") h.deleteMsg(row.sk, msg.id);
         else h.twitchCommand(row.sk, msg, b.command);
       }}

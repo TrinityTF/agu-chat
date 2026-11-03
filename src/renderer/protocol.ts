@@ -102,7 +102,7 @@ export type Settings = {
   ignoredPhrases: IgnoredPhrase[];
 };
 
-export type ModButtonAction = "ban" | "timeout" | "delete" | "command";
+export type ModButtonAction = "ban" | "timeout" | "warn" | "delete" | "command";
 export type ModButtonIcon = "ban" | "clock" | "trash" | "shield" | "warning" | "flag" | "eyeoff" | "chat" | "pin" | "check";
 export type ModButton = {
   id: string;

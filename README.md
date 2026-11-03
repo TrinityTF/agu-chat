@@ -15,7 +15,7 @@ and run it. Agu Chat keeps itself up to date after that.
 - **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges.
-- **Moderation:** mod mode adds mod buttons to every message: ban, timeout and delete by default, or your own set (any timeout length, or a command such as `/warn {user} …`) in **Settings → Mod buttons**. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
+- **Moderation:** mod mode adds mod buttons to every message: ban, timeout, warn and delete by default, or your own set (any timeout length, or a command such as `/announce …`) in **Settings → Mod buttons**. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
 - **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **AutoMod:** approve or deny held messages right in chat.
 - **Highlights:** colour messages that contain a word or phrase, match a regular expression, or come from a

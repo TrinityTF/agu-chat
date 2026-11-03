@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS = {
   modButtons: [
     { id: "ban", action: "ban", icon: "ban", label: "", seconds: 0, command: "" },
     { id: "timeout", action: "timeout", icon: "clock", label: "", seconds: 600, command: "" },
+    { id: "warn", action: "warn", icon: "warning", label: "", seconds: 0, command: "" },
     { id: "delete", action: "delete", icon: "trash", label: "", seconds: 0, command: "" },
   ],
   highlightRules: [], // see src/main/highlightRules.js
@@ -43,7 +44,7 @@ export const DEFAULT_SETTINGS = {
   ignoredPhrases: [], // [{ pattern, regex, caseSensitive, action: "hide" | "replace", replacement }]
 };
 
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 
 const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
@@ -116,6 +117,11 @@ export const settingsStore = {
       const saved = readJson("settings.json", {});
       // v2 turned timestamps off by default; older files saved every key, so their `true` was just the old default.
       if (saved && typeof saved === "object" && (saved.v ?? 1) < 2) delete saved.timestamps;
+      // v3 added warn to the default mod buttons: a list still exactly the old three defaults gets the new set.
+      if (saved && typeof saved === "object" && (saved.v ?? 1) < 3 && Array.isArray(saved.modButtons)) {
+        const ids = saved.modButtons.map((b) => `${b?.id}:${b?.action}:${b?.seconds}:${b?.label || ""}:${b?.command || ""}`).join(",");
+        if (ids === "ban:ban:0::,timeout:timeout:600::,delete:delete:0::") delete saved.modButtons;
+      }
       for (const [k, v] of Object.entries(saved && typeof saved === "object" ? saved : {})) {
         if (!Object.hasOwn(DEFAULT_SETTINGS, k)) continue;
         const c = clean(k, v);

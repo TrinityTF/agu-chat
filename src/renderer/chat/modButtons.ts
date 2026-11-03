@@ -16,7 +16,7 @@ export const MOD_BUTTON_ICONS: { id: ModButtonIcon; label: string }[] = [
   { id: "check", label: "Check" },
 ];
 const ICON_IDS = new Set<string>(MOD_BUTTON_ICONS.map((i) => i.id));
-const ACTIONS = new Set<ModButtonAction>(["ban", "timeout", "delete", "command"]);
+const ACTIONS = new Set<ModButtonAction>(["ban", "timeout", "warn", "delete", "command"]);
 
 export const MAX_MOD_BUTTONS = 12;
 export const MAX_LABEL = 8;
@@ -24,10 +24,11 @@ export const MAX_COMMAND = 500;
 /** Twitch's timeout cap: 2 weeks. */
 export const MAX_TIMEOUT = 1_209_600;
 
-/** Today's (and the default) set: ban, timeout 10 minutes, delete. */
+/** The default set: ban, timeout 10 minutes, warn, delete. */
 export const DEFAULT_MOD_BUTTONS: ModButton[] = [
   { id: "ban", action: "ban", icon: "ban", label: "", seconds: 0, command: "" },
   { id: "timeout", action: "timeout", icon: "clock", label: "", seconds: 600, command: "" },
+  { id: "warn", action: "warn", icon: "warning", label: "", seconds: 0, command: "" },
   { id: "delete", action: "delete", icon: "trash", label: "", seconds: 0, command: "" },
 ];
 
@@ -80,7 +81,7 @@ export function normalizeModButton(v: unknown): ModButton | null {
 }
 
 export function defaultIcon(action: ModButtonAction): ModButtonIcon {
-  return action === "ban" ? "ban" : action === "timeout" ? "clock" : action === "delete" ? "trash" : "chat";
+  return action === "ban" ? "ban" : action === "timeout" ? "clock" : action === "warn" ? "warning" : action === "delete" ? "trash" : "chat";
 }
 
 /** settings.modButtons -> the buttons to draw, in order. Not an array (missing / corrupt) -> the defaults. */
@@ -106,6 +107,8 @@ export function describeModButton(b: ModButton): string {
       return "Ban";
     case "timeout":
       return `Timeout ${formatDuration(b.seconds)}`;
+    case "warn":
+      return "Warn";
     case "delete":
       return "Delete message";
     case "command":

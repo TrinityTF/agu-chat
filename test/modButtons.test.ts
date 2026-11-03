@@ -46,16 +46,17 @@ test("parseDuration and formatDuration", () => {
   assert.equal(formatDuration(5400), "90m");
 });
 
-test("defaults are today's ban / timeout 10m / delete", () => {
+test("defaults are ban / timeout 10m / warn / delete", () => {
   assert.deepEqual(
     DEFAULT_MOD_BUTTONS.map((b) => [b.action, b.seconds]),
     [
       ["ban", 0],
       ["timeout", 600],
+      ["warn", 0],
       ["delete", 0],
     ],
   );
-  assert.deepEqual(DEFAULT_MOD_BUTTONS.map(describeModButton), ["Ban", "Timeout 10m", "Delete message"]);
+  assert.deepEqual(DEFAULT_MOD_BUTTONS.map(describeModButton), ["Ban", "Timeout 10m", "Warn", "Delete message"]);
   assert.equal(normalizeModButtons(undefined), DEFAULT_MOD_BUTTONS);
   assert.equal(normalizeModButtons({}), DEFAULT_MOD_BUTTONS);
   assert.deepEqual(normalizeModButtons(DEFAULT_MOD_BUTTONS), DEFAULT_MOD_BUTTONS);
