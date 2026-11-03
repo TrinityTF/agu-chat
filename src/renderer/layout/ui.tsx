@@ -184,6 +184,7 @@ export function Btn({
   small,
   type = "button",
   title,
+  autoFocus,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -193,6 +194,7 @@ export function Btn({
   small?: boolean;
   type?: "button" | "submit";
   title?: string;
+  autoFocus?: boolean;
 }) {
   const tone = primary
     ? "bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-strong)] border-transparent"
@@ -203,6 +205,7 @@ export function Btn({
     <button
       type={type}
       title={title}
+      autoFocus={autoFocus}
       disabled={disabled}
       onClick={onClick}
       className={`rounded border ${small ? "px-2 py-0.5 text-[11px]" : "px-3 py-1 text-[12px]"} font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tone}`}

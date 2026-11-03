@@ -8,22 +8,29 @@ import type { Activity } from "../chat/ChatPane";
 import type { SplitActions } from "./SplitHeader";
 import { ChannelDialog } from "./ChannelDialog";
 import { SettingsDialog } from "./SettingsDialog";
+import { Btn, Modal } from "./ui";
 import { useUpdater } from "./useBridge";
 import { useSettings } from "../hooks";
 import { bindingMap, eventToBinding, hotkeyRecording, resolveHotkeys } from "./hotkeys";
 import { HotkeysContext } from "./hotkeyContext";
-import { defaultLayout, findLeaf, insertAt, leaves, mapLeaf, moveLeaf, newLeaf, newTab, removeLeaf, sanitizeLayout, setSizes, sourceKey, type Edge } from "./tree";
+import { defaultLayout, findLeaf, insertAt, leaves, mapLeaf, moveLeaf, newLeaf, newTab, removeLeaf, sanitizeLayout, setSizes, sourceKey, tabTitle, type Edge } from "./tree";
 
 type Dialog =
   | { kind: "add"; tabId: string }
   | { kind: "change"; tabId: string; leafId: string }
   | { kind: "split"; tabId: string; leafId: string; dir: "right" | "below" }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "closeTab"; tabId: string; others?: boolean };
+
+/** A tab with at least one channel in it: closing it loses something, so it asks first. */
+const hasChannels = (t: Tab | undefined) => !!t?.root && leaves(t.root).some((l) => l.sources.length > 0);
 
 export function App() {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [focusByTab, setFocusByTab] = useState<Record<string, string>>({});
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const [barDismissed, setBarDismissed] = useState<string | null>(null);
   // Tabs that got live chat while not selected: "message" (a subtle marker) or "highlight" (a strong one).
   const [unread, setUnread] = useState<Record<string, Activity>>({});
@@ -119,6 +126,24 @@ export function App() {
     setFocusByTab((m) => (m[tabId] === leafId ? m : { ...m, [tabId]: leafId }));
   }, []);
 
+  const closeTabNow = useCallback(
+    (id: string) =>
+      setLayout((l) => {
+        if (!l) return l;
+        const idx = l.tabs.findIndex((t) => t.id === id);
+        if (idx < 0) return l;
+        const tabs = l.tabs.filter((t) => t.id !== id);
+        if (!tabs.length) {
+          const t = newTab();
+          return { tabs: [t], active: t.id };
+        }
+        const active = l.active === id ? tabs[Math.min(idx, tabs.length - 1)].id : l.active;
+        return { tabs, active };
+      }),
+    [],
+  );
+  const closeOthersNow = useCallback((id: string) => setLayout((l) => (l ? { tabs: l.tabs.filter((t) => t.id === id), active: id } : l)), []);
+
   const tabActions: TabActions = useMemo(
     () => ({
       select: (id) => setLayout((l) => (l && l.tabs.some((t) => t.id === id) ? { ...l, active: id } : l)),
@@ -128,20 +153,14 @@ export function App() {
           const t = newTab();
           return { tabs: [...l.tabs, t], active: t.id };
         }),
-      close: (id) =>
-        setLayout((l) => {
-          if (!l) return l;
-          const idx = l.tabs.findIndex((t) => t.id === id);
-          if (idx < 0) return l;
-          const tabs = l.tabs.filter((t) => t.id !== id);
-          if (!tabs.length) {
-            const t = newTab();
-            return { tabs: [t], active: t.id };
-          }
-          const active = l.active === id ? tabs[Math.min(idx, tabs.length - 1)].id : l.active;
-          return { tabs, active };
-        }),
-      closeOthers: (id) => setLayout((l) => (l ? { tabs: l.tabs.filter((t) => t.id === id), active: id } : l)),
+      close: (id) => {
+        if (hasChannels(layoutRef.current?.tabs.find((t) => t.id === id))) setDialog({ kind: "closeTab", tabId: id });
+        else closeTabNow(id);
+      },
+      closeOthers: (id) => {
+        if (layoutRef.current?.tabs.some((t) => t.id !== id && hasChannels(t))) setDialog({ kind: "closeTab", tabId: id, others: true });
+        else closeOthersNow(id);
+      },
       rename: (id, title) => updateTab(id, (t) => ({ ...t, title })),
       reorder: (id, before) =>
         setLayout((l) => {
@@ -162,7 +181,7 @@ export function App() {
           .then((s) => agu.settings.set({ alwaysOnTop: !s.alwaysOnTop }))
           .catch(() => {}),
     }),
-    [updateTab],
+    [updateTab, closeTabNow, closeOthersNow],
   );
 
   const splitActionsFor = useCallback(
@@ -236,7 +255,7 @@ export function App() {
   const submitChannels = (sources: SourceRef[]) => {
     const d = dialog;
     setDialog(null);
-    if (!d || d.kind === "settings") return;
+    if (!d || d.kind === "settings" || d.kind === "closeTab") return;
     const leaf = newLeaf(sources);
     if (d.kind === "add") {
       updateRoot(d.tabId, (r) => (r ? insertAt(r, leaves(r)[0].id, leaf, "right") : leaf));
@@ -351,6 +370,18 @@ export function App() {
         </div>
 
         {dialog?.kind === "settings" && <SettingsDialog onClose={() => setDialog(null)} />}
+        {dialog?.kind === "closeTab" && (
+          <ConfirmCloseTab
+            tab={layout.tabs.find((t) => t.id === dialog.tabId)}
+            others={dialog.others ? layout.tabs.filter((t) => t.id !== dialog.tabId).length : 0}
+            onCancel={() => setDialog(null)}
+            onConfirm={() => {
+              setDialog(null);
+              if (dialog.others) closeOthersNow(dialog.tabId);
+              else closeTabNow(dialog.tabId);
+            }}
+          />
+        )}
         {dialog?.kind === "add" && <ChannelDialog title="Select channel" initial={[]} submitLabel="Add channel" onSubmit={submitChannels} onClose={() => setDialog(null)} />}
         {dialog?.kind === "change" && dialogLeaf && (
           <ChannelDialog title="Change channel(s)" initial={dialogLeaf.sources} submitLabel="Apply" onSubmit={submitChannels} onClose={() => setDialog(null)} />
@@ -366,5 +397,36 @@ export function App() {
         )}
       </div>
     </HotkeysContext.Provider>
+  );
+}
+
+function ConfirmCloseTab({ tab, others, onCancel, onConfirm }: { tab: Tab | undefined; others: number; onCancel: () => void; onConfirm: () => void }) {
+  const label = others ? `Close ${others} other tab${others === 1 ? "" : "s"}` : "Close tab";
+  return (
+    <Modal
+      title={`${label}?`}
+      width={360}
+      onClose={onCancel}
+      footer={
+        <>
+          <Btn onClick={onCancel}>Cancel</Btn>
+          <Btn danger autoFocus onClick={onConfirm}>
+            {label}
+          </Btn>
+        </>
+      }
+    >
+      <p className="px-3 py-3 text-[12px] text-[var(--color-muted)]">
+        {others ? (
+          <>
+            Every tab except <span className="font-semibold text-[var(--color-text)]">{tab ? tabTitle(tab) : "this one"}</span> is closed, with its splits and channels.
+          </>
+        ) : (
+          <>
+            <span className="font-semibold text-[var(--color-text)]">{tab ? tabTitle(tab) : "This tab"}</span> is closed, with its splits and channels.
+          </>
+        )}
+      </p>
+    </Modal>
   );
 }
