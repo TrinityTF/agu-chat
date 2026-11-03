@@ -46,20 +46,17 @@ export function SettingsDialog({ onClose, initial = "accounts" }: { onClose: () 
 
   return (
     <Modal title="Settings" onClose={onClose} width={780} fullOnSmall>
-      {/* Narrow windows (and phones later): the section list becomes a scrolling row above the page. */}
+      {/* Narrow windows (and phones later): the section list wraps into rows above the page, so every section stays visible. */}
       <div className="flex h-[min(72vh,540px)] text-[12px] max-sm:h-full max-sm:flex-col">
-        <nav className="no-scrollbar w-40 shrink-0 border-r border-[var(--color-line)] bg-[var(--color-app)] py-2 max-sm:flex max-sm:w-full max-sm:overflow-x-auto max-sm:border-b max-sm:border-r-0 max-sm:py-0">
+        <nav className="w-40 shrink-0 overflow-y-auto border-r border-[var(--color-line)] bg-[var(--color-app)] py-2 max-sm:flex max-sm:w-full max-sm:flex-wrap max-sm:overflow-visible max-sm:border-b max-sm:border-r-0 max-sm:py-0">
           {SECTIONS.map((s) => (
             <button
               key={s.id}
               type="button"
-              onClick={(e) => {
-                setSection(s.id);
-                e.currentTarget.scrollIntoView({ inline: "nearest", block: "nearest" });
-              }}
+              onClick={() => setSection(s.id)}
               aria-current={section === s.id}
               className={
-                "block w-full border-l-2 px-3 py-1.5 text-left max-sm:w-auto max-sm:shrink-0 max-sm:whitespace-nowrap max-sm:border-b-2 max-sm:border-l-0 max-sm:py-2 " +
+                "block w-full border-l-2 px-3 py-1.5 text-left max-sm:w-auto max-sm:whitespace-nowrap max-sm:border-b-2 max-sm:border-l-0 max-sm:px-2.5 " +
                 (section === s.id
                   ? "border-[var(--color-accent)] bg-[var(--color-raised)] text-[var(--color-text)]"
                   : "border-transparent text-[var(--color-muted)] hover:bg-[var(--color-raised)] hover:text-[var(--color-text)]")
@@ -153,15 +150,8 @@ function AccountTitle({ platform, right }: { platform: Platform; right?: ReactNo
 function ConnectedLine({ st, onLogout }: { st: AccountState; onLogout: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <div>
-        <div>
-          Logged in as <span className="font-semibold">{st.user?.name || st.user?.login || "unknown"}</span>
-        </div>
-        {st.scopes && st.scopes.length > 0 && (
-          <div className="mt-0.5 max-w-[420px] truncate text-[11px] text-[var(--color-faint)]" title={st.scopes.join(" ")}>
-            {st.scopes.length} permissions: {st.scopes.join(", ")}
-          </div>
-        )}
+      <div className="min-w-0 truncate">
+        Logged in as <span className="font-semibold">{st.user?.name || st.user?.login || "unknown"}</span>
       </div>
       <Btn danger onClick={onLogout}>
         Log out
