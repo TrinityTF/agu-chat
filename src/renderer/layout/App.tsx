@@ -29,6 +29,7 @@ export function App() {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [focusByTab, setFocusByTab] = useState<Record<string, string>>({});
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [tabDrag, setTabDrag] = useState<string | null>(null); // a tab being dragged from the tab bar
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
   const [barDismissed, setBarDismissed] = useState<string | null>(null);
@@ -150,11 +151,8 @@ export function App() {
       add: () =>
         setLayout((l) => {
           if (!l) return l;
-          // A new tab opens right after the selected one.
           const t = newTab();
-          const tabs = l.tabs.slice();
-          tabs.splice(l.tabs.findIndex((x) => x.id === l.active) + 1, 0, t);
-          return { tabs, active: t.id };
+          return { tabs: [...l.tabs, t], active: t.id };
         }),
       close: (id) => {
         if (hasChannels(layoutRef.current?.tabs.find((t) => t.id === id))) setDialog({ kind: "closeTab", tabId: id });
@@ -231,6 +229,17 @@ export function App() {
         updateRoot(tabId, (r) => mapLeaf(r, leafId, (l) => (l.sources.length > 1 ? { ...l, sources: l.sources.filter((s) => sourceKey(s) !== key) } : l))),
       addFirst: () => setDialog({ kind: "add", tabId }),
       openSettings: () => setDialog({ kind: "settings" }),
+      // Another tab dragged onto this one's splits: its whole layout goes in at that edge, and the tab closes.
+      takeTab: (srcTabId, targetId, edge) =>
+        setLayout((l) => {
+          const src = l?.tabs.find((t) => t.id === srcTabId);
+          if (!l || !src?.root || srcTabId === tabId) return l;
+          const add = src.root;
+          const tabs = l.tabs
+            .filter((t) => t.id !== srcTabId)
+            .map((t) => (t.id === tabId ? { ...t, root: targetId ? insertAt(t.root, targetId, add, edge) : add } : t));
+          return { tabs, active: tabId };
+        }),
     }),
     [focusLeaf, updateRoot],
   );
@@ -344,7 +353,7 @@ export function App() {
   return (
     <HotkeysContext.Provider value={hotkeyTable}>
       <div className="flex h-full flex-col bg-[var(--color-app)]">
-        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} />
+        <NotebookTabs tabs={layout.tabs} active={activeTab.id} actions={tabActions} unread={unread} onDragTab={setTabDrag} />
         {showBar && updater && (
           <div className="flex h-6 shrink-0 items-center gap-3 border-b border-[var(--color-line)] bg-[var(--color-accent-strong)] px-3 text-[12px] text-white">
             <span className="min-w-0 flex-1 truncate">Agu Chat {updater.version} is ready — Restart to update</span>
@@ -361,7 +370,14 @@ export function App() {
             const isActive = t.id === activeTab.id;
             return (
               <div key={t.id} className={"absolute inset-0 " + (isActive ? "" : "pointer-events-none invisible")} aria-hidden={!isActive} data-tab-panel={t.id}>
-                <SplitView root={t.root} focusedId={focusedOf(t)} tabActive={isActive} actions={splitActionsFor(t.id)} onActivity={activityFor(t.id)} />
+                <SplitView
+                  root={t.root}
+                  focusedId={focusedOf(t)}
+                  tabActive={isActive}
+                  actions={splitActionsFor(t.id)}
+                  onActivity={activityFor(t.id)}
+                  tabDrag={isActive && tabDrag && tabDrag !== t.id && layout.tabs.find((x) => x.id === tabDrag)?.root ? tabDrag : null}
+                />
               </div>
             );
           })}

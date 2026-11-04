@@ -26,6 +26,8 @@ export type SplitActions = {
   merge(leafId: string, keys: string[] | null, targetId: string): void;
   addFirst(): void;
   openSettings(): void;
+  /** Move all of tab `tabId`'s splits beside `targetId` (or into the empty tab when null) and close that tab. */
+  takeTab(tabId: string, targetId: string | null, edge: "left" | "right" | "top" | "bottom"): void;
 };
 
 /** What a header chip carries while dragged (dataTransfer "application/x-agu-sources"). */

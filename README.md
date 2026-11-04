@@ -51,7 +51,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 
 | To do this | Do this |
 | --- | --- |
-| New tab | `+` or Ctrl+T (opens next to the current tab) |
+| New tab | `+` or Ctrl+T |
 | Rename a tab | Double-click it |
 | Close a tab | Select it, then its × or a middle click (asks first if it has channels) |
 | Switch tabs | Ctrl+Tab, Ctrl+1…9 |
@@ -59,6 +59,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 | Resize splits | Drag the line between them |
 | Move a split | Drag its header onto another split's edge |
 | Merge splits | Drag a split's header (or a platform icon) onto the middle of another split |
+| Tab into splits | Drag another tab onto an edge of a split: its splits move in beside it and the tab closes |
 | Close a split | Ctrl+W |
 | Merge platforms | In the channel dialog, add several channels to one split |
 | Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |

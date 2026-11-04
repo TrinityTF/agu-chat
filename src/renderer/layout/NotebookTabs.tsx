@@ -30,12 +30,15 @@ export function NotebookTabs({
   active,
   actions,
   unread = {},
+  onDragTab,
 }: {
   tabs: Tab[];
   active: string;
   actions: TabActions;
   /** Unselected tabs that got live chat: "message" = new messages, "highlight" = a highlight or mention. */
   unread?: Record<string, Activity>;
+  /** A tab drag started (its id) or ended (null): the splits below show where it can be dropped. */
+  onDragTab?: (id: string | null) => void;
 }) {
   const closeTabKey = useHotkeyHint("closeTab");
   const newTabKey = useHotkeyHint("newTab");
@@ -172,10 +175,13 @@ export function NotebookTabs({
                   e.dataTransfer.setData("application/x-agu-tab", t.id);
                   e.dataTransfer.effectAllowed = "move";
                   setDragId(t.id);
+                  // Changing the DOM inside dragstart can cancel the drag, so the drop targets show a tick later.
+                  setTimeout(() => onDragTab?.(t.id), 0);
                 }}
                 onDragEnd={() => {
                   setDragId(null);
                   setDropAt(null);
+                  onDragTab?.(null);
                 }}
                 onDragOver={(e) => {
                   if (!dragId) return;

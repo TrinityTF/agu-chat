@@ -42,8 +42,8 @@ function computeLayout(root: SplitNode | null) {
 
 const pct = (v: number) => `${(v * 100).toFixed(4)}%`;
 
-/** A whole split being moved (its header), or some of a split's channels (a header chip). */
-type Dragging = { kind: "split"; leafId: string } | ({ kind: "sources" } & SourceDrag);
+/** A whole split being moved (its header), some of a split's channels (a header chip), or another tab. */
+type Dragging = { kind: "split"; leafId: string } | ({ kind: "sources" } & SourceDrag) | { kind: "tab"; tabId: string };
 
 export function SplitView({
   root,
@@ -51,6 +51,7 @@ export function SplitView({
   tabActive,
   actions,
   onActivity,
+  tabDrag = null,
 }: {
   root: SplitNode | null;
   focusedId: string | null;
@@ -58,20 +59,36 @@ export function SplitView({
   actions: SplitActions;
   /** Live chat arrived in one of this tab's splits (drives the tab's unread / highlight marker). */
   onActivity?: (kind: Activity) => void;
+  /** Another tab being dragged from the tab bar: its splits can be dropped beside these. */
+  tabDrag?: string | null;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [dragging, setDragging] = useState<Dragging | null>(null);
+  const [ownDrag, setDragging] = useState<Dragging | null>(null);
+  const dragging: Dragging | null = ownDrag ?? (tabDrag ? { kind: "tab", tabId: tabDrag } : null);
   const { leaves, dividers } = useMemo(() => computeLayout(root), [root]);
   // Stable DOM order, so React never has to move a pane's element (moving resets its scroll offset).
   const ordered = useMemo(() => leaves.slice().sort((a, b) => (a.leaf.id < b.leaf.id ? -1 : 1)), [leaves]);
 
   if (!root) {
     return (
-      <div className="flex h-full w-full items-center justify-center gap-2 bg-[var(--color-panel)]">
+      <div
+        className="relative flex h-full w-full items-center justify-center gap-2 bg-[var(--color-panel)]"
+        onDragOver={(e) => {
+          if (!tabDrag) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(e) => {
+          if (!tabDrag) return;
+          e.preventDefault();
+          actions.takeTab(tabDrag, null, "right");
+        }}
+      >
         <Btn primary onClick={actions.addFirst}>
           Add a channel
         </Btn>
         <Btn onClick={actions.openSettings}>Settings</Btn>
+        {tabDrag && <div className="pointer-events-none absolute inset-2 rounded-sm border-2 border-dashed border-[var(--color-accent)]" />}
       </div>
     );
   }
@@ -222,9 +239,10 @@ function LeafView({
   // A split can't be dropped on itself; its channels can (beside it), unless they are all it has.
   const dropTarget =
     !!dragging &&
-    (dragging.kind === "split" ? dragging.leafId !== leaf.id : dragging.leafId !== leaf.id || dragging.keys.length < leaf.sources.length);
-  // Merging only means something into another split.
-  const canMerge = !!dragging && dragging.leafId !== leaf.id;
+    (dragging.kind === "tab" ||
+      (dragging.kind === "split" ? dragging.leafId !== leaf.id : dragging.leafId !== leaf.id || dragging.keys.length < leaf.sources.length));
+  // Merging only means something into another split; a whole tab only goes beside one.
+  const canMerge = !!dragging && dragging.kind !== "tab" && dragging.leafId !== leaf.id;
 
   return (
     <div
@@ -260,7 +278,9 @@ function LeafView({
             const zone = zoneAt(e, e.currentTarget, canMerge);
             setHover(null);
             setDragging(null);
-            if (zone === "center") actions.merge(dragging.leafId, dragging.kind === "split" ? null : dragging.keys, leaf.id);
+            if (dragging.kind === "tab") {
+              if (zone !== "center") actions.takeTab(dragging.tabId, leaf.id, zone);
+            } else if (zone === "center") actions.merge(dragging.leafId, dragging.kind === "split" ? null : dragging.keys, leaf.id);
             else if (dragging.kind === "split") actions.move(dragging.leafId, leaf.id, zone);
             else actions.splitOut(dragging.leafId, dragging.keys, leaf.id, zone);
           }}
