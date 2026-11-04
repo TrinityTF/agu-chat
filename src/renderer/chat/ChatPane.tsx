@@ -68,6 +68,7 @@ const FALLBACK_SETTINGS: Settings = {
   bttv: true,
   ffz: true,
   sevenTvCosmetics: true,
+  animatedEmotes: true,
   deletedMessages: "strike",
   showModButtons: true,
   showModActions: true,

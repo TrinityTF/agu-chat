@@ -163,6 +163,28 @@ export function App() {
         else closeOthersNow(id);
       },
       rename: (id, title) => updateTab(id, (t) => ({ ...t, title })),
+      // A split (or some of its channels) dragged up to the tab bar becomes a tab of its own. A tab left with
+      // nothing in it goes away, so dragging a tab's only split up just moves it.
+      fromSplit: (leafId, keys, before) =>
+        setLayout((l) => {
+          const src = l?.tabs.find((t) => t.id === l.active);
+          const from = src ? findLeaf(src.root, leafId) : null;
+          if (!l || !src || !from) return l;
+          const moving = keys ? from.sources.filter((s) => keys.includes(sourceKey(s))) : from.sources;
+          if (!moving.length) return l;
+          const staying = from.sources.filter((s) => !moving.includes(s));
+          const rest = staying.length ? mapLeaf(src.root, leafId, (x) => ({ ...x, sources: staying })) : removeLeaf(src.root, leafId);
+          const t: Tab = { ...newTab(), root: { ...newLeaf(moving), modMode: from.modMode } };
+          const tabs = l.tabs.map((x) => (x.id === src.id ? { ...x, root: rest } : x));
+          let at = Math.max(0, Math.min(before, tabs.length));
+          if (!rest) {
+            const i = tabs.findIndex((x) => x.id === src.id);
+            tabs.splice(i, 1);
+            if (i < at) at--;
+          }
+          tabs.splice(at, 0, t);
+          return { tabs, active: t.id };
+        }),
       reorder: (id, before) =>
         setLayout((l) => {
           if (!l) return l;

@@ -21,7 +21,26 @@ export type TabActions = {
   rename(id: string, title: string): void;
   /** Move tab `id` to sit before the tab currently at `beforeIndex` (tabs.length = the end). */
   reorder(id: string, beforeIndex: number): void;
+  /** A split of the selected tab (or some of its channels, `keys`) dropped on the bar: a new tab at `beforeIndex`. */
+  fromSplit(leafId: string, keys: string[] | null, beforeIndex: number): void;
 };
+
+// What a split header (a whole split) or a header chip (some of its channels) puts on the drag.
+const SPLIT_TYPE = "application/x-agu-split";
+const SOURCES_TYPE = "application/x-agu-sources";
+const splitDrag = (e: React.DragEvent) => e.dataTransfer.types.includes(SPLIT_TYPE) || e.dataTransfer.types.includes(SOURCES_TYPE);
+
+/** The split or channels a drop carries, or null for anything else. */
+function droppedSplit(e: React.DragEvent): { leafId: string; keys: string[] | null } | null {
+  const leafId = e.dataTransfer.getData(SPLIT_TYPE);
+  if (leafId) return { leafId, keys: null };
+  try {
+    const d = JSON.parse(e.dataTransfer.getData(SOURCES_TYPE) || "null");
+    return d && typeof d.leafId === "string" && Array.isArray(d.keys) ? { leafId: d.leafId, keys: d.keys } : null;
+  } catch {
+    return null;
+  }
+}
 
 const ALL_W = 25; // the All tabs button, border included
 
@@ -46,6 +65,7 @@ export function NotebookTabs({
   const [draft, setDraft] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null); // insertion index while dragging
+  const [splitOver, setSplitOver] = useState(false); // a split or channel is being dragged over the bar
   const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; tabId: string } | null>(null);
   const [list, setList] = useState<ReturnType<typeof anchorOf> | null>(null);
   const [maximized, setMaximized] = useState(false);
@@ -80,6 +100,34 @@ export function NotebookTabs({
   const shown = (i: number) => i >= view.start && i <= view.end;
   const hidden = tabs.filter((_, i) => !shown(i));
   const hiddenMark = hidden.some((t) => unread[t.id] === "highlight") ? "highlight" : hidden.some((t) => unread[t.id]) ? "message" : undefined;
+
+  // However a split drag ends (dropped here, elsewhere, or cancelled), the insertion mark goes.
+  useEffect(() => {
+    if (!splitOver) return;
+    const end = () => {
+      setSplitOver(false);
+      setDropAt(null);
+    };
+    window.addEventListener("dragend", end);
+    window.addEventListener("drop", end);
+    return () => {
+      window.removeEventListener("dragend", end);
+      window.removeEventListener("drop", end);
+    };
+  }, [splitOver]);
+  const dropHere = (e: React.DragEvent, at: number) => {
+    e.preventDefault();
+    setDropAt(null);
+    setSplitOver(false);
+    if (dragId) {
+      actions.reorder(dragId, at);
+      setDragId(null);
+      return;
+    }
+    const d = droppedSplit(e);
+    if (d) actions.fromSplit(d.leafId, d.keys, at);
+  };
+  const dragging = !!dragId || splitOver;
 
   useEffect(() => {
     agu.win
@@ -118,7 +166,16 @@ export function NotebookTabs({
   const dropEnd = Math.min(view.end, tabs.length - 1) + 1; // dropping on the empty bar: after the last shown tab
 
   return (
-    <div className="flex h-7 shrink-0 select-none items-stretch border-b border-[var(--color-line)] bg-[var(--color-raised)]" role="tablist">
+    <div
+      className="flex h-7 shrink-0 select-none items-stretch border-b border-[var(--color-line)] bg-[var(--color-raised)]"
+      role="tablist"
+      onDragLeave={(e) => {
+        if (splitOver && !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setSplitOver(false);
+          setDropAt(null);
+        }
+      }}
+    >
       <div ref={zoneRef} className="flex min-w-0 flex-1 items-stretch">
         {hidden.length > 0 && (
           <button
@@ -184,19 +241,17 @@ export function NotebookTabs({
                   onDragTab?.(null);
                 }}
                 onDragOver={(e) => {
-                  if (!dragId) return;
+                  if (!dragId && !splitDrag(e)) return;
                   e.preventDefault();
                   e.dataTransfer.dropEffect = "move";
+                  if (!dragId) setSplitOver(true);
                   const r = e.currentTarget.getBoundingClientRect();
                   setDropAt(e.clientX < r.left + r.width / 2 ? i : i + 1);
                 }}
                 onDrop={(e) => {
-                  if (!dragId) return;
-                  e.preventDefault();
+                  if (!dragId && !splitDrag(e)) return;
                   const r = e.currentTarget.getBoundingClientRect();
-                  actions.reorder(dragId, e.clientX < r.left + r.width / 2 ? i : i + 1);
-                  setDragId(null);
-                  setDropAt(null);
+                  dropHere(e, e.clientX < r.left + r.width / 2 ? i : i + 1);
                 }}
                 className={
                   "flex max-w-[220px] shrink-0 cursor-default items-center gap-1 border-r border-[var(--color-line)] px-2.5 text-[12px] " +
@@ -259,8 +314,8 @@ export function NotebookTabs({
                 )}
                 {selected && <span className="absolute inset-x-0 bottom-0 h-[2px] bg-[var(--color-accent)]" />}
                 {mark === "highlight" && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--color-accent-soft)]" />}
-                {dragId && dropAt === i && <span className="absolute inset-y-0 left-0 w-[2px] bg-[var(--color-accent)]" />}
-                {dragId && dropAt === i + 1 && i + 1 === dropEnd && <span className="absolute inset-y-0 right-0 w-[2px] bg-[var(--color-accent)]" />}
+                {dragging && dropAt === i && <span className="absolute inset-y-0 left-0 w-[2px] bg-[var(--color-accent)]" />}
+                {dragging && dropAt === i + 1 && i + 1 === dropEnd && <span className="absolute inset-y-0 right-0 w-[2px] bg-[var(--color-accent)]" />}
               </div>
             );
           })}
@@ -278,16 +333,15 @@ export function NotebookTabs({
         <div
           className="app-drag min-w-0 flex-1"
           onDragOver={(e) => {
-            if (!dragId) return;
+            if (!dragId && !splitDrag(e)) return;
             e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            if (!dragId) setSplitOver(true);
             setDropAt(dropEnd);
           }}
           onDrop={(e) => {
-            if (!dragId) return;
-            e.preventDefault();
-            actions.reorder(dragId, dropEnd);
-            setDragId(null);
-            setDropAt(null);
+            if (!dragId && !splitDrag(e)) return;
+            dropHere(e, dropEnd);
           }}
         />
       </div>

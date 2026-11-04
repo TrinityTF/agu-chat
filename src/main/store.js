@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS = {
   bttv: true,
   ffz: true,
   sevenTvCosmetics: true,
+  animatedEmotes: true, // off: emotes and GIFs stay still, which takes most of the GPU load away
   deletedMessages: "strike", // strike | hide | show
   showModButtons: true,
   showModActions: true, // the mod log lines in chat (bans, timeouts, mode changes)

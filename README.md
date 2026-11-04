@@ -14,7 +14,7 @@ and run it. Agu Chat keeps itself up to date after that.
 
 - **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
-- **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges.
+- **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges. Animated emotes can be turned off in Settings, which takes most of the GPU load away.
 - **Moderation:** mod mode adds mod buttons to every message: ban, timeout, warn and delete by default, or your own set (any timeout length, or a command such as `/announce …`) in **Settings → Mod buttons**. The shield in a split's header sets the channel's modes (Shield Mode, subscribers-only, emote-only, unique chat, followers-only, slow mode) and its blocked terms. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
 - **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **AutoMod:** approve or deny held messages right in chat.
@@ -60,6 +60,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 | Move a split | Drag its header onto another split's edge |
 | Merge splits | Drag a split's header (or a platform icon) onto the middle of another split |
 | Tab into splits | Drag another tab onto an edge of a split: its splits move in beside it and the tab closes |
+| Split into a tab | Drag a split's header (or a platform icon) onto the tab bar |
 | Close a split | Ctrl+W |
 | Merge platforms | In the channel dialog, add several channels to one split |
 | Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |

@@ -85,6 +85,7 @@ function wireIpc() {
     broadcast("settings:changed", s);
     updater.setChannel(s.updateChannel);
     applyAlwaysOnTop(s.alwaysOnTop);
+    applyImageAnimation(s.animatedEmotes);
   });
 
   handle("layout:get", () => layoutStore.get());
@@ -125,6 +126,22 @@ function applyAlwaysOnTop(on) {
   // "floating" keeps it above normal windows without fighting full-screen games for the very top.
   win.setAlwaysOnTop(!!on, "floating");
   for (const child of win.getChildWindows()) child.setAlwaysOnTop(!!on, "floating");
+}
+
+// Animated emotes are nearly all of the app's GPU use, so Settings can turn them off. Chromium applies the
+// policy only to images loaded after it is set, so a change reloads the chat view (and closes the user cards)
+// to apply it to every emote; at startup it is set before anything loads.
+let animationPolicy = null;
+function applyImageAnimation(on) {
+  const policy = on === false ? "noAnimation" : "animate";
+  if (policy === animationPolicy) return;
+  const first = animationPolicy === null;
+  animationPolicy = policy;
+  if (!win || win.isDestroyed()) return;
+  win.webContents.setImageAnimationPolicy(policy);
+  if (first) return;
+  for (const p of popouts.values()) if (!p.isDestroyed()) p.close();
+  win.webContents.reload();
 }
 
 // Pop-out cards (user cards): the renderer opens about:blank windows named "agu-popout:<id>" and draws into them
@@ -221,6 +238,7 @@ function createWindow() {
     const name = details?.frameName || "";
     if (name.startsWith("agu-popout:")) {
       popouts.set(name, child);
+      child.webContents.setImageAnimationPolicy(animationPolicy || "animate");
       // will-resize fires only for a resize by hand, never for setContentSize.
       child.on("will-resize", () => {
         if (userSized.has(child)) return;
@@ -238,6 +256,8 @@ function createWindow() {
       if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     });
   });
+  animationPolicy = null;
+  applyImageAnimation(settingsStore.get().animatedEmotes);
   if (DEV_URL) win.loadURL(DEV_URL);
   else win.loadFile(path.join(here, "../../out/renderer/index.html"));
 }

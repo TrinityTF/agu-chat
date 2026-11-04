@@ -3,7 +3,7 @@
 // The tree is laid out to fractional rectangles and every leaf is drawn as a flat,
 // absolutely positioned child in a stable order. That keeps each ChatPane mounted (and its
 // scrollback intact) when a sibling is closed, a split is moved, or the tree reshapes.
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ConnFrame, SplitNode } from "../protocol";
 import { ChatPane, type Activity } from "../chat/ChatPane";
 import { SplitHeader, type SourceDrag, type SplitActions } from "./SplitHeader";
@@ -65,6 +65,18 @@ export function SplitView({
   const hostRef = useRef<HTMLDivElement>(null);
   const [ownDrag, setDragging] = useState<Dragging | null>(null);
   const dragging: Dragging | null = ownDrag ?? (tabDrag ? { kind: "tab", tabId: tabDrag } : null);
+  // A split dropped on the tab bar leaves this tab, and its header with it, so no dragend reaches it:
+  // any drop or drag end clears the drop targets.
+  useEffect(() => {
+    if (!ownDrag) return;
+    const end = () => setDragging(null);
+    window.addEventListener("dragend", end);
+    window.addEventListener("drop", end);
+    return () => {
+      window.removeEventListener("dragend", end);
+      window.removeEventListener("drop", end);
+    };
+  }, [ownDrag]);
   const { leaves, dividers } = useMemo(() => computeLayout(root), [root]);
   // Stable DOM order, so React never has to move a pane's element (moving resets its scroll offset).
   const ordered = useMemo(() => leaves.slice().sort((a, b) => (a.leaf.id < b.leaf.id ? -1 : 1)), [leaves]);

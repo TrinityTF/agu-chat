@@ -512,6 +512,7 @@ function AppearanceSection({ settings, setSettings }: { settings: Settings; setS
       {bool("bttv", "BetterTTV emotes")}
       {bool("ffz", "FrankerFaceZ emotes")}
       {bool("sevenTvCosmetics", "7TV cosmetics", "Name paints and badges from 7TV")}
+      {bool("animatedEmotes", "Animated emotes", "Off keeps emotes still and uses far less GPU. Changing it reloads the chats")}
 
       <H>Moderation</H>
       <Row label="Deleted messages">

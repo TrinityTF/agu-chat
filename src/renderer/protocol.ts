@@ -81,6 +81,8 @@ export type Settings = {
   bttv: boolean;
   ffz: boolean;
   sevenTvCosmetics: boolean;
+  /** Off: emotes and GIFs stay on their first frame (much less GPU). Changing it reloads the chat view. */
+  animatedEmotes: boolean;
   deletedMessages: "strike" | "hide" | "show";
   showModButtons: boolean;
   /** Mod log lines in chat: bans, timeouts, mode changes. */
