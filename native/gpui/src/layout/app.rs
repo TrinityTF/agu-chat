@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use crate::layout::channel_dialog::{ChannelDialog, DialogEvent};
-use crate::layout::chat_pane::{Activity, ChatPane, PaneEvent};
+use crate::chat::chat_pane::{Activity, ChatPane, PaneEvent};
 use crate::layout::hotkeys::{
     binding_map, event_to_binding, resolve_hotkeys, HotkeyAction, HotkeyTable, KeyLike, HOTKEY_RECORDING,
 };
@@ -221,6 +221,19 @@ impl AguApp {
         })
         .detach();
 
+        // alerts: whether the window is active, and the handle to flash
+        {
+            use raw_window_handle::HasWindowHandle;
+            let svc = cx.global::<crate::chat::services::Services>().clone();
+            if let Ok(h) = HasWindowHandle::window_handle(&*window) {
+                if let raw_window_handle::RawWindowHandle::Win32(w) = h.as_raw() {
+                    svc.hwnd.set(w.hwnd.get());
+                }
+            }
+            svc.window_active.set(window.is_window_active());
+            let svc2 = svc.clone();
+            app._subs.push(cx.observe_window_activation(window, move |_this, window, _cx| svc2.window_active.set(window.is_window_active())));
+        }
         window.focus(&app.focus);
         app.demo_state(window, cx);
         app
@@ -248,9 +261,9 @@ impl AguApp {
         self.hotkey_table = resolve_hotkeys(&serde_json::to_value(&s.hotkeys).unwrap_or_default());
         self.keymap = binding_map(&self.hotkey_table);
         self.settings = s;
-        let (fs, alt) = (self.settings.font_size, self.settings.alternate_rows);
         for slot in self.panes.values() {
-            slot.view.update(cx, |p, cx| p.set_display(fs, alt, cx));
+            let s = self.settings.clone();
+            slot.view.update(cx, |p, cx| p.set_settings(s, cx));
         }
         cx.notify();
     }
@@ -317,7 +330,6 @@ impl AguApp {
     /// hidden or its split moving; it is rebuilt only when the split's channels change (`key={sig}` in the JS).
     fn sync_panes(&mut self, cx: &mut Context<Self>) {
         let mut keep: HashSet<String> = HashSet::new();
-        let (fs, alt) = (self.settings.font_size, self.settings.alternate_rows);
         let all: Vec<tree::Leaf> = self.layout.tabs.iter().flat_map(|t| leaves(t.root.as_ref())).collect();
         for leaf in all {
             keep.insert(leaf.id.clone());
@@ -327,7 +339,8 @@ impl AguApp {
                 let bridge = self.bridge.clone();
                 let sources = leaf.sources.clone();
                 let mod_mode = leaf.mod_mode;
-                let view = cx.new(|cx| ChatPane::new(sources, mod_mode, bridge, fs, alt, cx));
+                let settings = self.settings.clone();
+                let view = cx.new(|cx| ChatPane::new(sources, mod_mode, bridge, settings, cx));
                 let leaf_id = leaf.id.clone();
                 let sub = cx.subscribe(&view, move |this, _p, ev: &PaneEvent, cx| match ev {
                     PaneEvent::Status => cx.notify(),
@@ -335,7 +348,7 @@ impl AguApp {
                 });
                 self.panes.insert(leaf.id.clone(), PaneSlot { sig, view, _sub: sub });
             } else if let Some(slot) = self.panes.get(&leaf.id) {
-                slot.view.update(cx, |p, _| p.mod_mode = leaf.mod_mode);
+                slot.view.update(cx, |p, cx| p.set_mod_mode(leaf.mod_mode, cx));
             }
         }
         self.panes.retain(|id, _| keep.contains(id));
@@ -693,6 +706,16 @@ impl AguApp {
             cx.stop_propagation();
         };
         if ks.key == "escape" {
+            // Esc closes the focused split's search (MessageList.tsx)
+            let tab = self.active_tab().clone();
+            if let Some(slot) = self.focused_of(&tab).and_then(|id| self.panes.get(&id)) {
+                if self.menu.is_none() && self.dialog.is_none() && slot.view.read(cx).search_open {
+                    let v = slot.view.clone();
+                    v.update(cx, |p, cx| p.close_search(window, cx));
+                    stop(window, cx);
+                    return;
+                }
+            }
             if self.menu.is_some() {
                 self.close_menu(cx);
                 stop(window, cx);
@@ -706,6 +729,16 @@ impl AguApp {
         if ks.key == "enter" {
             if let Some(Dialog::CloseTab { tab_id, others }) = self.dialog.clone() {
                 self.confirm_close_tab(&tab_id, others, window, cx);
+                stop(window, cx);
+                return;
+            }
+        }
+        // Ctrl+F: only the focused split's list reacts, and not while a dialog is open
+        if ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.shift && ks.key == "f" && self.dialog.is_none() {
+            let tab = self.active_tab().clone();
+            if let Some(slot) = self.focused_of(&tab).and_then(|id| self.panes.get(&id)) {
+                let v = slot.view.clone();
+                v.update(cx, |p, cx| p.open_search(window, cx));
                 stop(window, cx);
                 return;
             }
@@ -975,6 +1008,13 @@ impl Render for AguApp {
             .line_height(relative(1.5))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key(ev, window, cx)))
+            .on_modifiers_changed(cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _w, cx| {
+                // settings.pauseChat == "alt": the lists freeze while Alt is held
+                let alt = ev.modifiers.alt;
+                for slot in this.panes.values() {
+                    slot.view.update(cx, |p, cx| p.set_alt(alt, cx));
+                }
+            }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _w, cx| this.on_root_mouse_move(ev, cx)))
             .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _w, cx| this.on_root_mouse_up(ev, cx)))
             .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _w, cx| this.on_root_mouse_up(ev, cx)))

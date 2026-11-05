@@ -1,8 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Port of src/renderer/main.tsx, plus the window setup from src/main/main.js (`createWindow`): a frameless
 //! 1280x800 window (min 280x300) that restores `window.json`, whose title bar is the notebook's tab bar.
-//! The backend is the mock bridge (port of layout/devMock.ts) until the real one is wired in: `AGU_MOCK=1`
-//! selects it explicitly, and for now it is also what runs without that variable.
+//! The backend is the real `agu_chat_core::Backend`; `AGU_MOCK=1` selects the mock bridge (port of
+//! layout/devMock.ts) instead. A debug build refuses to start the real backend without `AGU_DATA_DIR`, so a
+//! development run can never touch the real `%APPDATA%\Agu Chat` folder.
 #![allow(dead_code)] // Ports of pieces later rounds use (theme tokens, icons, Toggle, hotkey helpers) stay in.
 mod assets;
 mod chat;
@@ -21,8 +22,19 @@ fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         text_input::bind_keys(cx);
 
-        // AGU_MOCK=1 -> mock bridge; the real backend (agu-chat-core) replaces this later.
-        let bridge = layout::dev_mock::MockBridge::new();
+        let mock = std::env::var("AGU_MOCK").map(|v| v == "1").unwrap_or(false);
+        let (bridge, data_dir): (std::sync::Arc<dyn agu_chat_core::protocol::AguBridge>, std::path::PathBuf) = if mock {
+            (layout::dev_mock::MockBridge::new(), window_state::data_dir().unwrap_or_default())
+        } else {
+            if cfg!(debug_assertions) && std::env::var_os("AGU_DATA_DIR").filter(|d| !d.is_empty()).is_none() {
+                eprintln!("agu-chat-gpui: refusing to start a debug build without AGU_DATA_DIR (it would use the real %APPDATA%\\Agu Chat folder)");
+                std::process::exit(2);
+            }
+            let dir = agu_chat_core::default_data_dir();
+            window_state::use_real_backend();
+            (std::sync::Arc::new(agu_chat_core::Backend::start(dir.clone())), dir)
+        };
+        chat::services::init(cx, bridge.clone(), data_dir);
 
         // Where the window opens: its saved bounds, pulled back onto a screen when needed (windowState.js).
         let saved = window_state::load();

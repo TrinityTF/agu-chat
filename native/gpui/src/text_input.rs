@@ -41,6 +41,8 @@ pub enum InputStyle {
     Field,
     /// the tab rename box: w-32 rounded-sm border border-accent bg-app px-1 text-[12px]
     Rename,
+    /// chat search box: min-w-0 flex-1 bg-transparent text-xs, no border or outline
+    Bare,
 }
 
 pub enum TextInputEvent {
@@ -505,6 +507,7 @@ impl Render for TextInput {
         let child = div().w_full().min_w_0().child(TextElement { input: cx.entity() });
         match self.style {
             InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(c(if focused { theme::ACCENT } else { theme::LINE })).child(child),
+            InputStyle::Bare => base.flex_1().min_w_0().bg(gpui::transparent_black()).border_0().line_height(px(16.)).child(child),
             InputStyle::Rename => base.w(px(128.)).rounded(px(2.)).px(px(4.)).border_color(c(theme::ACCENT)).child(child),
         }
     }

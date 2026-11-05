@@ -65,3 +65,22 @@ pub fn platform_color(p: agu_chat_core::protocol::Platform) -> u32 {
         X => 0xffffff,
     }
 }
+
+// More Tailwind v4 palette values (sRGB) the chat rows use.
+pub const PURPLE_200: u32 = 0xe9d4ff;
+pub const PURPLE_300: u32 = 0xdab2ff;
+pub const PURPLE_500: u32 = 0xad46ff;
+pub const ORANGE_200: u32 = 0xffd6a7;
+pub const ORANGE_300: u32 = 0xffb86a;
+pub const AMBER_200: u32 = 0xfee685;
+pub const AMBER_300: u32 = 0xffd230;
+pub const AMBER_500: u32 = 0xfe9a00;
+pub const GREEN_300: u32 = 0x7bf1a8;
+pub const GREEN_500: u32 = 0x00c950;
+pub const SKY_300: u32 = 0x74d4ff;
+pub const SKY_400: u32 = 0x00bcff;
+pub const SLATE_500: u32 = 0x62748e;
+pub const SLATE_600: u32 = 0x45556c;
+pub const ROSE_500: u32 = 0xff2056;
+pub const YELLOW_500: u32 = 0xefb100;
+pub const LIME_500: u32 = 0x7ccf00;

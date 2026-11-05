@@ -17,7 +17,14 @@ pub fn data_dir() -> Option<PathBuf> {
 /// Files are written only into an explicitly given data dir while the UI runs on the mock bridge, so a run
 /// can never overwrite a real install's `layout.json` / `window.json`.
 pub fn writable() -> bool {
-    std::env::var_os("AGU_DATA_DIR").map(|d| !d.is_empty()).unwrap_or(false)
+    REAL_BACKEND.load(std::sync::atomic::Ordering::Relaxed) || std::env::var_os("AGU_DATA_DIR").map(|d| !d.is_empty()).unwrap_or(false)
+}
+
+static REAL_BACKEND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The real backend owns the data folder (default or AGU_DATA_DIR), so window.json is written there.
+pub fn use_real_backend() {
+    REAL_BACKEND.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

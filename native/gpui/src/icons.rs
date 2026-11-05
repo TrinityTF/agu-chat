@@ -27,6 +27,8 @@ icons! {
     TAG => "tag", GIFT => "gift", FISH => "fish", IMAGE => "image", TEXT => "text", COINS => "coins",
     SWORD => "sword", FLAG => "flag", CHECK => "check", WIN_MIN => "win-min", WIN_MAX => "win-max",
     WIN_RESTORE => "win-restore", STAR => "star", CROWN => "crown",
+    BITS_10000 => "bits-10000", BITS_5000 => "bits-5000", BITS_1000 => "bits-1000", BITS_100 => "bits-100", BITS_0 => "bits-0",
+    CHANNEL_POINTS => "channel-points",
     TWITCH => "platform-twitch", KICK => "platform-kick", YOUTUBE => "platform-youtube", RUMBLE => "platform-rumble",
     PLATFORM_X => "platform-x",
 }

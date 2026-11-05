@@ -13,7 +13,7 @@ use agu_chat_core::protocol::Tab;
 
 use crate::icons;
 use crate::layout::app::{AguApp, DragGhost, SourcesDrag, SplitDrag, TabDrag};
-use crate::layout::chat_pane::Activity;
+use crate::chat::chat_pane::Activity;
 use crate::layout::hotkeys::{hotkey_hint, HotkeyAction};
 use crate::layout::tab_window::tab_window;
 use crate::layout::tree::{auto_title, tab_title};
