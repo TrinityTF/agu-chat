@@ -69,7 +69,12 @@ pub fn log(msg: &str) {
     let target = ON.get_or_init(|| {
         std::env::var("AGU_LOG").ok().filter(|v| !v.is_empty() && v != "0").map(|v| {
             if v == "1" {
-                "agu-chat-native.log".to_string()
+                // <exe name>.log, e.g. agu-chat-native.log / agu-chat-gpui.log
+                let stem = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "agu-chat".to_string());
+                format!("{stem}.log")
             } else {
                 v
             }

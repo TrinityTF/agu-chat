@@ -1,24 +1,32 @@
-//! Shared image cache: fetch once per URL, decode off the UI thread, upload frames as egui textures.
+//! Shared image cache: fetch once per URL, decode off the UI thread into UI-neutral RGBA frames,
+//! then let the frontend turn them into its own GPU objects (`T`) on the UI thread.
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
-use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 
-pub struct Img {
+use crate::net::Wake;
+
+/// A decoded image: straight-alpha RGBA frames with per-frame delays.
+pub struct Decoded {
     pub w: u32,
     pub h: u32,
-    /// One atlas texture holding every frame in a grid (1px gutters).
-    pub tex: TextureHandle,
-    pub cols: u32,
-    pub rows: u32,
-    pub delays: Vec<u32>,
-    pub total_ms: u32,
+    /// (RGBA bytes, delay in ms)
+    pub frames: Vec<(Vec<u8>, u32)>,
 }
 
-impl Img {
+/// A finished image plus whatever the frontend made out of it.
+pub struct Img<T> {
+    pub w: u32,
+    pub h: u32,
+    pub delays: Vec<u32>,
+    pub total_ms: u32,
+    pub gpu: T,
+}
+
+impl<T> Img<T> {
     /// Current frame index and ms until the next frame change.
     pub fn frame_at(&self, t_ms: u64, freeze: bool) -> (usize, u32) {
         if freeze || self.delays.len() < 2 || self.total_ms == 0 {
@@ -35,27 +43,23 @@ impl Img {
     }
 }
 
-pub enum State {
+pub enum State<T> {
     Loading,
     Failed,
-    Ready(Arc<Img>),
+    Ready(Arc<Img<T>>),
 }
 
-struct Decoded {
-    w: u32,
-    h: u32,
-    frames: Vec<(Vec<u8>, u32)>,
-}
-
-pub struct ImageCache {
-    map: HashMap<String, State>,
+pub struct ImageCache<T> {
+    map: HashMap<String, State<T>>,
     rt: tokio::runtime::Handle,
     client: reqwest::Client,
     tx: Sender<(String, Result<Decoded, String>)>,
     rx: Receiver<(String, Result<Decoded, String>)>,
-    ctx: Context,
+    wake: Wake,
     sem: Arc<tokio::sync::Semaphore>,
+    /// Bytes the frontend reported for its uploaded images.
     pub decoded_bytes: u64,
+    /// GPU image objects (one per image).
     pub textures: usize,
     pub frames: usize,
     pub loaded: usize,
@@ -67,7 +71,7 @@ pub struct ImageCache {
 const MAX_FRAMES: usize = 150;
 const MAX_PIXELS: u64 = 512 * 512;
 
-fn decode(bytes: &[u8]) -> Result<Decoded, String> {
+pub fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     use image::AnimationDecoder;
     let fmt = image::guess_format(bytes).map_err(|e| e.to_string())?;
     let mut frames: Vec<(Vec<u8>, u32)> = Vec::new();
@@ -120,8 +124,8 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     Ok(Decoded { w, h, frames })
 }
 
-impl ImageCache {
-    pub fn new(rt: tokio::runtime::Handle, client: reqwest::Client, ctx: Context) -> Self {
+impl<T> ImageCache<T> {
+    pub fn new(rt: tokio::runtime::Handle, client: reqwest::Client, wake: Wake) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         ImageCache {
             map: HashMap::new(),
@@ -129,7 +133,7 @@ impl ImageCache {
             client,
             tx,
             rx,
-            ctx,
+            wake,
             sem: Arc::new(tokio::sync::Semaphore::new(12)),
             decoded_bytes: 0,
             textures: 0,
@@ -146,11 +150,11 @@ impl ImageCache {
     }
 
     /// State of a URL; starts the fetch on first sight.
-    pub fn get(&mut self, url: &str) -> &State {
+    pub fn get(&mut self, url: &str) -> &State<T> {
         if !self.map.contains_key(url) {
             self.map.insert(url.to_string(), State::Loading);
-            let (tx, client, ctx, sem, u) =
-                (self.tx.clone(), self.client.clone(), self.ctx.clone(), self.sem.clone(), url.to_string());
+            let (tx, client, wake, sem, u) =
+                (self.tx.clone(), self.client.clone(), self.wake.clone(), self.sem.clone(), url.to_string());
             self.rt.spawn(async move {
                 let _permit = sem.acquire().await;
                 let res: Result<Decoded, String> = async {
@@ -167,50 +171,31 @@ impl ImageCache {
                 }
                 .await;
                 let _ = tx.send((u, res));
-                ctx.request_repaint();
+                wake();
             });
         }
         &self.map[url]
     }
 
-    pub fn peek(&self, url: &str) -> Option<&State> {
+    pub fn peek(&self, url: &str) -> Option<&State<T>> {
         self.map.get(url)
     }
 
-    /// Upload finished decodes as textures (bounded per frame). Returns true if more are waiting.
-    pub fn pump(&mut self) -> bool {
+    /// Hand finished decodes to the frontend (bounded per call). `upload` returns the frontend's
+    /// handle and how many bytes it holds. Returns true if more are waiting.
+    pub fn pump(&mut self, mut upload: impl FnMut(&str, &Decoded) -> (T, u64)) -> bool {
         let t0 = Instant::now();
         while let Ok((url, res)) = self.rx.try_recv() {
             match res {
                 Ok(d) => {
-                    let (w, h) = (d.w as usize, d.h as usize);
-                    let n = d.frames.len();
-                    let (cw, ch) = (w + 2, h + 2);
-                    let cols = (2048 / cw).max(1).min(n);
-                    let rows = n.div_ceil(cols);
-                    let (aw, ah) = (cols * cw, rows * ch);
-                    let mut px = vec![0u8; aw * ah * 4];
-                    let mut delays = Vec::with_capacity(n);
-                    let mut total = 0;
-                    for (i, (rgba, ms)) in d.frames.iter().enumerate() {
-                        let (c, r) = (i % cols, i / cols);
-                        for y in 0..h {
-                            let dst = ((r * ch + 1 + y) * aw + c * cw + 1) * 4;
-                            px[dst..dst + w * 4].copy_from_slice(&rgba[y * w * 4..(y + 1) * w * 4]);
-                        }
-                        total += *ms;
-                        delays.push(*ms);
-                    }
-                    let ci = ColorImage::from_rgba_unmultiplied([aw, ah], &px);
-                    let tex = self.ctx.load_texture(url.clone(), ci, TextureOptions::LINEAR);
-                    self.decoded_bytes += (aw * ah * 4) as u64;
+                    let (gpu, bytes) = upload(&url, &d);
+                    let delays: Vec<u32> = d.frames.iter().map(|f| f.1).collect();
+                    let total = delays.iter().sum();
+                    self.decoded_bytes += bytes;
                     self.textures += 1;
-                    self.frames += n;
+                    self.frames += delays.len();
                     self.loaded += 1;
-                    self.map.insert(
-                        url,
-                        State::Ready(Arc::new(Img { w: d.w, h: d.h, tex, cols: cols as u32, rows: rows as u32, delays, total_ms: total })),
-                    );
+                    self.map.insert(url, State::Ready(Arc::new(Img { w: d.w, h: d.h, delays, total_ms: total, gpu })));
                 }
                 Err(e) => {
                     crate::logf!("image failed {url}: {e}");
@@ -223,19 +208,5 @@ impl ImageCache {
             }
         }
         false
-    }
-}
-
-impl Img {
-    /// UV rectangle of frame `i` inside the atlas.
-    pub fn uv(&self, i: usize) -> egui::Rect {
-        let (cw, ch) = (self.w + 2, self.h + 2);
-        let (aw, ah) = (self.cols * cw, self.rows * ch);
-        let (c, r) = (i as u32 % self.cols, i as u32 / self.cols);
-        let (x0, y0) = (c * cw + 1, r * ch + 1);
-        egui::Rect::from_min_max(
-            egui::pos2(x0 as f32 / aw as f32, y0 as f32 / ah as f32),
-            egui::pos2((x0 + self.w) as f32 / aw as f32, (y0 + self.h) as f32 / ah as f32),
-        )
     }
 }

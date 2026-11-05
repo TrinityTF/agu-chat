@@ -56,17 +56,20 @@ pub enum Event {
     Badges { ch: Option<String>, list: Vec<BadgeDef> },
 }
 
+/// Called from background threads whenever there is something new for the UI to pick up.
+pub type Wake = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Net {
     pub client: reqwest::Client,
     pub tx: Sender<Event>,
-    pub ctx: egui::Context,
+    pub wake: Wake,
 }
 
 impl Net {
     fn send(&self, e: Event) {
         let _ = self.tx.send(e);
-        self.ctx.request_repaint();
+        (self.wake)();
     }
 
     async fn json(&self, url: &str) -> Option<Value> {

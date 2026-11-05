@@ -1,18 +1,58 @@
 //! The egui application: splits, message layout cache, painting, stats overlay.
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
 use eframe::egui::{
-    self, pos2, vec2, Align, Align2, Color32, CursorIcon, FontId, Galley, Id, Rect, ScrollArea, Sense, Stroke, Ui,
-    UiBuilder,
+    self, pos2, vec2, Align, Align2, Color32, ColorImage, CursorIcon, FontId, Galley, Id, Rect, ScrollArea, Sense,
+    Stroke, TextureHandle, TextureOptions, Ui, UiBuilder,
 };
 
-use crate::images::{ImageCache, State};
-use crate::irc::{ChatMsg, Kind};
-use crate::net::{Event, Net, Provider};
-use crate::{logf, sys};
+use agu_chat_core::chat::{Change, Chat, Channel, RowData};
+use agu_chat_core::images::{ImageCache, Img, State};
+use agu_chat_core::irc::{ChatMsg, Kind};
+use agu_chat_core::maps::Maps;
+use agu_chat_core::tokens::{self, Atom};
+use agu_chat_core::{logf, sys};
+
+/// Frontend half of a cached image: one atlas texture holding every frame in a grid (1px gutters).
+pub struct Tex {
+    tex: TextureHandle,
+    cols: u32,
+    rows: u32,
+}
+type Imgs = ImageCache<Tex>;
+
+fn uv(img: &Img<Tex>, i: usize) -> Rect {
+    let (cw, ch) = (img.w + 2, img.h + 2);
+    let (aw, ah) = (img.gpu.cols * cw, img.gpu.rows * ch);
+    let (c, r) = (i as u32 % img.gpu.cols, i as u32 / img.gpu.cols);
+    let (x0, y0) = (c * cw + 1, r * ch + 1);
+    Rect::from_min_max(
+        pos2(x0 as f32 / aw as f32, y0 as f32 / ah as f32),
+        pos2((x0 + img.w) as f32 / aw as f32, (y0 + img.h) as f32 / ah as f32),
+    )
+}
+
+/// Pack all frames of a decoded image into one atlas texture.
+fn upload(ctx: &egui::Context, url: &str, d: &agu_chat_core::images::Decoded) -> (Tex, u64) {
+    let (w, h) = (d.w as usize, d.h as usize);
+    let n = d.frames.len();
+    let (cw, ch) = (w + 2, h + 2);
+    let cols = (2048 / cw).max(1).min(n);
+    let rows = n.div_ceil(cols);
+    let (aw, ah) = (cols * cw, rows * ch);
+    let mut px = vec![0u8; aw * ah * 4];
+    for (i, (rgba, _)) in d.frames.iter().enumerate() {
+        let (c, r) = (i % cols, i / cols);
+        for y in 0..h {
+            let dst = ((r * ch + 1 + y) * aw + c * cw + 1) * 4;
+            px[dst..dst + w * 4].copy_from_slice(&rgba[y * w * 4..(y + 1) * w * 4]);
+        }
+    }
+    let ci = ColorImage::from_rgba_unmultiplied([aw, ah], &px);
+    let tex = ctx.load_texture(url.to_string(), ci, TextureOptions::LINEAR);
+    (Tex { tex, cols: cols as u32, rows: rows as u32 }, (aw * ah * 4) as u64)
+}
 
 pub const C_APP: Color32 = Color32::from_rgb(0x0b, 0x0b, 0x10);
 pub const C_PANEL: Color32 = Color32::from_rgb(0x11, 0x11, 0x17);
@@ -25,34 +65,10 @@ pub const C_TEXT: Color32 = Color32::from_rgb(0xe4, 0xe4, 0xe7);
 pub const C_MUTED: Color32 = Color32::from_rgb(0xa1, 0xa1, 0xaa);
 pub const C_FAINT: Color32 = Color32::from_rgb(0x71, 0x71, 0x7a);
 
-const MAX_ROWS: usize = 1000;
 const FONT: f32 = 13.0;
 const EMOTE_H: f32 = 24.0;
 const BADGE_H: f32 = 18.0;
 const GAP: f32 = 4.0;
-
-// ---------------------------------------------------------------- emote / badge maps
-
-#[derive(Default)]
-struct Maps {
-    /// name -> (url, provider, priority)
-    emotes: HashMap<String, (String, Provider, u8)>,
-    /// (set, version) -> (url, title)
-    badges: HashMap<(String, String), (String, String)>,
-}
-
-fn prio(provider: Provider, channel: bool) -> u8 {
-    let base = match provider {
-        Provider::SevenTv => 3,
-        Provider::Bttv => 2,
-        Provider::Ffz => 1,
-    };
-    if channel {
-        base + 3
-    } else {
-        base
-    }
-}
 
 // ---------------------------------------------------------------- layout
 
@@ -79,12 +95,24 @@ struct Layout {
     assumed: Vec<String>,
 }
 
-struct Row {
-    msg: ChatMsg,
-    seq: u64,
+/// Per-row egui state: the wrapped layout for the current width, kept until something changes.
+struct RowLayout {
     layout: Option<Layout>,
     h: f32,
 }
+
+impl Default for RowLayout {
+    fn default() -> Self {
+        RowLayout { layout: None, h: 22.0 }
+    }
+}
+
+impl RowData for RowLayout {
+    fn invalidate(&mut self) {
+        self.layout = None;
+    }
+}
+
 
 struct LayoutCtx<'a> {
     painter: &'a egui::Painter,
@@ -94,28 +122,8 @@ struct LayoutCtx<'a> {
     gen: u32,
 }
 
-fn fmt_time(ts_ms: i64, tz_min: i32) -> String {
-    let m = ((ts_ms / 1000 / 60 + tz_min as i64).rem_euclid(24 * 60)) as i64;
-    format!("{:02}:{:02}", m / 60, m % 60)
-}
-
-fn name_color(msg: &ChatMsg) -> Color32 {
-    match msg.color {
-        Some([r, g, b]) => {
-            let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-            let target = 125.0;
-            let k = if lum < target { ((target - lum) / (255.0 - lum)).clamp(0.0, 1.0) } else { 0.0 };
-            let f = |c: u8| (c as f32 + (255.0 - c as f32) * k) as u8;
-            Color32::from_rgb(f(r), f(g), f(b))
-        }
-        None => {
-            let mut h: u32 = 2166136261;
-            for b in msg.login.bytes() {
-                h = (h ^ b as u32).wrapping_mul(16777619);
-            }
-            egui::ecolor::Hsva::new((h % 360) as f32 / 360.0, 0.55, 0.95, 1.0).into()
-        }
-    }
+fn col(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
 }
 
 struct Builder {
@@ -155,7 +163,7 @@ impl Builder {
     }
 
     /// Returns false if the image failed to load (caller falls back to text for emotes).
-    fn image(&mut self, imgs: &mut ImageCache, url: &str, tip: String, target_h: f32, square: bool) -> bool {
+    fn image(&mut self, imgs: &mut Imgs, url: &str, tip: String, target_h: f32, square: bool) -> bool {
         let (w, h) = match imgs.get(url) {
             State::Failed => return false,
             State::Loading => {
@@ -175,82 +183,44 @@ impl Builder {
     }
 }
 
-fn layout_row(c: &LayoutCtx, msg: &ChatMsg, width: f32, imgs: &mut ImageCache) -> Layout {
+fn layout_row(c: &LayoutCtx, msg: &ChatMsg, width: f32, imgs: &mut Imgs) -> Layout {
     let pad = 6.0;
     let x0 = pad + if msg.bar { 5.0 } else { 0.0 };
     let avail = (width - x0 - pad).max(40.0);
     let mut b = Builder { items: Vec::new(), line: 0, x: 0.0, avail, assumed: Vec::new() };
     let p = c.painter;
 
-    let dim = if msg.deleted { 0.38 } else if msg.historical { 0.82 } else { 1.0 };
-    let tint = |col: Color32| col.gamma_multiply(dim);
+    let d = tokens::dim(msg);
+    let tint = |col: Color32| col.gamma_multiply(d);
+    let mut text_col = match msg.kind {
+        Kind::Chat => tint(C_TEXT),
+        Kind::System => tint(C_ACCENT_SOFT),
+        Kind::Notice => tint(C_MUTED),
+    };
 
-    // timestamp
-    let ts = p.layout_no_wrap(fmt_time(msg.ts_ms, c.tz_min), FontId::proportional(11.0), tint(C_FAINT));
-    let (w, h) = (ts.size().x, ts.size().y);
-    b.push(w, h, ItemKind::Text(ts, tint(C_FAINT)), GAP + 1.0);
-
-    match msg.kind {
-        Kind::Chat => {
-            for (set, ver) in &msg.badges {
-                let found = c.ch.badges.get(&(set.clone(), ver.clone())).or_else(|| c.gl.badges.get(&(set.clone(), ver.clone())));
-                if let Some((url, title)) = found {
-                    b.image(imgs, url, title.clone(), BADGE_H, true);
+    for atom in tokens::tokenize(msg, c.ch, c.gl, c.tz_min) {
+        match atom {
+            Atom::Time(t) => {
+                let ts = p.layout_no_wrap(t, FontId::proportional(11.0), tint(C_FAINT));
+                let (w, h) = (ts.size().x, ts.size().y);
+                b.push(w, h, ItemKind::Text(ts, tint(C_FAINT)), GAP + 1.0);
+            }
+            Atom::Badge { url, title } => {
+                b.image(imgs, &url, title, BADGE_H, true);
+            }
+            Atom::Name { text, rgb } => {
+                let ncol = tint(col(rgb));
+                b.word(p, &text, ncol);
+                if msg.action {
+                    text_col = ncol;
                 }
             }
-            let ncol = name_color(msg);
-            let name = if msg.action { msg.display.clone() } else { format!("{}:", msg.display) };
-            b.word(p, &name, tint(ncol));
-            let text_col = if msg.action { tint(ncol) } else { tint(C_TEXT) };
-
-            let chars: Vec<char> = msg.text.chars().collect();
-            let mut word = String::new();
-            let mut ei = 0;
-            let mut i = 0;
-            let flush = |b: &mut Builder, word: &mut String, imgs: &mut ImageCache| {
-                if word.is_empty() {
-                    return;
+            Atom::Word(w) => b.word(p, &w, text_col),
+            Atom::Emote { name, url, provider } => {
+                if !b.image(imgs, &url, format!("{name}
+{provider}"), EMOTE_H, false) {
+                    b.word(p, &name, text_col);
                 }
-                let found = c.ch.emotes.get(word.as_str()).or_else(|| c.gl.emotes.get(word.as_str()));
-                let mut done = false;
-                if let Some((url, prov, _)) = found {
-                    done = b.image(imgs, url, format!("{}\n{}", word, prov.label()), EMOTE_H, false);
-                }
-                if !done {
-                    b.word(p, word, text_col);
-                }
-                word.clear();
-            };
-            while i < chars.len() {
-                while ei < msg.emotes.len() && msg.emotes[ei].end < i {
-                    ei += 1;
-                }
-                if ei < msg.emotes.len() && msg.emotes[ei].start == i && msg.emotes[ei].end < chars.len() {
-                    flush(&mut b, &mut word, imgs);
-                    let e = &msg.emotes[ei];
-                    let name: String = chars[e.start..=e.end].iter().collect();
-                    let url = format!("https://static-cdn.jtvnw.net/emoticons/v2/{}/default/dark/1.0", e.id);
-                    if !b.image(imgs, &url, format!("{name}\nTwitch"), EMOTE_H, false) {
-                        b.word(p, &name, text_col);
-                    }
-                    i = e.end + 1;
-                    ei += 1;
-                    continue;
-                }
-                let ch = chars[i];
-                if ch.is_whitespace() {
-                    flush(&mut b, &mut word, imgs);
-                } else {
-                    word.push(ch);
-                }
-                i += 1;
-            }
-            flush(&mut b, &mut word, imgs);
-        }
-        Kind::System | Kind::Notice => {
-            let col = if msg.kind == Kind::System { tint(C_ACCENT_SOFT) } else { tint(C_MUTED) };
-            for w in msg.text.split_whitespace() {
-                b.word(p, w, col);
             }
         }
     }
@@ -277,80 +247,31 @@ fn layout_row(c: &LayoutCtx, msg: &ChatMsg, width: f32, imgs: &mut ImageCache) -
     Layout { width, gen: c.gen, height: acc + 3.0, items: b.items, assumed: b.assumed }
 }
 
-// ---------------------------------------------------------------- split state
+// ---------------------------------------------------------------- split view state
 
-struct Split {
-    name: String,
-    room_id: Option<String>,
-    rows: VecDeque<Row>,
-    maps: Maps,
-    gen: u32,
-    total: u64,
-    seq: u64,
+/// egui-side scroll bookkeeping for one channel column.
+struct SplitUi {
     width: f32,
     at_bottom: bool,
     seen_total: u64,
     last_offset: f32,
     removed_h: f32,
     jump: bool,
-    emotes_started: bool,
 }
 
-impl Split {
-    fn new(name: &str) -> Self {
-        Split {
-            name: name.to_string(),
-            room_id: None,
-            rows: VecDeque::new(),
-            maps: Maps::default(),
-            gen: 0,
-            total: 0,
-            seq: 0,
-            width: 400.0,
-            at_bottom: true,
-            seen_total: 0,
-            last_offset: 0.0,
-            removed_h: 0.0,
-            jump: false,
-            emotes_started: false,
-        }
-    }
-
-    fn push(&mut self, msg: ChatMsg) {
-        self.seq += 1;
-        self.total += 1;
-        self.rows.push_back(Row { msg, seq: self.seq, layout: None, h: 22.0 });
-        while self.rows.len() > MAX_ROWS {
-            if let Some(r) = self.rows.pop_front() {
-                if !self.at_bottom {
-                    self.removed_h += r.h;
-                }
-            }
-        }
-    }
-
-    fn mark_deleted(&mut self, f: impl Fn(&ChatMsg) -> bool) {
-        for r in self.rows.iter_mut() {
-            if r.msg.kind == Kind::Chat && !r.msg.deleted && f(&r.msg) {
-                r.msg.deleted = true;
-                r.layout = None;
-            }
-        }
+impl SplitUi {
+    fn new() -> Self {
+        SplitUi { width: 400.0, at_bottom: true, seen_total: 0, last_offset: 0.0, removed_h: 0.0, jump: false }
     }
 }
 
 // ---------------------------------------------------------------- app
 
 pub struct App {
-    rx: Receiver<Event>,
-    net: Net,
-    rt: tokio::runtime::Handle,
-    _runtime: Arc<tokio::runtime::Runtime>,
-    splits: Vec<Split>,
+    chat: Chat<RowLayout>,
+    ui: Vec<SplitUi>,
     fracs: Vec<f32>,
-    global: Maps,
-    imgs: ImageCache,
-    connected: bool,
+    imgs: Imgs,
     show_stats: bool,
     tz_min: i32,
     // stats
@@ -404,37 +325,18 @@ impl App {
         v.override_text_color = Some(C_TEXT);
         ctx.set_visuals(v);
 
-        let client = reqwest::Client::builder()
-            .user_agent(crate::net::UA)
-            .timeout(Duration::from_secs(20))
-            .build()
-            .expect("http client");
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let net = Net { client: client.clone(), tx, ctx: ctx.clone() };
-        let rt = runtime.handle().clone();
-        let bench = std::env::var("AGU_IRC_URL").is_ok();
-
-        {
-            let n = net.clone();
-            rt.spawn(async move { n.load_globals().await });
-            for c in &channels {
-                let (n, c) = (net.clone(), c.clone());
-                rt.spawn(async move { n.load_channel_badges(&c).await });
-            }
-            rt.spawn(crate::net::irc_task(net.clone(), url, channels.clone(), bench));
-        }
-
+        let wake: agu_chat_core::net::Wake = {
+            let ctx = ctx.clone();
+            Arc::new(move || ctx.request_repaint())
+        };
         let n = channels.len();
+        let chat = Chat::start(channels, url, runtime, wake.clone());
+        let imgs = ImageCache::new(chat.rt.clone(), chat.client.clone(), wake);
         App {
-            rx,
-            net,
-            rt: rt.clone(),
-            _runtime: runtime,
-            splits: channels.iter().map(|c| Split::new(c)).collect(),
+            chat,
+            ui: (0..n).map(|_| SplitUi::new()).collect(),
             fracs: vec![1.0 / n as f32; n],
-            global: Maps::default(),
-            imgs: ImageCache::new(rt, client, ctx),
-            connected: false,
+            imgs,
             show_stats: false,
             tz_min: sys::tz_offset_min(),
             frame_count: 0,
@@ -446,136 +348,17 @@ impl App {
         }
     }
 
-    fn split_mut(&mut self, ch: &str) -> Option<&mut Split> {
-        self.splits.iter_mut().find(|s| s.name == ch)
-    }
-
     fn drain(&mut self, ctx: &egui::Context) {
-        let mut n = 0;
-        while let Ok(e) = self.rx.try_recv() {
-            n += 1;
-            match e {
-                Event::Connected(c) => {
-                    self.connected = c;
-                    logf!("connection state: {c}");
-                }
-                Event::Msgs { ch, msgs } => {
-                    if let Some(s) = self.split_mut(&ch) {
-                        for m in msgs {
-                            s.push(m);
-                        }
-                    }
-                }
-                Event::Backlog { ch, msgs } => {
-                    if let Some(s) = self.split_mut(&ch) {
-                        let have: HashSet<String> = s.rows.iter().map(|r| r.msg.id.clone()).collect();
-                        let mut add = 0;
-                        for m in msgs.into_iter().rev() {
-                            if !m.id.is_empty() && have.contains(&m.id) {
-                                continue;
-                            }
-                            s.seq += 1;
-                            let seq = s.seq;
-                            s.rows.push_front(Row { msg: m, seq, layout: None, h: 22.0 });
-                            add += 1;
-                        }
-                        s.total += add;
-                        while s.rows.len() > MAX_ROWS {
-                            s.rows.pop_front();
-                        }
-                    }
-                }
-                Event::ClearUser { ch, login, secs } => {
-                    if let Some(s) = self.split_mut(&ch) {
-                        let l = login.to_lowercase();
-                        s.mark_deleted(|m| m.login.to_lowercase() == l);
-                        let txt = match secs {
-                            Some(d) => format!("{login} has been timed out for {d}s."),
-                            None => format!("{login} has been permanently banned."),
-                        };
-                        s.push(ChatMsg::notice(txt, Kind::Notice));
-                    }
-                }
-                Event::ClearAll(ch) => {
-                    if let Some(s) = self.split_mut(&ch) {
-                        s.push(ChatMsg::notice("Chat has been cleared by a moderator.".into(), Kind::Notice));
-                    }
-                }
-                Event::ClearMsg { ch, id } => {
-                    if let Some(s) = self.split_mut(&ch) {
-                        s.mark_deleted(|m| m.id == id);
-                    }
-                }
-                Event::Notice { ch, text } => {
-                    if let Some(s) = self.split_mut(&ch) {
-                        s.push(ChatMsg::notice(text, Kind::Notice));
-                    }
-                }
-                Event::RoomState { ch, room_id } => {
-                    let net = self.net.clone();
-                    let rt = self.rt.clone();
-                    if let Some(s) = self.split_mut(&ch) {
-                        if s.room_id.is_none() {
-                            s.room_id = Some(room_id.clone());
-                        }
-                        if !s.emotes_started {
-                            s.emotes_started = true;
-                            logf!("room-id for {ch}: {room_id}");
-                            rt.spawn(async move { net.load_channel_emotes(&ch, &room_id).await });
-                        }
-                    }
-                }
-                Event::Emotes { ch, provider, list } => {
-                    let count = list.len();
-                    let (maps, channel) = match &ch {
-                        Some(c) => match self.splits.iter_mut().find(|s| &s.name == c) {
-                            Some(s) => {
-                                s.gen += 1;
-                                (&mut s.maps, true)
-                            }
-                            None => continue,
-                        },
-                        None => {
-                            for s in self.splits.iter_mut() {
-                                s.gen += 1;
-                            }
-                            (&mut self.global, false)
-                        }
-                    };
-                    let pr = prio(provider, channel);
-                    for e in list {
-                        let better = maps.emotes.get(&e.name).map(|x| pr > x.2).unwrap_or(true);
-                        if better {
-                            maps.emotes.insert(e.name, (e.url, provider, pr));
-                        }
-                    }
-                    logf!("emotes {} {:?}: {count}", ch.as_deref().unwrap_or("global"), provider);
-                }
-                Event::Badges { ch, list } => {
-                    let maps = match &ch {
-                        Some(c) => match self.splits.iter_mut().find(|s| &s.name == c) {
-                            Some(s) => {
-                                s.gen += 1;
-                                &mut s.maps
-                            }
-                            None => continue,
-                        },
-                        None => {
-                            for s in self.splits.iter_mut() {
-                                s.gen += 1;
-                            }
-                            &mut self.global
-                        }
-                    };
-                    for b in list {
-                        maps.badges.insert((b.set, b.version), (b.url, b.title));
-                    }
+        let (changes, more) = self.chat.drain(3000);
+        for c in changes {
+            if let Change::Trimmed { ch, removed, .. } = c {
+                if !self.ui[ch].at_bottom {
+                    self.ui[ch].removed_h += removed.iter().map(|x| x.h).sum::<f32>();
                 }
             }
-            if n >= 3000 {
-                ctx.request_repaint();
-                break;
-            }
+        }
+        if more {
+            ctx.request_repaint();
         }
     }
 }
@@ -585,7 +368,7 @@ impl eframe::App for App {
         let t0 = Instant::now();
         let ctx = ui.ctx().clone();
         self.drain(&ctx);
-        if self.imgs.pump() {
+        if self.imgs.pump(|url, d| upload(&ctx, url, d)) {
             ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
@@ -623,7 +406,7 @@ impl eframe::App for App {
                 self.mem = sys::mem_mb();
                 self.mem_t = Instant::now();
             }
-            let total: u64 = self.splits.iter().map(|s| s.total).sum();
+            let total: u64 = self.chat.total_messages();
             let lines = [
                 format!("FPS {:.0}   ui {:.2} ms", self.fps, self.ui_ms),
                 format!("messages {}", total),
@@ -657,7 +440,7 @@ impl eframe::App for App {
 impl App {
     fn splits_ui(&mut self, ui: &mut Ui, next_wake: &mut u32) {
         let area = ui.available_rect_before_wrap();
-        let n = self.splits.len();
+        let n = self.chat.channels.len();
         let sum: f32 = self.fracs.iter().sum();
         let mut x = area.min.x;
         let mut rects = Vec::new();
@@ -691,10 +474,10 @@ impl App {
             }
             let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
             child.set_clip_rect(rect.intersect(ui.clip_rect()));
-            let connected = self.connected;
+            let connected = self.chat.connected;
             let tz = self.tz_min;
-            let (splits, global, imgs) = (&mut self.splits, &self.global, &mut self.imgs);
-            show_split(&mut splits[i], i, &mut child, rect, global, imgs, connected, tz, next_wake);
+            let Chat { channels, global, .. } = &mut self.chat;
+            show_split(&mut channels[i], &mut self.ui[i], i, &mut child, rect, global, &mut self.imgs, connected, tz, next_wake);
             if i + 1 < n {
                 ui.painter().rect_filled(
                     Rect::from_min_max(pos2(rect.max.x, area.min.y), pos2(rect.max.x + 1.0, area.max.y)),
@@ -708,12 +491,13 @@ impl App {
 
 #[allow(clippy::too_many_arguments)]
 fn show_split(
-    split: &mut Split,
+    chan: &mut Channel<RowLayout>,
+    su: &mut SplitUi,
     idx: usize,
     ui: &mut Ui,
     rect: Rect,
     global: &Maps,
-    imgs: &mut ImageCache,
+    imgs: &mut Imgs,
     connected: bool,
     tz: i32,
     next_wake: &mut u32,
@@ -731,9 +515,9 @@ fn show_split(
         p.line_segment([pos2(header.min.x, header.max.y - 0.5), pos2(header.max.x, header.max.y - 0.5)], Stroke::new(1.0, C_LINE));
         let dot = if connected { Color32::from_rgb(0x4a, 0xde, 0x80) } else { Color32::from_rgb(0xef, 0x44, 0x44) };
         p.circle_filled(pos2(header.min.x + 12.0, header.center().y), 3.5, dot);
-        let g = p.layout_no_wrap(split.name.clone(), FontId::proportional(FONT), C_TEXT);
+        let g = p.layout_no_wrap(chan.name.clone(), FontId::proportional(FONT), C_TEXT);
         p.galley(pos2(header.min.x + 22.0, header.center().y - g.size().y / 2.0), g, C_TEXT);
-        let g = p.layout_no_wrap(format!("{} msgs", split.total), FontId::proportional(11.0), C_MUTED);
+        let g = p.layout_no_wrap(format!("{} msgs", chan.total), FontId::proportional(11.0), C_MUTED);
         p.galley(pos2(header.max.x - 8.0 - g.size().x, header.center().y - g.size().y / 2.0), g, C_MUTED);
     }
 
@@ -756,16 +540,16 @@ fn show_split(
         .id_salt(("scroll", idx))
         .auto_shrink([false, false])
         .stick_to_bottom(true);
-    if split.removed_h > 0.0 && !split.at_bottom {
-        area = area.vertical_scroll_offset((split.last_offset - split.removed_h).max(0.0));
+    if su.removed_h > 0.0 && !su.at_bottom {
+        area = area.vertical_scroll_offset((su.last_offset - su.removed_h).max(0.0));
     }
-    split.removed_h = 0.0;
-    let jump = std::mem::take(&mut split.jump);
-    let gen = split.gen;
-    let rows_len = split.rows.len();
-
+    su.removed_h = 0.0;
+    let jump = std::mem::take(&mut su.jump);
+    let gen = chan.gen;
+    
     let out = {
-        let Split { rows, maps, width, .. } = &mut *split;
+        let Channel { rows, maps, .. } = &mut *chan;
+        let width = &mut su.width;
         area.show_viewport(&mut body_ui, |ui, viewport| {
             let w = ui.available_width();
             *width = w;
@@ -780,10 +564,10 @@ fn show_split(
             let n = rows.len();
             let mut copy: Option<String> = None;
             for (ri, row) in rows.iter_mut().enumerate() {
-                let near = y + row.h >= viewport.min.y - 120.0 && y <= viewport.max.y + 120.0;
+                let near = y + row.x.h >= viewport.min.y - 120.0 && y <= viewport.max.y + 120.0;
                 let tail = ri + 80 >= n;
-                if near || (tail && row.layout.is_none()) {
-                    let stale = match &row.layout {
+                if near || (tail && row.x.layout.is_none()) {
+                    let stale = match &row.x.layout {
                         None => true,
                         Some(l) => {
                             (l.width - w).abs() > 0.5
@@ -793,17 +577,17 @@ fn show_split(
                     };
                     if stale {
                         let l = layout_row(&lc, &row.msg, w, imgs);
-                        row.h = l.height;
-                        row.layout = Some(l);
+                        row.x.h = l.height;
+                        row.x.layout = Some(l);
                     }
                 }
                 let top = y;
-                y += row.h;
-                if top > viewport.max.y || top + row.h < viewport.min.y {
+                y += row.x.h;
+                if top > viewport.max.y || top + row.x.h < viewport.min.y {
                     continue;
                 }
-                let Some(l) = &row.layout else { continue };
-                let rrect = Rect::from_min_size(origin + vec2(0.0, top), vec2(w, row.h));
+                let Some(l) = &row.x.layout else { continue };
+                let rrect = Rect::from_min_size(origin + vec2(0.0, top), vec2(w, row.x.h));
                 let bg = if row.seq % 2 == 0 { C_PANEL } else { C_ALT };
                 painter.rect_filled(rrect, 0.0, bg);
                 if row.msg.kind == Kind::System || row.msg.bar {
@@ -832,9 +616,9 @@ fn show_split(
                                     *next_wake = wake;
                                 }
                                 painter.image(
-                                    img.tex.id(),
+                                    img.gpu.tex.id(),
                                     r,
-                                    img.uv(fi),
+                                    uv(img, fi),
                                     Color32::WHITE.gamma_multiply(alpha),
                                 );
                             }
@@ -857,15 +641,14 @@ fn show_split(
     };
 
     let at_bottom = out.state.clamped_offset().y + out.inner_rect.height() >= out.content_size.y - 3.0;
-    split.last_offset = out.state.clamped_offset().y;
-    split.at_bottom = at_bottom;
+    su.last_offset = out.state.clamped_offset().y;
+    su.at_bottom = at_bottom;
     if at_bottom {
-        split.seen_total = split.total;
+        su.seen_total = chan.total;
     }
-    let _ = rows_len;
 
     // "N new messages" pill
-    let unseen = split.total.saturating_sub(split.seen_total);
+    let unseen = chan.total.saturating_sub(su.seen_total);
     if !at_bottom && unseen > 0 {
         let txt = format!("{} new message{}", unseen, if unseen == 1 { "" } else { "s" });
         let g = ui.painter().layout_no_wrap(txt, FontId::proportional(12.0), Color32::WHITE);
@@ -876,7 +659,7 @@ fn show_split(
         ui.painter().rect_filled(r, 12.0, col);
         ui.painter().galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
         if resp.clicked() {
-            split.jump = true;
+            su.jump = true;
             ui.ctx().request_repaint();
         }
     }

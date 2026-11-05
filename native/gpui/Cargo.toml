@@ -1,0 +1,12 @@
+[package]
+name = "agu-chat-gpui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agu-chat-gpui"
+path = "src/main.rs"
+
+[dependencies]
+agu-chat-core = { path = "../core" }
+gpui = "=0.2.2"
