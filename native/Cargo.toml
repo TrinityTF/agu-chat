@@ -1,0 +1,27 @@
+[package]
+name = "agu-chat-native"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["webp", "gif", "png", "jpeg"] }
+crossbeam-channel = "0.5"
+egui = { version = "0.37", default-features = false }
+rand = "0.8"
+
+[dependencies.eframe]
+version = "0.37"
+default-features = false
+features = ["glow", "default_fonts"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1
