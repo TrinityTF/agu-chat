@@ -227,3 +227,103 @@ impl Api {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::Logger;
+    use crate::platforms::PlatformModule;
+    use crate::protocol::Platform;
+    use crate::store::Store;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fake {
+        started: Arc<AtomicUsize>,
+        stopped: Arc<AtomicUsize>,
+    }
+    struct FakeSource {
+        emit: Emit,
+        started: Arc<AtomicUsize>,
+        stopped: Arc<AtomicUsize>,
+    }
+    impl Source for FakeSource {
+        fn start(self: Arc<Self>) {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            (self.emit)(json!({"type": "conn", "state": "open"}));
+        }
+        fn stop(&self) {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+        }
+        fn snapshot(&self) -> Vec<Frame> {
+            vec![json!({"type": "snap"})]
+        }
+    }
+    impl PlatformModule for Fake {
+        fn platform(&self) -> Platform {
+            Platform::Twitch
+        }
+        fn normalize_channel(&self, i: &str) -> Result<String, String> {
+            if i.is_empty() { Err("empty".into()) } else { Ok(i.to_lowercase()) }
+        }
+        fn create_source(&self, _c: String, emit: Emit, _ctx: Arc<Ctx>) -> Arc<dyn Source> {
+            Arc::new(FakeSource { emit, started: self.started.clone(), stopped: self.stopped.clone() })
+        }
+        fn routes(&self) -> Vec<(String, Handler)> {
+            let ok: Handler = Arc::new(|r: RouteReq| Box::pin(async move { Ok(RouteRes { status: 200, body: json!({"m": r.method, "q": r.query_get("a"), "b": r.body}) }) }));
+            let boom: Handler = Arc::new(|_| Box::pin(async { Err(RouteError { status: 0, message: "kaboom".into() }) }));
+            vec![("POST /x".into(), ok.clone()), ("* /any".into(), ok), ("GET /boom".into(), boom)]
+        }
+    }
+
+    fn ctx() -> Arc<Ctx> {
+        let dir = std::env::temp_dir().join(format!("agu-relay-{}", crate::util::uuid_v4()));
+        let log = Arc::new(Logger::new(&dir, true));
+        let st = Store::open(dir, log.clone());
+        Arc::new(Ctx::new(st.settings.clone(), st.secrets.clone(), log, "t".into()))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ref_counting_linger_and_snapshot_replay() {
+        let (started, stopped) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut mods = Modules::new();
+        mods.insert(Platform::Twitch, Arc::new(Fake { started: started.clone(), stopped: stopped.clone() }));
+        let got: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let g2 = got.clone();
+        let m = SourceManager::new(Arc::new(mods), ctx(), Arc::new(move |id, f| g2.lock().unwrap().push((id.clone(), f["type"].as_str().unwrap().to_string()))));
+        let r = SourceRef { platform: Platform::Twitch, channel: "Foo".into() };
+        let a = m.subscribe(&r).unwrap();
+        let b = m.subscribe(&r).unwrap();
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(m.source_count(), 1);
+        // start() runs before the first subscriber is added (as in JS), so both get only the snapshot
+        let log = got.lock().unwrap().clone();
+        assert_eq!(log.iter().filter(|(i, _)| *i == a).map(|(_, t)| t.as_str()).collect::<Vec<_>>(), vec!["snap"]);
+        assert_eq!(log.iter().filter(|(i, _)| *i == b).map(|(_, t)| t.as_str()).collect::<Vec<_>>(), vec!["snap"]);
+        assert!(m.subscribe(&SourceRef { platform: Platform::Twitch, channel: "".into() }).is_err());
+        m.unsubscribe(&a);
+        m.unsubscribe(&b);
+        tokio::time::sleep(Duration::from_millis(LINGER_MS - 1000)).await;
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        let c = m.subscribe(&r).unwrap(); // back within the linger window: same upstream
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        m.unsubscribe(&c);
+        tokio::time::sleep(Duration::from_millis(LINGER_MS + 100)).await;
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert_eq!(m.source_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn router_table_fallback_404_and_500() {
+        let mut mods = Modules::new();
+        mods.insert(Platform::Twitch, Arc::new(Fake { started: Arc::new(AtomicUsize::new(0)), stopped: Arc::new(AtomicUsize::new(0)) }));
+        let api = Api::new(&mods, ctx());
+        let r = SourceRef { platform: Platform::Twitch, channel: "foo".into() };
+        let res = api.call(r.clone(), "/x?a=1", ApiInit { method: Some("post".into()), body: Some(json!("{\"k\":2}")) }).await;
+        assert_eq!((res.status, res.body), (200, json!({"m": "POST", "q": "1", "b": {"k": 2}})));
+        assert_eq!(api.call(r.clone(), "/any", ApiInit::default()).await.status, 200);
+        let nf = api.call(r.clone(), "/x", ApiInit::default()).await; // GET /x has no handler
+        assert_eq!((nf.status, nf.body), (404, json!({"error": "not found"})));
+        let e = api.call(r, "/boom", ApiInit::default()).await;
+        assert_eq!((e.status, e.body), (500, json!({"error": "kaboom"})));
+    }
+}
