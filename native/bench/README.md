@@ -20,8 +20,8 @@ timeout every ~30 s. Same `SEED` gives the same sequence.
 
 ```powershell
 cd D:\webAPP\agu-chat\native
-# one-time build. This machine has no `as`/Windows SDK, so build tools/dlltool-shim first and put its dlltool.exe on PATH
-$env:Path = "<dir containing the built dlltool.exe>;$env:USERPROFILE\.cargo\bin;$env:Path"
+# one-time build: MSVC toolchain (pinned in rust-toolchain.toml) + Windows SDK
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cargo build --release
 
 $env:AGU_IRC_URL = "ws://127.0.0.1:6680"
