@@ -1,0 +1,229 @@
+//! Port of src/main/relay.js: the in-process "local relay": ref-counted live sources plus the api router.
+//! See docs/ARCHITECTURE.md ("Sources", "The api router").
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use futures_util::future::BoxFuture;
+use serde_json::{json, Value};
+use tokio::task::JoinHandle;
+
+use crate::platforms::{Ctx, Emit, Modules, Source};
+use crate::protocol::{ApiInit, ApiResult, Frame, SourceRef, SubId};
+use crate::util::uuid_v4;
+
+pub const LINGER_MS: u64 = 30_000;
+
+/// `(subId, frame) => void`
+pub type SendFn = Arc<dyn Fn(&SubId, &Frame) + Send + Sync>;
+
+struct Entry {
+    source: Arc<dyn Source>,
+    subs: Arc<Mutex<HashSet<SubId>>>,
+    linger: Option<JoinHandle<()>>,
+}
+
+struct Inner {
+    sources: HashMap<String, Entry>,
+    subs: HashMap<SubId, String>, // subId -> key (JS also kept the owning window: there is one UI here)
+}
+
+pub struct SourceManager {
+    modules: Arc<Modules>,
+    ctx: Arc<Ctx>,
+    send: SendFn,
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl SourceManager {
+    pub fn new(modules: Arc<Modules>, ctx: Arc<Ctx>, send: SendFn) -> Self {
+        SourceManager { modules, ctx, send, inner: Arc::new(Mutex::new(Inner { sources: HashMap::new(), subs: HashMap::new() })) }
+    }
+
+    /// `platform:normalized-channel`. Errs with the message to show the user.
+    pub fn key_of(&self, r: &SourceRef) -> Result<String, String> {
+        let m = self.modules.get(&r.platform).ok_or_else(|| format!("Unknown platform: {}", r.platform.as_str()))?;
+        Ok(format!("{}:{}", r.platform.as_str(), m.normalize_channel(&r.channel)?))
+    }
+
+    /// Must run inside the tokio runtime (sources spawn tasks).
+    pub fn subscribe(&self, r: &SourceRef) -> Result<SubId, String> {
+        let key = self.key_of(r)?;
+        let sub_id = uuid_v4();
+        let snapshot_source;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if !inner.sources.contains_key(&key) {
+                let channel = key[r.platform.as_str().len() + 1..].to_string();
+                let subs: Arc<Mutex<HashSet<SubId>>> = Arc::new(Mutex::new(HashSet::new()));
+                let (subs2, send) = (subs.clone(), self.send.clone());
+                let emit: Emit = Arc::new(move |frame| {
+                    let ids: Vec<SubId> = subs2.lock().unwrap().iter().cloned().collect();
+                    for id in ids {
+                        send(&id, &frame);
+                    }
+                });
+                let m = self.modules.get(&r.platform).ok_or("unknown platform")?;
+                let src = m.create_source(channel, emit, self.ctx.clone());
+                inner.sources.insert(key.clone(), Entry { source: src.clone(), subs, linger: None });
+                // Started before the new subscriber is added, as in JS: it gets the state from the snapshot below.
+                src.start();
+            }
+            let entry = inner.sources.get_mut(&key).unwrap();
+            if let Some(h) = entry.linger.take() {
+                h.abort();
+            }
+            entry.subs.lock().unwrap().insert(sub_id.clone());
+            snapshot_source = entry.source.clone();
+            inner.subs.insert(sub_id.clone(), key);
+        }
+        // Replay the current state so a late subscriber sees what everyone else sees.
+        for frame in snapshot_source.snapshot() {
+            (self.send)(&sub_id, &frame);
+        }
+        Ok(sub_id)
+    }
+
+    pub fn unsubscribe(&self, sub_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(key) = inner.subs.remove(sub_id) else { return };
+        let Some(entry) = inner.sources.get_mut(&key) else { return };
+        let empty = {
+            let mut subs = entry.subs.lock().unwrap();
+            subs.remove(sub_id);
+            subs.is_empty()
+        };
+        if empty {
+            let (inner_arc, ctx) = (self.inner.clone(), self.ctx.clone());
+            entry.linger = Some(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(LINGER_MS)).await;
+                let stopped = {
+                    let mut inner = inner_arc.lock().unwrap();
+                    match inner.sources.get(&key) {
+                        Some(e) if e.subs.lock().unwrap().is_empty() => inner.sources.remove(&key).map(|e| e.source),
+                        _ => None,
+                    }
+                };
+                if let Some(src) = stopped {
+                    src.stop();
+                    let _ = &ctx; // JS logged a failed stop; stop() cannot fail here
+                }
+            }));
+        }
+    }
+
+    pub fn stop_all(&self) {
+        let entries: Vec<Entry> = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.subs.clear();
+            inner.sources.drain().map(|(_, e)| e).collect()
+        };
+        for e in entries {
+            if let Some(h) = e.linger {
+                h.abort();
+            }
+            e.source.stop();
+        }
+    }
+
+    /// For tests and diagnostics: how many live upstream sources there are.
+    pub fn source_count(&self) -> usize {
+        self.inner.lock().unwrap().sources.len()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// api router
+// ---------------------------------------------------------------------------------------------------------
+
+/// What a route handler gets (`{source, method, query, body, ctx}`).
+pub struct RouteReq {
+    pub source: SourceRef,
+    pub method: String,
+    /// URLSearchParams, in order
+    pub query: Vec<(String, String)>,
+    /// parsed JSON, or Null
+    pub body: Value,
+    pub ctx: Arc<Ctx>,
+}
+
+impl RouteReq {
+    /// `query.get(name)`: the first value.
+    pub fn query_get(&self, name: &str) -> Option<&str> {
+        self.query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteRes {
+    pub status: u16,
+    pub body: Value,
+}
+
+/// A handler's escape hatch: something thrown that is not an HTTP answer. The router answers it with
+/// `{status, body: {error}}` (500 unless the error carried a status).
+#[derive(Debug, Clone)]
+pub struct RouteError {
+    pub status: u16,
+    pub message: String,
+}
+
+pub type Handler = Arc<dyn Fn(RouteReq) -> BoxFuture<'static, Result<RouteRes, RouteError>> + Send + Sync>;
+
+/// Routes "METHOD /path" to the platform modules' handlers.
+pub struct Api {
+    table: HashMap<String, Handler>,
+    ctx: Arc<Ctx>,
+}
+
+impl Api {
+    pub fn new(modules: &Modules, ctx: Arc<Ctx>) -> Self {
+        let mut table = HashMap::new();
+        for m in modules.values() {
+            for (route, handler) in m.routes() {
+                table.insert(route, handler);
+            }
+        }
+        Api { table, ctx }
+    }
+
+    pub fn call(&self, source: SourceRef, path: &str, init: ApiInit) -> BoxFuture<'static, ApiResult> {
+        let method = init.method.as_deref().unwrap_or("GET").to_uppercase();
+        let url = url::Url::parse("http://local").and_then(|base| base.join(path));
+        let url = match url {
+            Ok(u) => u,
+            Err(e) => {
+                let err = format!("invalid path: {e}");
+                return Box::pin(async move { ApiResult { status: 500, body: json!({"error": err}) } });
+            }
+        };
+        let pathname = url.path().to_string();
+        let handler = self.table.get(&format!("{method} {pathname}")).or_else(|| self.table.get(&format!("* {pathname}"))).cloned();
+        let Some(handler) = handler else {
+            return Box::pin(async { ApiResult { status: 404, body: json!({"error": "not found"}) } });
+        };
+        let mut body = init.body.unwrap_or(Value::Null);
+        if let Value::String(s) = &body {
+            if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                body = parsed;
+            }
+        }
+        let req = RouteReq {
+            source,
+            method: method.clone(),
+            query: url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect(),
+            body,
+            ctx: self.ctx.clone(),
+        };
+        let ctx = self.ctx.clone();
+        Box::pin(async move {
+            match handler(req).await {
+                Ok(res) => ApiResult { status: res.status, body: res.body },
+                Err(err) => {
+                    ctx.log(&format!("[api] {method} {pathname} {}", err.message));
+                    ApiResult { status: if err.status == 0 { 500 } else { err.status }, body: json!({"error": err.message}) }
+                }
+            }
+        })
+    }
+}

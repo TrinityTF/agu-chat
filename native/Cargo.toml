@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "gpui"]
+members = ["core"]
 
 [profile.release]
 opt-level = 3
