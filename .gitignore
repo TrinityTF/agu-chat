@@ -3,3 +3,4 @@ dist/
 out/
 build/release-notes.md
 *.log
+native/target/

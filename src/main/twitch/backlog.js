@@ -10,6 +10,7 @@ const BASE = "https://recent-messages.robotty.de/api/v2/recent-messages";
 
 /** Raw lines for a channel, or [] on any failure. One retry when the service says it only just started tracking the channel. */
 export async function fetchRecent(login, { limit = 200, retryDelayMs = 3000 } = {}) {
+  if (process.env.AGU_IRC_URL) return []; // benchmark mode: no backlog, identical load for both apps
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const data = await requestJson(`${BASE}/${encodeURIComponent(login)}?limit=${limit}`, { timeoutMs: 8000 });

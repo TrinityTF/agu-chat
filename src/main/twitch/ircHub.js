@@ -10,7 +10,7 @@ import { WebSocket } from "ws";
 import { parseIrcLine } from "./vendor/irc.js";
 import { log as ctxLog, userAgent } from "./rt.js";
 
-export const IRC_URL = "wss://irc-ws.chat.twitch.tv:443";
+export const IRC_URL = process.env.AGU_IRC_URL || "wss://irc-ws.chat.twitch.tv:443";
 
 const DEFAULTS = {
   connectTimeoutMs: 15_000,
