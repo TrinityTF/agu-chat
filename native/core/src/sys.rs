@@ -81,7 +81,7 @@ pub fn log(msg: &str) {
         })
     });
     if let Some(path) = target {
-        let line = format!("[{}] {}\n", crate::irc::now_ms(), msg);
+        let line = format!("[{}] {}\n", crate::util::now_ms(), msg);
         eprint!("{line}");
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = f.write_all(line.as_bytes());

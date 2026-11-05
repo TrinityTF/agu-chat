@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::net::Wake;
+use crate::Wake;
 
 /// A decoded image: straight-alpha RGBA frames with per-frame delays.
 pub struct Decoded {
