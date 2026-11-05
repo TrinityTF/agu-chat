@@ -10,5 +10,8 @@ path = "src/main.rs"
 [dependencies]
 agu-chat-core = { path = "../core" }
 gpui = "=0.2.2"
-image = { version = "0.25", default-features = false }
 futures = "0.3"
+rust-embed = { version = "8", features = ["debug-embed"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1"
