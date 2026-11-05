@@ -5,6 +5,7 @@ pub mod highlight_rules;
 pub mod images;
 pub mod kick;
 pub mod log;
+pub mod net;
 pub mod platforms;
 pub mod protocol;
 pub mod relay;

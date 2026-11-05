@@ -1,0 +1,669 @@
+//! Port of src/main/kick/index.js: the Kick platform module (read-only). See docs/ARCHITECTURE.md.
+//!
+//! HOW CHAT GETS HERE. Kick's own web client reads chat over a public Pusher websocket, and so does this:
+//!   1. GET  kick.com/api/v2/channels/<slug>   -> channel id, chatroom id, live status (honest UA)
+//!   2. POST web.kick.com/api/v1/realtime/channels/<id>/chat/connection -> the CURRENT Pusher app key + cluster
+//!   3. wss://ws-<cluster>.pusher.com/app/<key> -> subscribe chatrooms.<chatroomId>.v2 and channel.<channelId>
+//! Everything is unauthenticated and read-only, and every request carries the honest product UA.
+//!
+//! Emits the frames /ws/kick sends (chatlog, chat, status, emotes, banned) plus the uniform conn frame, plus
+//! {type:"delete", ids}, {type:"clear"}, {type:"pin", message|null}.
+//!
+//! SENDING IS NOT SUPPORTED (Kick's token exchange needs a client secret): no routes and no accounts.
+//!
+//! Differences from the JS: timers are `util::Timer`s, the socket is `ws::connect` (whose `Error` event ends
+//! the socket without a `Close`, so it is handled as one), `ws.terminate()` is followed by the close handling
+//! by hand for the same reason, and `stop()` aborts the source's tasks (`net::Jobs`) instead of an
+//! `AbortController`.
+pub mod vendor;
+
+use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::time::Duration;
+
+use serde_json::{json, Map, Value};
+
+use crate::net::Jobs;
+use crate::platforms::{Ctx, Emit, PlatformModule, Source};
+use crate::protocol::{Frame, Platform};
+use crate::util::{js_str_or_empty, js_string, now_ms, parse_rfc3339_ms, truthy, uuid_v4, Timer};
+use crate::ws::{self, WsEvent, WsHandle};
+use vendor::kick::{fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, KickChannel, SubBadge};
+
+const MAX_BACKLOG: usize = 300;
+// Kick's chat works whether or not the channel is live, so the socket stays up; this only keeps the header's
+// live pill, title, category and viewer count honest (and catches a missed StreamerIsLive event).
+const STATUS_POLL_MS: u64 = 60_000;
+const NOT_FOUND_RETRY_MS: u64 = 2 * 60_000;
+const RECONNECT_BASE_MS: u64 = 1000;
+const RECONNECT_MAX_MS: u64 = 60_000;
+// Pusher's server asks for activity within ~120s. We ping when quiet and reconnect when a ping goes unanswered.
+const PING_AFTER_MS: i64 = 60_000;
+const DEAD_AFTER_MS: i64 = 150_000;
+// Only a fallback for a failed descriptor fetch: the descriptor is authoritative (observed 2026-11-03).
+const FALLBACK_DESCRIPTOR: (&str, &str) = ("34bf7a0ff419a2a775b9", "us2");
+const PUSHER_VERSION: &str = "8.4.0";
+
+const READ_ONLY_REASON: &str = "Kick sending needs a server-side app secret; read-only in this beta";
+
+static LAST_DESCRIPTOR: LazyLock<Mutex<Option<(String, String)>>> = LazyLock::new(|| Mutex::new(None));
+
+pub struct Kick;
+
+impl PlatformModule for Kick {
+    fn platform(&self) -> Platform {
+        Platform::Kick
+    }
+
+    fn normalize_channel(&self, input: &str) -> Result<String, String> {
+        parse_kick_source(input).ok_or_else(|| "Enter a Kick channel name or a kick.com link.".to_string())
+    }
+
+    fn create_source(&self, channel: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<dyn Source> {
+        // JS normalizes again here; the relay hands over an already normalized slug, and a stray input falls back to itself.
+        let slug = parse_kick_source(&channel).unwrap_or(channel);
+        KickSource::new(slug, emit, ctx)
+    }
+}
+
+struct St {
+    info_present: bool, // `info !== null`
+    status: Map<String, Value>,
+    backlog: Vec<Value>,
+    emotes: Value,
+    sub_badges: Vec<SubBadge>,
+    ws: Option<(u64, Arc<WsHandle>)>,
+    next_ws: u64,
+    phase: String, // connecting | open | unavailable | error
+    phase_detail: String,
+    reconnect_delay: u64,
+    reconnect_timer: Timer,
+    reconnect_pending: bool,
+    status_timer: Timer,
+    status_poll_armed: bool,
+    watchdog: Timer,
+    last_msg_at: i64,
+    pinged_at: i64,
+    failures: u32,
+    stopped: bool,
+    last_conn_json: String,
+}
+
+pub struct KickSource {
+    me: Weak<KickSource>,
+    slug: String,
+    emit_fn: Emit,
+    ctx: Arc<Ctx>,
+    client_id: String,
+    jobs: Jobs,
+    st: Mutex<St>,
+}
+
+fn conn_frame(st: &St) -> Value {
+    let mut detail = st.phase_detail.clone();
+    if st.phase == "open" {
+        detail = if truthy(&st.status["live"]) { "Live".into() } else { "Not live (chat is connected)".into() };
+    }
+    let mut f = json!({"type": "conn", "state": st.phase, "detail": detail, "live": truthy(&st.status["live"])});
+    let title = js_str_or_empty(st.status.get("title"));
+    if !title.is_empty() {
+        f["title"] = json!(title);
+    }
+    f["canSend"] = json!(false);
+    f["readOnlyReason"] = json!(READ_ONLY_REASON);
+    f
+}
+
+fn chatlog_frame(st: &St) -> Value {
+    json!({"type": "chatlog", "source": {"userId": st.status["userId"], "slug": st.status["slug"]}, "status": Value::Object(st.status.clone()), "emotes": st.emotes, "messages": st.backlog})
+}
+
+impl KickSource {
+    pub fn new(slug: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<dyn Source> {
+        let mut status = Map::new();
+        status.insert("userId".into(), json!(""));
+        status.insert("slug".into(), json!(slug));
+        status.insert("live".into(), json!(false));
+        status.insert("title".into(), json!(""));
+        status.insert("category".into(), json!(""));
+        status.insert("viewers".into(), json!(0));
+        status.insert("url".into(), json!(format!("https://kick.com/{slug}")));
+        status.insert("error".into(), Value::Null);
+        Arc::new_cyclic(|me| KickSource {
+            me: me.clone(),
+            slug,
+            emit_fn: emit,
+            ctx,
+            client_id: uuid_v4(),
+            jobs: Jobs::new(),
+            st: Mutex::new(St {
+                info_present: false,
+                status,
+                backlog: Vec::new(),
+                emotes: json!({}),
+                sub_badges: Vec::new(),
+                ws: None,
+                next_ws: 1,
+                phase: "connecting".into(),
+                phase_detail: "Connecting to Kick...".into(),
+                reconnect_delay: RECONNECT_BASE_MS,
+                reconnect_timer: Timer::new(),
+                reconnect_pending: false,
+                status_timer: Timer::new(),
+                status_poll_armed: false,
+                watchdog: Timer::new(),
+                last_msg_at: 0,
+                pinged_at: 0,
+                failures: 0,
+                stopped: false,
+                last_conn_json: String::new(),
+            }),
+        })
+    }
+
+    fn emit(&self, f: Frame) {
+        (self.emit_fn)(f);
+    }
+
+    fn stopped(&self) -> bool {
+        self.st.lock().unwrap().stopped
+    }
+
+    /// Emit the conn frame only when it changed.
+    fn publish_conn(&self) {
+        let f = {
+            let mut st = self.st.lock().unwrap();
+            let f = conn_frame(&st);
+            let j = f.to_string();
+            if j == st.last_conn_json {
+                return;
+            }
+            st.last_conn_json = j;
+            f
+        };
+        self.emit(f);
+    }
+
+    fn set_phase(&self, next: &str, detail: &str) {
+        {
+            let mut st = self.st.lock().unwrap();
+            st.phase = next.into();
+            st.phase_detail = detail.into();
+        }
+        self.publish_conn();
+    }
+
+    fn set_status(&self, next: Vec<(&str, Value)>) {
+        let changed = {
+            let mut st = self.st.lock().unwrap();
+            let mut changed = false;
+            for (k, v) in next {
+                if st.status.get(k) != Some(&v) {
+                    changed = true;
+                    st.status.insert(k.to_string(), v);
+                }
+            }
+            changed.then(|| Value::Object(st.status.clone()))
+        };
+        if let Some(status) = changed {
+            self.emit(json!({"type": "status", "status": status}));
+        }
+        self.publish_conn();
+    }
+
+    /// Put the channel's own artwork on a subscriber badge; everything else keeps its chip.
+    fn dress_badges(&self, mut msg: Value) -> Value {
+        let subs = self.st.lock().unwrap().sub_badges.clone();
+        if subs.is_empty() {
+            return msg;
+        }
+        if let Some(badges) = msg["badges"].as_array_mut() {
+            for b in badges.iter_mut() {
+                if b["type"] == "subscriber" {
+                    b["url"] = json!(sub_badge_for(&subs, &b["count"]));
+                }
+            }
+        }
+        msg
+    }
+
+    fn push_backlog(&self, msg: Value) {
+        let mut st = self.st.lock().unwrap();
+        st.backlog.push(msg);
+        if st.backlog.len() > MAX_BACKLOG {
+            let cut = st.backlog.len() - MAX_BACKLOG;
+            st.backlog.drain(..cut);
+        }
+    }
+
+    // ---------- channel + status ----------
+
+    fn apply_channel(&self, c: &KickChannel) {
+        let slug = if c.slug.is_empty() { self.slug.clone() } else { c.slug.clone() };
+        {
+            let mut st = self.st.lock().unwrap();
+            st.info_present = true;
+            if !c.sub_badges.is_empty() || st.sub_badges.is_empty() {
+                st.sub_badges = c.sub_badges.clone(); // `c.subBadges || subBadges` (an empty array is truthy)
+            }
+        }
+        self.set_status(vec![
+            ("userId", json!(c.user_id)),
+            ("slug", json!(slug)),
+            ("live", json!(c.live)),
+            ("title", json!(c.title)),
+            ("category", json!(c.category)),
+            ("viewers", c.viewers.clone()),
+            ("url", json!(format!("https://kick.com/{slug}"))),
+            ("error", Value::Null),
+        ]);
+    }
+
+    async fn refresh_status(self: Arc<Self>) {
+        match get_kick_channel(&self.slug, &self.ctx.user_agent).await {
+            Ok(Some(c)) => {
+                if !self.stopped() {
+                    self.apply_channel(&c);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Status is decoration; the socket keeps working without it.
+                if !self.stopped() {
+                    self.ctx.log(&format!("[kick:{}] status refresh failed: {e}", self.slug));
+                }
+            }
+        }
+    }
+
+    fn schedule_status_poll(self: &Arc<Self>) {
+        let s = self.clone();
+        let mut st = self.st.lock().unwrap();
+        st.status_poll_armed = true;
+        st.status_timer.set(Duration::from_millis(STATUS_POLL_MS), async move {
+            s.st.lock().unwrap().status_poll_armed = false;
+            let s2 = s.clone();
+            s2.refresh_status().await;
+            if !s.stopped() {
+                s.schedule_status_poll();
+            }
+        });
+    }
+
+    // ---------- connect lifecycle ----------
+
+    async fn connect(self: Arc<Self>) {
+        if self.stopped() {
+            return;
+        }
+        if let Err(msg) = self.clone().connect_inner().await {
+            if self.stopped() {
+                return;
+            }
+            let failures = {
+                let mut st = self.st.lock().unwrap();
+                st.failures += 1;
+                st.failures
+            };
+            let msg = if msg.is_empty() { "Kick unreachable".to_string() } else { msg };
+            self.ctx.log(&format!("[kick:{}] connect failed ({failures}): {msg}", self.slug));
+            self.set_status(vec![("error", json!(msg))]);
+            self.set_phase("error", &msg);
+            self.schedule_reconnect();
+        }
+    }
+
+    async fn connect_inner(self: Arc<Self>) -> Result<(), String> {
+        let ua = self.ctx.user_agent.clone();
+        let c = get_kick_channel(&self.slug, &ua).await?;
+        if self.stopped() {
+            return Ok(());
+        }
+        let Some(c) = c else {
+            let m = format!("No Kick channel called \"{}\".", self.slug);
+            self.set_status(vec![("error", json!(m))]);
+            self.set_phase("unavailable", &m);
+            self.retry_later(NOT_FOUND_RETRY_MS);
+            return Ok(());
+        };
+        if c.chatroom_id.is_empty() {
+            return Err("Kick returned a channel without a chat room".into());
+        }
+        let first_time = !self.st.lock().unwrap().info_present;
+        self.apply_channel(&c);
+
+        if first_time {
+            // Backlog and emotes are decoration on a working chat: failures leave them empty.
+            let (hist, em) = tokio::join!(fetch_history(&c.channel_id, &ua), fetch_kick_emotes(&self.slug, &ua, false));
+            if self.stopped() {
+                return Ok(());
+            }
+            let frame = self.seed_backlog(hist.unwrap_or_default(), em);
+            self.emit(frame);
+        }
+
+        let desc = match get_realtime_descriptor(&c.channel_id, &ua, &self.client_id).await {
+            Ok(d) => {
+                *LAST_DESCRIPTOR.lock().unwrap() = Some(d.clone());
+                d
+            }
+            Err(e) => {
+                if self.stopped() {
+                    return Ok(());
+                }
+                // A failed descriptor lookup falls back to the last key that worked (or the one observed when this was
+                // written) rather than leaving chat dark over a hiccup on a side endpoint.
+                self.ctx.log(&format!("[kick:{}] realtime descriptor failed, using last known key: {e}", self.slug));
+                LAST_DESCRIPTOR.lock().unwrap().clone().unwrap_or_else(|| (FALLBACK_DESCRIPTOR.0.to_string(), FALLBACK_DESCRIPTOR.1.to_string()))
+            }
+        };
+        if self.stopped() {
+            return Ok(());
+        }
+        self.open_socket(&c, desc);
+        Ok(())
+    }
+
+    /// The first connect's history + emotes -> the chatlog frame.
+    fn seed_backlog(&self, hist: Vec<Value>, emotes: Value) -> Value {
+        let mut seen: std::collections::HashSet<String> = self.st.lock().unwrap().backlog.iter().map(|m| js_string(&m["id"])).collect();
+        self.st.lock().unwrap().emotes = emotes;
+        for raw in hist {
+            let m = self.dress_badges(to_kick_chat_msg(&raw));
+            let id = js_str_or_empty(Some(&m["id"]));
+            if id.is_empty() || !seen.insert(id) {
+                continue;
+            }
+            self.push_backlog(m);
+        }
+        chatlog_frame(&self.st.lock().unwrap())
+    }
+
+    /// A sync fn on purpose: building the timer future inside `connect_inner` would make its type recursive.
+    fn retry_later(self: &Arc<Self>, ms: u64) {
+        let s = self.clone();
+        self.st.lock().unwrap().reconnect_timer.set(Duration::from_millis(ms), async move {
+            let s2 = s.clone();
+            s.jobs.spawn(s2.connect());
+        });
+    }
+
+    fn schedule_reconnect(self: &Arc<Self>) {
+        let mut st = self.st.lock().unwrap();
+        if st.stopped || st.reconnect_pending {
+            return;
+        }
+        // Jitter so sources don't retry in lockstep after a shared network blip.
+        let cap = 1000.0f64.min(1.0f64.max(st.reconnect_delay as f64 / 4.0));
+        let jitter = (rand::random::<f64>() * cap).floor() as u64;
+        let delay = st.reconnect_delay + jitter;
+        st.reconnect_pending = true;
+        let s = self.clone();
+        st.reconnect_timer.set(Duration::from_millis(delay), async move {
+            s.st.lock().unwrap().reconnect_pending = false;
+            let s2 = s.clone();
+            s.jobs.spawn(s2.connect());
+        });
+        st.reconnect_delay = (st.reconnect_delay * 2).min(RECONNECT_MAX_MS);
+    }
+
+    fn open_socket(self: &Arc<Self>, c: &KickChannel, desc: (String, String)) {
+        let (app_key, cluster) = desc;
+        let url = format!("wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version={PUSHER_VERSION}&flash=false");
+        let room = format!("chatrooms.{}.v2", c.chatroom_id);
+        let chan = format!("channel.{}", c.channel_id);
+        let mut st = self.st.lock().unwrap();
+        if st.stopped {
+            return;
+        }
+        let id = st.next_ws;
+        st.next_ws += 1;
+        let me = self.me.clone();
+        let (room2, chan2) = (room.clone(), chan.clone());
+        let handle = ws::connect(url, self.ctx.user_agent.clone(), move |ev| {
+            if let Some(s) = me.upgrade() {
+                s.on_ws(id, &room2, &chan2, ev);
+            }
+        });
+        st.ws = Some((id, Arc::new(handle)));
+        st.last_msg_at = now_ms();
+        st.pinged_at = 0;
+        let s = self.clone();
+        st.watchdog.every(Duration::from_secs(15), move || {
+            let s = s.clone();
+            async move { s.watchdog_tick(id) }
+        });
+    }
+
+    fn watchdog_tick(self: &Arc<Self>, id: u64) {
+        let (act, quiet) = {
+            let mut st = self.st.lock().unwrap();
+            if st.ws.as_ref().map(|w| w.0) != Some(id) {
+                return;
+            }
+            let quiet = now_ms() - st.last_msg_at;
+            if quiet > DEAD_AFTER_MS {
+                (1, quiet)
+            } else if quiet > PING_AFTER_MS && st.pinged_at == 0 {
+                st.pinged_at = now_ms();
+                (2, quiet)
+            } else {
+                (0, quiet)
+            }
+        };
+        match act {
+            1 => {
+                self.ctx.log(&format!("[kick:{}] silent for {}s, reconnecting", self.slug, (quiet as f64 / 1000.0).round() as i64));
+                let h = self.st.lock().unwrap().ws.as_ref().filter(|w| w.0 == id).map(|w| w.1.clone());
+                if let Some(h) = h {
+                    h.terminate();
+                }
+                // terminate() reports nothing here (unlike `ws`, where it emits 'close'): do the close handling.
+                self.on_ws_closed(id);
+            }
+            2 => self.ws_send(id, &json!({"event": "pusher:ping", "data": {}}).to_string()),
+            _ => {}
+        }
+    }
+
+    fn ws_send(&self, id: u64, text: &str) {
+        let h = self.st.lock().unwrap().ws.as_ref().filter(|w| w.0 == id).map(|w| w.1.clone());
+        if let Some(h) = h {
+            h.send(text);
+        }
+    }
+
+    fn on_ws(self: &Arc<Self>, id: u64, room: &str, chan: &str, ev: WsEvent) {
+        match ev {
+            WsEvent::Open => {}
+            WsEvent::Message(raw) => {
+                {
+                    let mut st = self.st.lock().unwrap();
+                    if st.ws.as_ref().map(|w| w.0) != Some(id) || st.stopped {
+                        return;
+                    }
+                    st.last_msg_at = now_ms();
+                    st.pinged_at = 0;
+                }
+                if let Ok(m) = serde_json::from_str::<Value>(&raw) {
+                    self.handle_pusher(id, &m, room, chan);
+                }
+            }
+            WsEvent::Close(..) => self.on_ws_closed(id),
+            WsEvent::Error(e) => {
+                // 'error' is always followed by 'close' in `ws`; here it ends the socket, so it is handled as the close too.
+                if !self.stopped() {
+                    self.ctx.log(&format!("[kick:{}] socket error: {e}", self.slug));
+                }
+                self.on_ws_closed(id);
+            }
+        }
+    }
+
+    fn on_ws_closed(self: &Arc<Self>, id: u64) {
+        {
+            let mut st = self.st.lock().unwrap();
+            if st.ws.as_ref().map(|w| w.0) != Some(id) {
+                return;
+            }
+            st.ws = None;
+            st.watchdog.clear();
+            if st.stopped {
+                return;
+            }
+        }
+        self.set_phase("connecting", "Reconnecting to Kick chat...");
+        self.schedule_reconnect();
+    }
+
+    fn handle_pusher(self: &Arc<Self>, id: u64, m: &Value, room: &str, chan: &str) {
+        let Some(ev) = m["event"].as_str().filter(|e| !e.is_empty()) else { return };
+        if ev == "pusher:connection_established" {
+            self.ws_send(id, &json!({"event": "pusher:subscribe", "data": {"auth": "", "channel": room}}).to_string());
+            self.ws_send(id, &json!({"event": "pusher:subscribe", "data": {"auth": "", "channel": chan}}).to_string());
+            return;
+        }
+        if ev == "pusher:ping" {
+            self.ws_send(id, &json!({"event": "pusher:pong", "data": {}}).to_string());
+            return;
+        }
+        if ev == "pusher_internal:subscription_succeeded" {
+            if m["channel"] == room {
+                let arm = {
+                    let mut st = self.st.lock().unwrap();
+                    st.failures = 0;
+                    st.reconnect_delay = RECONNECT_BASE_MS;
+                    !st.status_poll_armed
+                };
+                self.set_phase("open", "");
+                if arm {
+                    self.schedule_status_poll();
+                }
+            }
+            return;
+        }
+        if ev == "pusher:error" {
+            let d = match &m["data"] {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            self.ctx.log(&format!("[kick:{}] pusher error: {d}", self.slug));
+            return;
+        }
+
+        let data = match &m["data"] {
+            Value::String(s) => match serde_json::from_str::<Value>(s) {
+                Ok(v) => v,
+                Err(_) => return,
+            },
+            other => other.clone(),
+        };
+        if m["channel"] == chan {
+            // Livestream start/stop events: one authoritative read beats trusting a partial payload.
+            let l = ev.to_lowercase();
+            if l.contains("stream") || l.contains("live") {
+                let s = self.clone();
+                self.jobs.spawn(async move { s.refresh_status().await });
+            }
+            return;
+        }
+        if m["channel"] != room || !truthy(&data) {
+            return;
+        }
+
+        match ev {
+            "App\\Events\\ChatMessageEvent" => {
+                let msg = self.dress_badges(to_kick_chat_msg(&data));
+                if js_str_or_empty(Some(&msg["id"])).is_empty() {
+                    return;
+                }
+                self.push_backlog(msg.clone());
+                self.emit(json!({"type": "chat", "message": msg}));
+            }
+            "App\\Events\\MessageDeletedEvent" => {
+                let inner = &data["message"]["id"];
+                let pick = if truthy(inner) { inner } else { &data["id"] };
+                let mid = js_str_or_empty(Some(pick));
+                if mid.is_empty() {
+                    return;
+                }
+                for msg in self.st.lock().unwrap().backlog.iter_mut() {
+                    if msg["id"] == mid.as_str() {
+                        msg["deleted"] = json!(true);
+                    }
+                }
+                self.emit(json!({"type": "delete", "ids": [mid]}));
+            }
+            "App\\Events\\UserBannedEvent" => {
+                let user = if truthy(&data["user"]) { data["user"].clone() } else { json!({}) };
+                let user_id = if user["id"].is_null() { String::new() } else { js_string(&user["id"]) };
+                if user_id.is_empty() {
+                    return;
+                }
+                // Kick, like Twitch, retroactively clears a banned user's messages from view.
+                for msg in self.st.lock().unwrap().backlog.iter_mut() {
+                    if msg["user"]["id"] == user_id.as_str() {
+                        msg["deleted"] = json!(true);
+                    }
+                }
+                let expires_at = if truthy(&data["expires_at"]) { data["expires_at"].as_str().and_then(parse_rfc3339_ms).unwrap_or(0) } else { 0 };
+                self.emit(json!({
+                    "type": "banned",
+                    "userId": user_id,
+                    "username": js_str_or_empty(user.get("username")),
+                    "by": js_str_or_empty(data["banned_by"].get("username")),
+                    "reason": "",
+                    // No expiry (or an explicit permanent flag) is a permanent ban; a real one is a timeout.
+                    "permanent": truthy(&data["permanent"]) || expires_at == 0,
+                    "expiresAt": expires_at,
+                }));
+            }
+            "App\\Events\\ChatroomClearEvent" => {
+                for msg in self.st.lock().unwrap().backlog.iter_mut() {
+                    msg["deleted"] = json!(true);
+                }
+                self.emit(json!({"type": "clear"}));
+            }
+            "App\\Events\\PinnedMessageCreatedEvent" => {
+                let message = if truthy(&data["message"]) { self.dress_badges(to_kick_chat_msg(&data["message"])) } else { Value::Null };
+                self.emit(json!({"type": "pin", "message": message}));
+            }
+            "App\\Events\\PinnedMessageDeletedEvent" => self.emit(json!({"type": "pin", "message": null})),
+            // Kick ships new event types (polls, gifts, rewards) without warning; ignoring unknown ones is deliberate.
+            _ => {}
+        }
+    }
+}
+
+impl Source for KickSource {
+    fn start(self: Arc<Self>) {
+        let f = {
+            let mut st = self.st.lock().unwrap();
+            let f = conn_frame(&st);
+            st.last_conn_json = f.to_string();
+            f
+        };
+        self.emit(f);
+        let s = self.clone();
+        self.jobs.spawn(s.connect());
+    }
+
+    fn stop(&self) {
+        let ws = {
+            let mut st = self.st.lock().unwrap();
+            st.stopped = true;
+            st.reconnect_timer.clear();
+            st.status_timer.clear();
+            st.watchdog.clear();
+            st.ws.take()
+        };
+        self.jobs.abort_all();
+        if let Some((_, h)) = ws {
+            h.terminate();
+        }
+    }
+
+    fn snapshot(&self) -> Vec<Frame> {
+        let st = self.st.lock().unwrap();
+        vec![chatlog_frame(&st), conn_frame(&st)]
+    }
+}
