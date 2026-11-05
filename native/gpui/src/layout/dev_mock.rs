@@ -57,8 +57,14 @@ impl MockBridge {
         let settings = read_json("settings.json").and_then(|v| serde_json::from_value::<Settings>(v).ok()).unwrap_or_default();
         let layout = read_json("layout.json").map(|v| sanitize_layout(&v));
         let mut accounts: AccountsState = HashMap::new();
-        accounts.insert(Platform::Twitch, AccountState::default());
-        accounts.insert(Platform::Rumble, AccountState::default());
+        if std::env::var("AGU_HARNESS").is_ok() {
+            // the harness page's accounts: a_g_u__ on Twitch, a Rumble login
+            accounts.insert(Platform::Twitch, AccountState { connected: true, user: Some(AccountUser { id: "1".into(), login: "a_g_u__".into(), name: "a_g_u__".into() }), ..Default::default() });
+            accounts.insert(Platform::Rumble, AccountState { connected: true, ..Default::default() });
+        } else {
+            accounts.insert(Platform::Twitch, AccountState::default());
+            accounts.insert(Platform::Rumble, AccountState::default());
+        }
         for p in [Platform::Kick, Platform::Youtube, Platform::X] {
             accounts.insert(p, AccountState { unsupported: true, ..Default::default() });
         }
@@ -142,6 +148,68 @@ const LINES: [&str; 10] = [
     "is this the native build?",
 ];
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// The chatlog frames of chat/dev/harness.tsx (badge images are the real CDN ones: the harness' data: SVGs
+/// cannot be fetched here).
+fn harness_log(platform: Platform) -> Value {
+    let now = now_ms();
+    let user = |id: &str, login: &str, color: &str| {
+        let name = format!("{}{}", login[..1].to_uppercase(), &login[1..]);
+        json!({ "id": id, "login": login, "name": name, "color": color })
+    };
+    let msg = |i: i64, u: &Value, text: &str, extra: Value| {
+        let mut m = json!({ "platform": "twitch", "id": format!("m{i}"), "ts": now - (60 - i) * 4000, "user": u, "badges": "", "text": text, "emotes": "", "action": false, "firstMsg": false, "reply": null, "rewardId": null, "msgId": null });
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            m[k] = v;
+        }
+        m
+    };
+    match platform {
+        Platform::Twitch => {
+            let (a, b, c, m) = (user("1", "a_g_u__", "#9147ff"), user("2", "cooldude", "#ff4500"), user("3", "dimguy", "#1a1a8a"), user("4", "modperson", "#00ff7f"));
+            let mut messages = vec![
+                msg(1, &a, "hello chat Kappa 7TV test", json!({ "badges": "broadcaster/1", "emotes": "25:11-15" })),
+                msg(2, &b, "this is a fairly long message that is going to wrap onto a second line so we can see how the dense layout and the line height behave when text wraps in a narrow split", json!({ "badges": "subscriber/12,moderator/1" })),
+                msg(3, &c, "first time here!", json!({ "firstMsg": true })),
+                msg(4, &m, "@a_g_u__ you are mentioned, check https://example.com/page.", json!({ "badges": "moderator/1" })),
+                msg(5, &b, "replying to you", json!({ "reply": { "user": "a_g_u__", "text": "hello chat Kappa 7TV test" } })),
+                msg(6, &c, "this one will be deleted", json!({ "deleted": true })),
+                msg(7, &b, "cheer100 take my bits", json!({ "bits": 100 })),
+                msg(8, &c, "redeem text", json!({ "rewardId": "r1", "reward": { "title": "Hydrate", "cost": 500 } })),
+                msg(9, &a, "waves", json!({ "action": true })),
+                json!({ "notice": true, "id": "n1", "ts": now - 30000, "system": "cooldude subscribed with Prime. They've subscribed for 12 months!", "msgId": "resub", "user": b, "text": "love the stream", "emotes": "" }),
+                json!({ "notice": true, "id": "n2", "ts": now - 29000, "system": "5 raiders from somechannel have joined!", "msgId": "raid", "user": c, "text": "" }),
+            ];
+            for i in 10..40 {
+                messages.push(msg(i, if i % 2 == 1 { &b } else { &c }, &format!("filler message number {i}"), json!({})));
+            }
+            json!({
+                "type": "chatlog", "channelId": "12826", "messages": messages,
+                "pinned": msg(100, &m, "Pinned: be nice to each other", json!({ "badges": "moderator/1", "pin": { "by": { "id": "4", "login": "modperson", "name": "Modperson" }, "startsAt": null, "endsAt": null } })),
+                "modfeed": [{ "ts": now - 20000, "kind": "timeout", "text": "A moderator timed out someone for 10m" }],
+                "automod": [{ "id": "h1", "ts": now - 15000, "user": { "id": "9", "login": "sketchy", "name": "Sketchy" }, "text": "some borderline message", "reason": "automod", "category": "swearing", "level": 2, "status": "held", "resolvedBy": null }],
+                "suspicious": [{ "id": "3", "login": "dimguy", "name": "Dimguy", "status": "active_monitoring", "types": ["manually_added"], "evaluation": null, "sharedBanChannels": 0 }],
+                "esub": { "active": true, "reason": null }
+            })
+        }
+        Platform::Rumble => json!({ "type": "chatlog", "messages": [
+            { "platform": "rumble", "id": "r1", "ts": now - 25000, "user": { "id": "ru1", "login": "rumbler", "name": "Rumbler", "color": "#85c742", "avatar": "" }, "badges": [], "text": "hey from rumble :r+cooldoge: yo", "emotes": "", "action": false, "firstMsg": false, "reply": null, "isFollower": true, "channel": null, "rant": null, "notice": null },
+            { "platform": "rumble", "id": "r2", "ts": now - 18000, "user": { "id": "ru2", "login": "rich", "name": "Rich", "color": "#ffaa00", "avatar": "" }, "badges": [], "text": "have a rant", "emotes": "", "action": false, "firstMsg": false, "reply": null, "isFollower": true, "channel": null, "rant": { "cents": 500, "duration": 60, "expiresAt": now + 60000 }, "notice": null }
+        ], "status": { "live": true }, "emotes": {}, "badges": {} }),
+        Platform::Kick => json!({ "type": "chatlog", "messages": [
+            { "platform": "kick", "id": "k1", "ts": now - 22000, "user": { "id": "ki1", "login": "kicker", "name": "Kicker", "color": "#53fc18", "avatar": "", "verified": true, "anonymous": false }, "badges": [{ "type": "moderator", "text": "Moderator", "count": 0 }, { "type": "subscriber", "text": "Subscriber", "count": 3 }], "text": "kick message [emote:37226:KEKW] nice", "reply": null, "action": false, "notice": null }
+        ], "status": { "live": true }, "emotes": { "KEKW": { "id": "37226", "group": "global" } } }),
+        Platform::Youtube => json!({ "type": "chatlog", "messages": [
+            { "platform": "youtube", "id": "y1", "ts": now - 21000, "user": { "id": "yu1", "name": "YTViewer", "avatar": "" }, "badges": [{ "label": "Member", "icon": "", "url": "" }], "parts": [{ "t": "text", "v": "hello youtube " }], "text": "hello youtube", "paid": null, "notice": null },
+            { "platform": "youtube", "id": "y2", "ts": now - 14000, "user": { "id": "yu2", "name": "BigSpender", "avatar": "" }, "badges": [], "parts": [{ "t": "text", "v": "super chat!" }], "text": "super chat!", "paid": { "amount": "$10.00", "bg": "rgba(230,81,0,.5)", "headerBg": "", "sticker": false }, "notice": null }
+        ], "status": { "live": true } }),
+        Platform::X => json!({ "type": "chatlog", "messages": [{ "platform": "x", "id": "x1", "ts": now - 19000, "user": { "id": "xu1", "name": "XPerson", "login": "xperson", "avatar": "", "twitterId": "1" }, "text": "hello from X https://x.com" }], "status": { "live": true } }),
+    }
+}
+
 fn lcg(seed: &mut u64) -> u64 {
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     *seed >> 33
@@ -178,6 +246,11 @@ fn spawn_source(inner: Arc<Inner>, id: SubId, source: SourceRef, alive: Arc<Atom
         } else {
             conn("open", json!({ "live": true, "title": format!("Mock stream on {}: {}", source.platform.as_str(), source.channel), "canSend": false }));
             chatty = true;
+        }
+        if chatty && std::env::var("AGU_HARNESS").map(|v| v == "1").unwrap_or(false) {
+            // port of chat/dev/harness.tsx: the same frames the Electron harness page replays
+            inner.emit(&id, harness_log(source.platform));
+            return;
         }
         inner.emit(&id, json!({ "type": "chatlog", "messages": [] }));
         if !chatty {
@@ -249,7 +322,12 @@ impl AguBridge for MockBridge {
             let body = init.body.clone().unwrap_or_else(|| json!({}));
             let ok = |b: Value| ApiResult { status: 200, body: b };
             match p.as_str() {
-                "/api/mod/caps" => ok(json!({ "modes": true, "shield": true, "terms": true, "ban": true, "warn": true, "delete": true, "loggedIn": true, "isMod": true })),
+                "/api/mod/caps" => ok(json!({ "pin": true, "modes": true, "shield": true, "terms": true, "ban": true, "warn": true, "delete": true, "automod": true, "loggedIn": true, "isMod": true })),
+                "/api/rumble/caps" | "/api/kick/caps" => ok(json!({ "connected": true, "canModerate": true, "canDelete": true })),
+                "/api/chat/badges" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "channelId": "12826", "global": [
+                    { "set_id": "moderator", "versions": [{ "id": "1", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/2", "title": "Moderator" }] },
+                    { "set_id": "broadcaster", "versions": [{ "id": "1", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/5527c58c-fb7d-422d-b71b-f309dcb85cc1/2", "title": "Broadcaster" }] },
+                    { "set_id": "subscriber", "versions": [{ "id": "12", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/2", "title": "Sub 12" }] }], "channel": [] })),
                 "/api/chat/settings" => {
                     let mut m = inner.modes.lock().unwrap();
                     if method == "POST" {

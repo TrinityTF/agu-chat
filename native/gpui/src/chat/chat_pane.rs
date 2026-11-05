@@ -19,7 +19,8 @@ use std::time::Duration;
 use agu_chat_core::protocol::{AccountsState, AguBridge, ConnFrame, Frame, HighlightRule, Platform, Settings, SourceRef, SubId, Unsubscribe};
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
-use gpui::{AppContext as _, Context, Entity, EventEmitter, ListOffset, ListState, Point, Pixels, Subscription, Window};
+use gpui::{AppContext as _, Context, Entity, EventEmitter, Point, Pixels, Subscription, Window};
+use super::chat_list::{ChatListState, ItemMetrics};
 use serde_json::{json, Value};
 
 use super::alerts::AlertWants;
@@ -106,7 +107,7 @@ pub struct ChatPane {
 
     // derived row list
     pub(super) shown: Vec<ShownRow>,
-    pub(super) list_state: ListState,
+    pub(super) list_state: ChatListState,
     /// bumped whenever what a built row depends on changes
     pub(super) gen: u64,
     pub(super) highlighter: Highlighter,
@@ -149,6 +150,9 @@ pub struct ChatPane {
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
     pub(super) styled_users: Rc<RefCell<Vec<String>>>,
     seen_ord: u64,
+    aid_frames: u32,
+    pub(super) settle: u32,
+    aids_done: bool,
 
     routes: Arc<Mutex<Routes>>,
     unsub_frames: Option<Unsubscribe>,
@@ -307,7 +311,7 @@ impl ChatPane {
             accounts: AccountsState::new(),
             store,
             shown: Vec::new(),
-            list_state: ListState::new(0, gpui::ListAlignment::Top, gpui::px(600.)),
+            list_state: ChatListState::new(),
             gen: 1,
             twitch: HashMap::new(),
             envs: HashMap::new(),
@@ -338,6 +342,9 @@ impl ChatPane {
             images_inbox,
             styled_users,
             seen_ord: 0,
+            aid_frames: 0,
+            settle: 3,
+            aids_done: false,
             routes,
             unsub_frames: Some(unsub_frames),
             unsub_accounts: Some(unsub_accounts),
@@ -626,6 +633,7 @@ impl ChatPane {
     }
 
     fn apply_rows(&mut self, new: Vec<RowRef>) {
+        self.settle = 3;
         let n_old = self.shown.len();
         let n_new = new.len();
         let reset = |this: &mut Self, new: Vec<RowRef>| {
@@ -683,30 +691,20 @@ impl ChatPane {
 
     /// Every row's built form is stale (settings, env): drop the caches and re-measure, keeping the scroll spot.
     pub(super) fn invalidate_all(&mut self) {
+        self.settle = 3;
         for s in &self.shown {
             *s.built.borrow_mut() = None;
         }
-        let top = self.list_state.logical_scroll_top();
-        let n = self.shown.len();
-        self.list_state.splice(0..n, n);
-        if self.scroll_held {
-            self.list_state.scroll_to(top);
-        }
+        self.list_state.invalidate_all();
     }
 
     /// One row's content changed (an image got its size, a chatter's 7TV style arrived).
     pub(super) fn invalidate_rows(&mut self, pred: impl Fn(&Row) -> bool) {
-        let top = self.list_state.logical_scroll_top();
-        let mut any = false;
         for (i, s) in self.shown.iter().enumerate() {
             if pred(&s.row) {
                 *s.built.borrow_mut() = None;
-                self.list_state.splice(i..i + 1, 1);
-                any = true;
+                self.list_state.invalidate(i);
             }
-        }
-        if any && self.scroll_held {
-            self.list_state.scroll_to(top);
         }
     }
 
@@ -792,26 +790,26 @@ impl ChatPane {
 
     // ---- scrolling / pausing (MessageList) ------------------------------------------------------------------
 
-    pub(super) fn dist_to_bottom(&self) -> f32 {
-        let max = self.list_state.max_offset_for_scrollbar().height.f();
-        let off = -self.list_state.scroll_px_offset_for_scrollbar().y.f();
-        (max - off).max(0.0)
-    }
-
     pub(super) fn last_ord(&self) -> u64 {
         self.shown.last().map(|s| s.row.ord).unwrap_or(0)
     }
 
-    /// Called every frame: the user scrolled up (hold) or came back to the bottom (resume).
+    /// Called every frame: the user scrolled up (hold) or came back within 40 px of the bottom (resume).
     pub(super) fn track_scroll(&mut self) {
-        let dist = self.dist_to_bottom();
-        let at_bottom = dist <= 40.0;
-        if !self.scroll_held && !at_bottom {
+        let following = self.list_state.following();
+        if !following && self.list_state.dist_to_bottom() <= 40.0 {
+            self.list_state.follow();
+        }
+        let held = !self.list_state.following();
+        if held && !self.scroll_held {
             self.scroll_held = true;
             self.pause_mark = self.last_ord();
             self.update_store_hold();
-        } else if self.scroll_held && at_bottom && !self.frozen() {
+        } else if !held && self.scroll_held && !self.frozen() {
             self.resume_inner();
+        } else if !held && self.scroll_held {
+            self.scroll_held = false;
+            self.update_store_hold();
         }
     }
 
@@ -833,8 +831,7 @@ impl ChatPane {
     }
 
     pub(super) fn scroll_to_end(&mut self) {
-        let n = self.list_state.item_count();
-        self.list_state.scroll_to(ListOffset { item_ix: n, offset_in_item: gpui::px(0.) });
+        self.list_state.follow();
     }
 
     /// Pause on mouse-over (settings.pauseChat == "hover").
@@ -952,6 +949,65 @@ impl ChatPane {
 
     pub(super) fn bridge_clone(&self) -> Arc<dyn AguBridge> {
         self.bridge.clone()
+    }
+
+    /// Test aids (env, like `AGU_SHOT`): put the pane into an interactive state without synthetic input.
+    /// `AGU_HOVER=n` hovers the n-th row from the end, `AGU_SEARCH=query` opens split search with that query,
+    /// `AGU_SCROLL_UP=px` scrolls the list up, `AGU_PIN_OPEN=1` / `AGU_PIN_MENU=1` open the pinned card, `AGU_TIP=1`
+    /// shows an emote tooltip.
+    pub(super) fn test_aids(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.aids_done || self.shown.is_empty() {
+            return;
+        }
+        self.aid_frames += 1;
+        let need = std::env::var("AGU_AID_FRAMES").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(40);
+        if self.aid_frames < need {
+            window.request_animation_frame();
+            return;
+        }
+        self.aids_done = true;
+        if let Ok(path) = std::env::var("AGU_DUMP_ROWS") {
+            // row boxes as the list laid them out (y relative to the list's top), for comparing with the DOM
+            let mut out = String::new();
+            for (i, s) in self.shown.iter().enumerate() {
+                if let Some((y, h)) = self.list_state.bounds_for_item(i) {
+                    out.push_str(&format!("{i}	{:.2}	{:.2}	{}
+", y, h, s.row.key));
+                }
+            }
+            let _ = std::fs::write(path, out);
+        }
+        if let Some(n) = std::env::var("AGU_HOVER").ok().and_then(|v| v.parse::<usize>().ok()) {
+            let n = self.shown.len().saturating_sub(1 + n);
+            self.hover_row = Some(self.shown[n].row.key.clone());
+        }
+        if let Ok(q) = std::env::var("AGU_SEARCH") {
+            self.open_search(window, cx);
+            self.query = q.clone();
+            if let Some(s) = &self.search {
+                s.update(cx, |s, cx| s.set_text(&q, cx));
+            }
+            self.refresh(cx);
+            self.scroll_to_end();
+        }
+        if let Some(px) = std::env::var("AGU_SCROLL_UP").ok().and_then(|v| v.parse::<f32>().ok()) {
+            self.list_state.scroll_by(-px);
+        }
+        if std::env::var("AGU_PIN_OPEN").is_ok() || std::env::var("AGU_PIN_MENU").is_ok() {
+            let ids: Vec<(String, String)> = self.store.sources.iter().filter_map(|s| s.pinned.as_ref().map(|p| (s.sk.clone(), p.id.clone()))).collect();
+            for (sk, id) in ids {
+                if std::env::var("AGU_PIN_OPEN").is_ok() {
+                    self.pin_open.insert(id.clone());
+                }
+                if std::env::var("AGU_PIN_MENU").is_ok() {
+                    self.pin_menu = Some((format!("{sk}|{id}"), false));
+                }
+            }
+        }
+        if std::env::var("AGU_TIP").is_ok() {
+            self.tip = Some((Rc::new(Tip { img: "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0".into(), name: "Kappa".into(), label: "Twitch".into() }), gpui::point(gpui::px(120.), gpui::px(200.))));
+        }
+        cx.notify();
     }
 
     /// A pin with an end time re-renders every second so its card goes away on time.
@@ -1157,19 +1213,13 @@ impl ChatPane {
                 .filter(|(_, s)| s.built.borrow().as_ref().and_then(|(_, b)| b.as_ref()).map(|b| b.urls().iter().any(|u| set.contains(u.as_str()))).unwrap_or(false))
                 .map(|(i, _)| i)
                 .collect();
-            if !waiting.is_empty() {
-                let top = self.list_state.logical_scroll_top();
-                for i in waiting {
-                    if let Some((_, Some(b))) = self.shown[i].built.borrow().as_ref() {
-                        for it in b_contents(b) {
-                            it.invalidate();
-                        }
+            for i in waiting {
+                if let Some((_, Some(b))) = self.shown[i].built.borrow().as_ref() {
+                    for it in b_contents(b) {
+                        it.invalidate();
                     }
-                    self.list_state.splice(i..i + 1, 1);
                 }
-                if self.scroll_held {
-                    self.list_state.scroll_to(top);
-                }
+                self.list_state.invalidate(i);
             }
         }
         let styled: Vec<String> = std::mem::take(&mut *self.styled_users.borrow_mut());
@@ -1180,6 +1230,53 @@ impl ChatPane {
         if self.needs_refresh {
             self.needs_refresh = false;
             self.refresh(cx);
+        }
+    }
+
+    /// Height and collapsing margins of a row as the DOM lays it out (fractional, like Chromium's LayoutUnits:
+    /// 1/64 px), from the flow layouts and the box styles `pane_render` puts around them.
+    pub(super) fn row_metrics(&mut self, ix: usize, width: f32, window: &mut Window, cx: &mut Context<Self>) -> ItemMetrics {
+        if ix >= self.shown.len() {
+            return ItemMetrics::default();
+        }
+        let Some(b) = self.built(ix, cx) else { return ItemMetrics::default() };
+        let base = self.settings.font_size;
+        let fl = |v: f32| (v * 64.0).floor() / 64.0;
+        let frame_h = |f: &FrameSpec, w: f32, window: &mut Window, cx: &mut gpui::App| -> f32 {
+            let side = if f.bar.is_some() { 3.0 + 6.0 + 8.0 } else { 16.0 } + if f.border.is_some() { 2.0 } else { 0.0 };
+            let flow = f.content.height_at(w - side, window, cx);
+            let before = if f.before.is_some() { fl(base * 0.85 * LINE_HEIGHT) } else { 0.0 };
+            2.0 + before + flow + if f.border.is_some() { 2.0 } else { 0.0 }
+        };
+        match &*b {
+            BuiltRow::Frame(f) => {
+                let h = frame_h(f, width, window, cx);
+                ItemMetrics { h, mt: f.margin_y, mb: f.margin_y }
+            }
+            BuiltRow::Event(e) => {
+                // my-px mx-1 border; header `pt-0.5` + a 19.5 px line (+ pb-0.5 when nothing follows)
+                let inner_w = width - 10.0;
+                let header = 2.0 + 19.5 + if e.inner.is_some() { 0.0 } else { 2.0 };
+                let inner = e.inner.as_ref().map(|f| frame_h(f, inner_w, window, cx)).unwrap_or(0.0);
+                ItemMetrics { h: 2.0 + header + inner, mt: 1.0, mb: 1.0 }
+            }
+            BuiltRow::Notice(n) => {
+                let w = width - 2.0 - 16.0;
+                let h = 4.0 + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
+                if std::env::var_os("AGU_DEBUG_LAYOUT").is_some() {
+                    eprintln!("[notice] w={w} sys={} text={:?} urls={:?}", n.system.height_at(w, window, cx), n.text.as_ref().map(|t| t.height_at(w, window, cx)), n.text.as_ref().map(|t| t.urls()));
+                }
+                ItemMetrics { h, mt: 0.0, mb: 0.0 }
+            }
+            BuiltRow::Feed(f) => ItemMetrics { h: 2.0 + fl(f.base * 0.9 * LINE_HEIGHT), mt: 0.0, mb: 0.0 },
+            BuiltRow::Automod(a) => {
+                let w = width - 3.0 - 16.0;
+                let hs = a.base * 0.92;
+                let head = a.header.height_at(w, window, cx).max(fl(hs * LINE_HEIGHT));
+                let body = a.body.height_at(w, window, cx);
+                let tail = if a.status == "held" { if a.can_resolve { 4.0 + 16.0 + 2.0 + 2.0 } else { 0.0 } } else { 16.0 };
+                ItemMetrics { h: 8.0 + head + body + tail, mt: 1.0, mb: 1.0 }
+            }
         }
     }
 

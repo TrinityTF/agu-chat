@@ -226,7 +226,7 @@ impl Flow {
 
 fn emote_item(url: String, tip: Rc<Tip>, overlays: Vec<SharedStr>, font_px: f32, size: SizeOpt) -> Item {
     let (px, max_w, vm) = emote_box(font_px, size);
-    Item::Image(ImageItem { url: url.into(), max_w, max_h: px, fixed: false, vmargin: vm, margin_x: 0.0, valign: VAlign::Middle, tip: Some(tip), overlays, radius: 0.0, act: None })
+    Item::Image(ImageItem { url: url.into(), max_w, max_h: px, fixed: false, wrap: true, vmargin: vm, margin_x: 0.0, valign: VAlign::Middle, tip: Some(tip), overlays, radius: 0.0, act: None })
 }
 
 type SharedStr = gpui::SharedString;
@@ -237,6 +237,7 @@ fn badge_item(url: &str, title: &str) -> Item {
         max_w: BADGE_PX,
         max_h: BADGE_PX,
         fixed: true,
+        wrap: false,
         vmargin: BADGE_VMARGIN,
         margin_x: 0.0,
         valign: VAlign::BoxCenter,
@@ -418,12 +419,15 @@ fn frame_prefix(f: &mut Flow, ctx: &RowCtx, ts: i64, platform: Platform) {
         f.push(Item::Gap(6.0));
     }
     if ctx.show_platform {
-        let sz = f.base * 0.95;
+        // 0.95em, drawn on whole pixels (the svg rasterizer rounds its box up, which made it look a pixel bigger)
+        let sz = (f.base * 0.95).round();
         f.push(Item::Icon(IconItem {
             path: platform_icon_path(platform),
             size: sz,
             color: token(theme::platform_color(platform)),
-            valign: VAlign::BottomAt(0.12 * f.base),
+            // twitch: an svg inside an inline-flex span, whose baseline is the svg's bottom; the other marks are bare
+            // svgs with `align-[-0.12em]`
+            valign: VAlign::BottomAt(if platform == Platform::Twitch { 0.0 } else { 0.12 * f.base }),
             margin_x: 0.0,
         }));
         f.push(Item::Gap(4.0));
@@ -763,6 +767,7 @@ fn plain_emote(f: &mut Flow, src: String, alt: &str, tip_label: &str, rs: &Setti
         max_w,
         max_h: px,
         fixed: false,
+        wrap: false,
         vmargin: vm,
         margin_x: 1.0,
         valign: VAlign::Middle,
@@ -830,6 +835,7 @@ fn co_badge_img(url: &str, title: &str, base: f32) -> Item {
         max_w: s,
         max_h: s,
         fixed: true,
+        wrap: false,
         vmargin: 0.0,
         margin_x: 0.0,
         valign: VAlign::BottomAt(0.2 * base),

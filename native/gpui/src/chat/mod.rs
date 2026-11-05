@@ -1,5 +1,6 @@
 //! Port of src/renderer/chat/ (round 2): the chat view.
 pub mod alerts;
+pub mod chat_list;
 pub mod chat_pane;
 pub mod chat_text;
 pub mod highlights;

@@ -3,10 +3,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    anchored, deferred, div, list, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ClickEvent, Context, Corner, Div, Element, ElementId, FontWeight,
+    anchored, deferred, div, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ClickEvent, Context, Corner, Div, Element, ElementId, FontWeight,
     GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Render, SharedString, Style, Window,
 };
 
+use super::chat_list::chat_list;
 use super::chat_pane::*;
 use super::PxF;
 use super::images::{ImagesHandle};
@@ -147,9 +148,6 @@ impl ChatPane {
         if let Some(bar) = spec.bar {
             d = d.border_color(bar);
         }
-        if spec.margin_y > 0.0 && !nested {
-            d = d.my(px(spec.margin_y));
-        }
         if let Some(bg) = spec.bg {
             d = d.bg(bg);
         } else if let Some(t) = spec.tint_class {
@@ -245,7 +243,7 @@ impl ChatPane {
             right = right.child(SharedString::from(thousands(a)));
         }
         head = head.child(left).child(right);
-        let mut d = div().id(eid("ev-", key)).my(px(1.)).mx(px(4.)).rounded(px(4.)).border_1().border_color(token_a(theme::PURPLE_500, 0.4)).bg(token_a(theme::PURPLE_500, 0.07)).flex_none().child(head);
+        let mut d = div().id(eid("ev-", key)).mx(px(4.)).rounded(px(4.)).border_1().border_color(token_a(theme::PURPLE_500, 0.4)).bg(token_a(theme::PURPLE_500, 0.07)).flex_none().child(head);
         if let Some(inner) = &e.inner {
             d = d.child(self.frame_el(key, inner, true, cx));
         }
@@ -276,7 +274,6 @@ impl ChatPane {
             .id(eid("automod-", key))
             .w_full()
             .flex_none()
-            .my(px(1.))
             .rounded(px(4.))
             .px(px(8.))
             .py(px(4.))
@@ -628,19 +625,8 @@ impl ChatPane {
     }
 
     fn scrollbar(&self) -> Option<AnyElement> {
-        let max = self.list_state.max_offset_for_scrollbar().height.f();
-        if max <= 0.5 {
-            return None;
-        }
-        let vh = self.list_state.viewport_bounds().size.height.f();
-        if vh <= 0.0 {
-            return None;
-        }
-        let total = max + vh;
-        let thumb = (vh * vh / total).max(20.0).min(vh);
-        let off = (-self.list_state.scroll_px_offset_for_scrollbar().y.f()).clamp(0.0, max);
-        let y = off / max * (vh - thumb);
-        Some(div().absolute().right_0().top(px(y)).w(px(8.)).h(px(thumb)).rounded(px(4.)).bg(c(theme::SCROLLBAR_THUMB)).into_any_element())
+        let (top, h) = self.list_state.thumb()?;
+        Some(div().absolute().right_0().top(px(top)).w(px(8.)).h(px(h)).rounded(px(4.)).bg(c(theme::SCROLLBAR_THUMB)).into_any_element())
     }
 
     fn toasts_el(&self) -> Option<AnyElement> {
@@ -837,6 +823,12 @@ fn fg_base(fg: u32) -> u32 {
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_events(cx);
+        self.test_aids(window, cx);
+        if self.settle > 0 {
+            // a list needs a frame or two after its content changed (measure, then stick to the bottom)
+            self.settle -= 1;
+            window.request_animation_frame();
+        }
         self.track_scroll();
         if !self.scroll_held && !self.frozen() {
             self.scroll_to_end();
@@ -863,11 +855,19 @@ impl Render for ChatPane {
         let list_el: AnyElement = if self.shown.is_empty() {
             div().size_full().overflow_hidden().child(self.empty_el()).into_any_element()
         } else {
-            list(self.list_state.clone(), cx.processor(|this, ix, _window, cx| this.render_row(ix, cx))).py(px(4.)).size_full().into_any_element()
+chat_list(
+                self.list_state.clone(),
+                {
+                    let p = cx.processor(|this, (ix, w): (usize, f32), window, cx| this.row_metrics(ix, w, window, cx));
+                    std::rc::Rc::new(move |ix, w, window, cx| p((ix, w), window, cx))
+                },
+                std::rc::Rc::new(cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx))),
+            )
+            .into_any_element()
         };
 
         let hover_pause = self.settings.pause_chat == "hover";
-        let overflow = self.list_state.max_offset_for_scrollbar().height.f() > 0.5;
+        let overflow = self.list_state.thumb().is_some();
         let list_area = div()
             .id("msg-list")
             .relative()
@@ -932,6 +932,7 @@ impl InlineContentBuilder {
             max_w: 16.0,
             max_h: 16.0,
             fixed: true,
+            wrap: false,
             vmargin: -3.0,
             margin_x: 0.0,
             valign: VAlign::BoxCenter,

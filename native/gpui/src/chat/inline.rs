@@ -21,6 +21,10 @@ use super::twitch::parts::split_keep_ws;
 use super::PxF;
 use crate::theme;
 
+/// Measured (pixel diff against the Electron app): GPUI's DirectWrite glyph baseline lands this many px lower than
+/// Chromium's for the same layout baseline, so text is painted this much higher.
+pub const TEXT_DY: f32 = -1.0;
+
 /// Segoe UI's x-height / em, for `vertical-align: middle`.
 pub const X_HEIGHT: f32 = 0.5;
 
@@ -93,6 +97,8 @@ pub struct ImageItem {
     pub max_h: f32,
     /// exactly this size, whatever the natural size (badges)
     pub fixed: bool,
+    /// the image sits in a wrapper whose height is always `max_h` (EmotePart's span); a bare <img> is as tall as it draws
+    pub wrap: bool,
     pub vmargin: f32,
     pub margin_x: f32,
     pub valign: VAlign,
@@ -190,6 +196,18 @@ impl InlineContent {
         v
     }
 
+    /// The flow's height at a width (the DOM block's content height), cached like the element's own layout.
+    pub fn height_at(&self, width: f32, window: &Window, cx: &App) -> f32 {
+        let imgs = cx.global::<ImagesHandle>().clone();
+        let epoch = epoch_of(cx);
+        let mut c = self.cache.borrow_mut();
+        let reuse = matches!(&*c, Some(l) if (l.width - width).abs() < 0.01 && l.epoch == epoch);
+        if !reuse {
+            *c = Some(layout(self, width, window, &imgs, epoch));
+        }
+        c.as_ref().unwrap().height
+    }
+
     /// Forget the cached layout (an image size became known).
     pub fn invalidate(&self) {
         *self.cache.borrow_mut() = None;
@@ -270,20 +288,36 @@ fn shape(window: &Window, t: &TextItem, text: &str, char_off: usize, total_chars
     window.text_system().shape_line(SharedString::from(text.to_string()), px(t.size), &runs, None)
 }
 
+/// Blink's line metrics for a font size: ascent and descent are rounded to whole pixels, the leading
+/// (line-height - content) is split with the half rounded DOWN above the text (`FontHeight::AddLeading`), the
+/// rest goes below. Returns (above baseline, below baseline).
+fn floor64(v: f32) -> f32 {
+    (v * 64.0).floor() / 64.0
+}
+
+fn blink_above_below(asc: f32, desc: f32, line_h: f32) -> (f32, f32) {
+    let line_h = floor64(line_h);
+    let (a, d) = (asc.round(), desc.round());
+    let leading = line_h - (a + d);
+    let above = a + (leading / 2.0).floor();
+    (above, line_h - above)
+}
+
 fn word_atom(window: &Window, items: &[Item], item: usize, text: &str, char_off: usize, ratio: f32) -> Atom {
     let Item::Text(t) = &items[item] else { unreachable!() };
     let total = t.text.chars().count();
     let shaped = shape(window, t, text, char_off, total);
     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
     let hl = (ratio * t.size - (asc + desc)) / 2.0;
-    Atom { w: shaped.width.f(), above: hl + asc, below: desc + hl, kind: AtomKind::Word { shaped, item, size: t.size, hl, asc }, break_before: false, dims: (0.0, 0.0) }
+    let (above, below) = blink_above_below(asc, desc, ratio * t.size);
+    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Word { shaped, item, size: t.size, hl, asc }, break_before: false, dims: (0.0, 0.0) }
 }
 
 fn space_atom(window: &Window, t: &TextItem, ratio: f32) -> Atom {
     let shaped = shape(window, t, " ", 0, 1);
     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
-    let hl = (ratio * t.size - (asc + desc)) / 2.0;
-    Atom { w: shaped.width.f(), above: hl + asc, below: desc + hl, kind: AtomKind::Space, break_before: false, dims: (0.0, 0.0) }
+    let (above, below) = blink_above_below(asc, desc, ratio * t.size);
+    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Space, break_before: false, dims: (0.0, 0.0) }
 }
 
 /// Centre of a box relative to the baseline (negative = above), per vertical-align rule.
@@ -292,9 +326,9 @@ fn box_center(v: VAlign, h: f32, base_size: f32, ratio: f32, window: &Window) ->
         VAlign::Middle => -X_HEIGHT * base_size / 2.0,
         VAlign::BoxCenter => {
             let (asc, desc) = base_metrics(window, base_size);
-            let hl = (ratio * base_size - (asc + desc)) / 2.0;
-            // centre of [baseline-(hl+asc), baseline+desc+hl]
-            ((desc + hl) - (hl + asc)) / 2.0
+            let (above, below) = blink_above_below(asc, desc, ratio * base_size);
+            // centre of [baseline-above, baseline+below]
+            (below - above) / 2.0
         }
         VAlign::BottomAt(down) => down - h / 2.0,
     }
@@ -322,7 +356,7 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
     match &items[item] {
         Item::Image(i) => {
             let (w, h) = image_dims(i, imgs);
-            let mh = h + 2.0 * i.vmargin;
+            let mh = if i.wrap { i.max_h } else { h } + 2.0 * i.vmargin;
             let c = box_center(i.valign, mh, bs, ratio, window);
             Atom { w: w + 2.0 * i.margin_x, above: mh / 2.0 - c, below: mh / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (w, h) }
         }
@@ -333,7 +367,7 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
         Item::Pill(p) => {
             let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, act: None, underline_on_hover: false }, &p.text, 0, 1);
             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
-            Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc, below: desc, kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc) }
+            Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc) }
         }
         Item::Button(b) => {
             let c = box_center(VAlign::BottomAt(b.down), b.h, bs, ratio, window);
@@ -356,8 +390,7 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
     let items = &content.items;
     let ratio = content.line_ratio;
     let (sa, sd) = base_metrics(window, content.base_size);
-    let shl = (ratio * content.base_size - (sa + sd)) / 2.0;
-    let (strut_above, strut_below) = (shl + sa, sd + shl);
+    let (strut_above, strut_below) = blink_above_below(sa, sd, ratio * content.base_size);
 
     // 1. atoms
     let mut atoms: Vec<Atom> = Vec::new();
@@ -522,13 +555,17 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
             below = below.max(a.below);
         }
         let h = above + below;
-        let baseline = (y + above).round();
+        let baseline = y + above;
         let line_idx = out_lines.len();
         out_lines.push(LineInfo { y, baseline, height: h });
         for (a, x) in atoms_in_line {
             placed.push(Placed { atom: a, x, line: line_idx });
         }
         y += h;
+    }
+    if std::env::var_os("AGU_DEBUG_LAYOUT").is_some() && (out_lines.len() > 1 || (y - 18.85).abs() > 0.01) {
+        let desc: Vec<String> = out_lines.iter().map(|l| format!("{:.2}/{:.2}", l.y, l.height)).collect();
+        eprintln!("[layout] w={width:.1} h={y:.2} lines={}", desc.join(" "));
     }
     Laid { width, epoch, height: y, lines: out_lines, placed }
 }
@@ -654,11 +691,12 @@ impl Element for InlineFlow {
                 AtomKind::Space => {}
                 AtomKind::Word { shaped, item, hl, asc, size: sz } => {
                     let line_h = self.content.line_ratio * *sz;
-                    let top = line.baseline - (*hl + *asc);
-                    let _ = shaped.paint(point(px(x0), px(origin.y.f() + top)), px(line_h), window, cx);
+                    let base_abs = (origin.y.f() + line.baseline).round();
+                    let top = base_abs - (*hl + *asc) + TEXT_DY;
+                    let _ = shaped.paint(point(px(x0), px(top)), px(line_h), window, cx);
                     if let Item::Text(t) = &self.content.items[*item] {
                         if t.underline_on_hover && hover_of(pi, window) {
-                            let y = origin.y.f() + line.baseline + 1.5;
+                            let y = base_abs + 1.5;
                             window.paint_quad(gpui::fill(Bounds::new(point(px(x0), px(y)), size(px(p.atom.w), px(1.))), t.color));
                         }
                     }
@@ -696,7 +734,7 @@ impl Element for InlineFlow {
                             let shaped = shape(window, &ti, &pl.text, 0, 1);
                             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
                             let hl = (self.content.line_ratio * pl.size - (asc + desc)) / 2.0;
-                            let _ = shaped.paint(point(r.origin.x + px(pl.pad_x), px(line.baseline + origin.y.f() - hl - asc)), px(self.content.line_ratio * pl.size), window, cx);
+                            let _ = shaped.paint(point(r.origin.x + px(pl.pad_x), px((origin.y.f() + line.baseline).round() - hl - asc + TEXT_DY)), px(self.content.line_ratio * pl.size), window, cx);
                         }
                         Item::Button(b) => {
                             let hovered = hover_of(pi, window);
@@ -716,7 +754,7 @@ impl Element for InlineFlow {
                                     let shaped = shape(window, &ti, text, 0, 1);
                                     // leading-none: centre the glyph box in the button
                                     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
-                                    let top = r.origin.y + (r.size.height - px(asc + desc)) / 2.0;
+                                    let top = r.origin.y + (r.size.height - px(asc + desc)) / 2.0 + px(TEXT_DY);
                                     let left = r.origin.x + (r.size.width - shaped.width) / 2.0;
                                     let _ = shaped.paint(point(left, top), px(asc + desc), window, cx);
                                 }
@@ -802,24 +840,25 @@ impl Element for InlineFlow {
 fn atom_rect(content: &InlineContent, laid: &Laid, p: &Placed, origin: Point<Pixels>, _w: f32, _imgs: &ImagesHandle, _window: &Window) -> Bounds<Pixels> {
     let line = &laid.lines[p.line];
     let x = origin.x.f() + p.x;
+    let base_abs = (origin.y.f() + line.baseline).round();
     match &p.atom.kind {
         AtomKind::Word { asc, hl, size: sz, .. } => {
-            let top = origin.y.f() + line.baseline - (*hl + *asc);
+            let top = base_abs - (*hl + *asc);
             Bounds::new(point(px(x), px(top)), size(px(p.atom.w), px(content.line_ratio * *sz)))
         }
         AtomKind::Box { item } => {
             let (w, h) = p.atom.dims;
             match &content.items[*item] {
                 // the background spans the content area: ascent above the baseline, descent below
-                Item::Pill(_) => Bounds::new(point(px(x), px(origin.y.f() + line.baseline - p.atom.above)), size(px(w), px(h))),
+                Item::Pill(_) => Bounds::new(point(px(x), px(base_abs - p.atom.above)), size(px(w), px(h))),
                 it => {
                     let mx = match it {
                         Item::Image(i) => i.margin_x,
                         Item::Icon(i) => i.margin_x,
                         _ => 0.0,
                     };
-                    let cy = line.baseline + (p.atom.below - p.atom.above) / 2.0;
-                    Bounds::new(point(px(x + mx), px(origin.y.f() + cy - h / 2.0)), size(px(w), px(h)))
+                    let cy = base_abs + (p.atom.below - p.atom.above) / 2.0;
+                    Bounds::new(point(px(x + mx), px(cy - h / 2.0)), size(px(w), px(h)))
                 }
             }
         }
