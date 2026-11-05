@@ -22,15 +22,14 @@ timeout every ~30 s. Same `SEED` gives the same sequence.
 `egui` (binary `agu-chat-native`) and `gpui` (binary `agu-chat-gpui`). One shared `target/`.
 
 ```powershell
-cd D:\webAPPgu-chat
-ative
+cd D:\webAPP\agu-chat\native
 # one-time build: MSVC toolchain (pinned in rust-toolchain.toml) + Windows SDK
-$env:Path = "$env:USERPROFILE\.cargoin;$env:Path"
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cargo build --release              # builds both; or: -p agu-chat-native / -p agu-chat-gpui
 
 $env:AGU_IRC_URL = "ws://127.0.0.1:6680"
-.	argeteleasegu-chat-native.exe a_g_u__ benchtwo     # egui
-.	argeteleasegu-chat-gpui.exe   a_g_u__ benchtwo     # GPUI
+.\target\release\agu-chat-native.exe a_g_u__ benchtwo     # egui
+.\target\release\agu-chat-gpui.exe   a_g_u__ benchtwo     # GPUI
 # F12 toggles the stats overlay. AGU_LOG=1 writes <exe name>.log, AGU_NO_ANIM=1 freezes animations.
 ```
 
