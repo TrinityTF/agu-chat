@@ -456,9 +456,9 @@ impl AguApp {
             .border_color(c(theme::LINE))
             .bg(c(theme::RAISED))
             // Whenever the pointer is in the bar during a drag, the per-tab targets set the mark again.
-            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<TabDrag>, _w, _cx| this.clear_bar_mark()))
-            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SplitDrag>, _w, _cx| this.clear_bar_mark()))
-            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SourcesDrag>, _w, _cx| this.clear_bar_mark()))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<TabDrag>, _w, cx| this.clear_bar_mark(cx)))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SplitDrag>, _w, cx| this.clear_bar_mark(cx)))
+            .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SourcesDrag>, _w, cx| this.clear_bar_mark(cx)))
             .child(zone)
             // Always some bare title bar to grab the window by, however many tabs there are.
             .child(div().w(px(28.)).flex_none().h_full().when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag)))
@@ -472,7 +472,10 @@ impl AguApp {
             .into_any_element()
     }
 
-    fn clear_bar_mark(&mut self) {
+    fn clear_bar_mark(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.drop_at.is_some() || self.tabs.split_over {
+            cx.notify();
+        }
         self.tabs.drop_at = None;
         self.tabs.split_over = false;
     }

@@ -34,6 +34,12 @@ fn main() {
             })
             .collect();
         let at = window_state::place_bounds(saved.as_ref(), &work);
+        // AGU_WIN_POS=x,y,w,h opens the window exactly there (test runs keep it on the second monitor).
+        let forced = std::env::var("AGU_WIN_POS").ok().and_then(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (v.len() == 4).then(|| window_state::Rect { x: v[0], y: v[1], width: v[2], height: v[3] })
+        });
+        let at = forced.or(at);
         let bounds = match at {
             Some(r) => Bounds::new(gpui::point(px(r.x), px(r.y)), size(px(r.width), px(r.height))),
             None => Bounds::centered(None, size(px(1280.), px(800.)), cx),

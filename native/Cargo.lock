@@ -42,7 +42,10 @@ dependencies = [
  "agu-chat-core",
  "futures",
  "gpui",
- "image",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]

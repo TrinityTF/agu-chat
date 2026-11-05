@@ -222,7 +222,26 @@ impl AguApp {
         .detach();
 
         window.focus(&app.focus);
+        app.demo_state(window, cx);
         app
+    }
+
+    /// Dev aid for screenshots: `AGU_SHOT=dialog|menu|confirm|settings` opens that UI state at startup.
+    fn demo_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(shot) = std::env::var("AGU_SHOT") else { return };
+        let tab = self.active_tab().clone();
+        let leaf = leaves(tab.root.as_ref()).first().map(|l| l.id.clone()).unwrap_or_default();
+        match shot.as_str() {
+            "dialog" => self.open_dialog(Dialog::Split { tab_id: tab.id, leaf_id: leaf, below: false }, window, cx),
+            "change" => self.open_dialog(Dialog::Change { tab_id: tab.id, leaf_id: leaf }, window, cx),
+            "confirm" => self.open_dialog(Dialog::CloseTab { tab_id: tab.id, others: false }, window, cx),
+            "settings" => self.open_dialog(Dialog::Settings, window, cx),
+            "menu" => {
+                let entries = self.split_menu_entries(&tab.id, &leaf);
+                self.menu = Some(MenuState { key: "demo".into(), pos: gpui::point(px(560.), px(54.)), align_right: true, entries, anchor: None });
+            }
+            _ => {}
+        }
     }
 
     fn set_settings(&mut self, s: Settings, cx: &mut Context<Self>) {

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use agu_chat_core::protocol::{ConnFrame, Platform};
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, AnyElement, ClickEvent, Context, Transformation, Window,
+    div, prelude::*, px, Animation, AnimationExt, AnyElement, ClickEvent, Context, Window,
 };
 
 use crate::icons;
@@ -277,7 +277,7 @@ impl AguApp {
                     let anchor = this.anchor(&mk);
                     this.toggle_menu(&mk, anchor, true, entries, cx);
                 }))
-                .child(icons::icon(icons::DOTS, 14.).with_transformation(Transformation::rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))))
+                .child(icons::icon(icons::DOTS_H, 14.))
                 .child(self.probe(menu_key, cx)),
         );
 
@@ -331,7 +331,7 @@ impl AguApp {
         out
     }
 
-    fn split_menu_entries(&self, tab_id: &str, leaf_id: &str) -> Vec<MenuEntry> {
+    pub fn split_menu_entries(&self, tab_id: &str, leaf_id: &str) -> Vec<MenuEntry> {
         let close_key = hotkey_hint(&self.hotkey_table, HotkeyAction::CloseSplit);
         let (t0, l0) = (tab_id.to_string(), leaf_id.to_string());
         let (t1, l1) = (t0.clone(), l0.clone());
