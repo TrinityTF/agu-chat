@@ -723,8 +723,6 @@ pub fn automod_row(row: &Row, h: &HeldMsg, ctx: &RowCtx, env: &TwitchEnv) -> Bui
     };
     let hs = base * 0.92;
     let mut head = Flow::new(hs);
-    head.push(Item::Icon(IconItem { path: icons::WARNING, size: 14.0, color: token(theme::AMBER_200), valign: VAlign::Middle, margin_x: 0.0 }));
-    head.push(Item::Gap(6.0));
     head.push(Item::Text(TextItem::new("AutoMod held a message from ", hs, token(theme::AMBER_200))));
     head.push(Item::Text(TextItem::new(h.user.name.clone(), hs, token(theme::AMBER_200)).weight(FontWeight::SEMIBOLD).act(Act::Tag(0), true)));
     let mut body = Flow::new(base);

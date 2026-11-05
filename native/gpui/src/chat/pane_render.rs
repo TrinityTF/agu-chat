@@ -286,9 +286,12 @@ impl ChatPane {
                 .flex_wrap()
                 .items_center()
                 .gap(px(6.))
-                .child(div().min_w_0().child(self.flow(&a.header, Rc::new(vec![RowAction::Card]), cx)))
+                .text_size(px(hs))
+                .child(div().flex_none().text_color(c(theme::AMBER_200)).child(icon(icons::WARNING, 14.0)))
+                .child(div().flex_none().child(self.flow(&a.header, Rc::new(vec![RowAction::Card]), cx).fit()))
                 .child(
                     div()
+                        .flex_none()
                         .rounded_full()
                         .border_1()
                         .border_color(token_a(theme::AMBER_500, 0.3))
@@ -296,11 +299,10 @@ impl ChatPane {
                         .px(px(6.))
                         .py(px(1.))
                         .text_size(px(10.))
-                        .line_height(px(15.))
+                        .line_height(px(14.5))
                         .text_color(c(theme::AMBER_300))
                         .child(SharedString::from(a.chip.clone())),
-                )
-                .text_size(px(hs)),
+                ),
         );
         d = d.child(self.flow(&a.body, Rc::new(vec![]), cx));
         if a.status == "held" {
@@ -316,7 +318,7 @@ impl ChatPane {
                         .px(px(8.))
                         .py(px(1.))
                         .text_size(px(11.))
-                        .line_height(px(16.))
+                        .line_height(px(15.95))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(c(fg))
                         .hover(move |s| s.border_color(token_a(fg_base(fg), 0.5)))
@@ -333,7 +335,7 @@ impl ChatPane {
                 );
             }
         } else {
-            d = d.child(div().text_size(px(11.)).line_height(px(16.)).text_color(c(theme::FAINT)).child(SharedString::from(a.resolved_line.clone())));
+            d = d.child(div().text_size(px(11.)).line_height(px(15.95)).text_color(c(theme::FAINT)).child(SharedString::from(a.resolved_line.clone())));
         }
         d.into_any_element()
     }
@@ -442,7 +444,7 @@ impl ChatPane {
             }
         }
         let body = div().mt(px(2.)).w_full().child(self.flow(&content, Rc::new(vec![]), cx));
-        text_col = text_col.child(if open { body } else { body.max_h(px(base * LINE_HEIGHT)).overflow_hidden() });
+        text_col = text_col.child(if open { body } else { body.max_h(px(base * 1.5)).overflow_hidden() });
         if open {
             let mut df = InlineContentBuilder::new(12.0);
             for bd in super::twitch::badges::parse_badge_list(&p.badges, &env.badge_map) {
@@ -655,15 +657,28 @@ impl ChatPane {
 
     /// The logged-out `SendBox`: a disabled input bar (the input itself is a later round).
     fn send_box(&self, cx: &mut Context<Self>) -> AnyElement {
-        let sendable = self.store.sources.iter().any(|s| matches!(s.source.platform, agu_chat_core::protocol::Platform::Twitch | agu_chat_core::protocol::Platform::Rumble | agu_chat_core::protocol::Platform::Kick) && s.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false));
-        let placeholder = if sendable {
-            "Send to ...".to_string()
-        } else if let Some(r) = self.store.sources.iter().find_map(|s| s.conn.as_ref().and_then(|c| c.read_only_reason.clone()).filter(|r| !r.is_empty())) {
-            r
-        } else if self.store.sources.iter().any(|s| s.conn.as_ref().map(|c| c.state == "connecting").unwrap_or(true)) {
-            "Connecting...".to_string()
+        use agu_chat_core::protocol::Platform as P;
+        let sendable: Vec<&super::store::SourceState> = self
+            .store
+            .sources
+            .iter()
+            .filter(|s| matches!(s.source.platform, P::Twitch | P::Rumble | P::Kick) && s.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false))
+            .collect();
+        let placeholder = if sendable.is_empty() {
+            if let Some(r) = self.store.sources.iter().find_map(|s| s.conn.as_ref().and_then(|c| c.read_only_reason.clone()).filter(|r| !r.is_empty())) {
+                r
+            } else if self.store.sources.iter().any(|s| s.conn.as_ref().map(|c| c.state == "connecting").unwrap_or(true)) {
+                "Connecting...".to_string()
+            } else {
+                "Chat is read-only".to_string()
+            }
+        } else if let Some(r) = &self.reply_target {
+            format!("Reply to @{}", r.user)
+        } else if sendable.len() > 1 {
+            format!("Send to {}", sendable.iter().map(|s| crate::icons::platform_label(s.source.platform)).collect::<Vec<_>>().join(" + "))
         } else {
-            "Chat is read-only".to_string()
+            let s = sendable[0];
+            format!("Message {}{}", if s.source.platform == P::Twitch { "#" } else { "" }, s.source.channel)
         };
         let mut root = div().flex_none().border_t_1().border_color(c(theme::LINE)).bg(c(theme::RAISED));
         if let Some(cf) = &self.confirm {
@@ -757,10 +772,11 @@ impl ChatPane {
                         .border_1()
                         .border_color(c(theme::LINE))
                         .bg(c(theme::PANEL))
+                        .h(px(30.))
                         .px(px(8.))
                         .py(px(6.))
                         .text_size(px(13.))
-                        .line_height(px(13.0 * 1.35))
+                        .line_height(px(16.))
                         .text_color(c(theme::FAINT))
                         .opacity(0.6)
                         .overflow_hidden()
@@ -772,6 +788,7 @@ impl ChatPane {
                         .flex_none()
                         .flex()
                         .items_center()
+                        .h(px(30.))
                         .rounded(px(4.))
                         .bg(c(theme::ACCENT))
                         .px(px(10.))
@@ -908,11 +925,12 @@ chat_list(
 pub struct InlineContentBuilder {
     items: Vec<Item>,
     base: f32,
+    ratio: f32,
 }
 
 impl InlineContentBuilder {
     pub fn new(base: f32) -> Self {
-        InlineContentBuilder { items: Vec::new(), base }
+        InlineContentBuilder { items: Vec::new(), base, ratio: 1.5 }
     }
     pub fn text(&mut self, t: &str, color: Hsla, w: FontWeight) {
         self.items.push(Item::Text(TextItem::new(t.to_string(), self.base, color).weight(w)));
@@ -952,7 +970,7 @@ impl InlineContentBuilder {
         self.items.extend(f);
     }
     pub fn finish(self) -> Rc<InlineContent> {
-        InlineContent::new(self.items, self.base, LINE_HEIGHT)
+        InlineContent::new(self.items, self.base, self.ratio)
     }
 }
 

@@ -244,7 +244,7 @@ fn spawn_source(inner: Arc<Inner>, id: SubId, source: SourceRef, alive: Arc<Atom
         } else if ch.contains("na") {
             conn("unavailable", json!({ "detail": "Chat is disabled for this live stream." }));
         } else {
-            conn("open", json!({ "live": true, "title": format!("Mock stream on {}: {}", source.platform.as_str(), source.channel), "canSend": false }));
+            conn("open", json!({ "live": true, "title": format!("Mock stream on {}: {}", source.platform.as_str(), source.channel), "canSend": std::env::var("AGU_HARNESS").is_ok() && !matches!(source.platform, Platform::Youtube | Platform::X) }));
             chatty = true;
         }
         if chatty && std::env::var("AGU_HARNESS").map(|v| v == "1").unwrap_or(false) {

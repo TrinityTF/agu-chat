@@ -252,6 +252,8 @@ struct Placed {
 
 struct Laid {
     width: f32,
+    /// the widest line (for shrink-to-fit flows)
+    used_w: f32,
     epoch: u64,
     height: f32,
     lines: Vec<LineInfo>,
@@ -567,7 +569,8 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
         let desc: Vec<String> = out_lines.iter().map(|l| format!("{:.2}/{:.2}", l.y, l.height)).collect();
         eprintln!("[layout] w={width:.1} h={y:.2} lines={}", desc.join(" "));
     }
-    Laid { width, epoch, height: y, lines: out_lines, placed }
+    let used_w = placed.iter().map(|p| p.x + p.atom.w).fold(0.0f32, f32::max);
+    Laid { width, used_w, epoch, height: y, lines: out_lines, placed }
 }
 
 // ---- the element -----------------------------------------------------------------------------
@@ -581,13 +584,19 @@ pub struct InlineFlow {
     on_act: Option<OnAct>,
     on_tip: Option<OnTip>,
     hovering_tip: Rc<Cell<bool>>,
+    fit: bool,
 }
 
 pub fn inline_flow(content: Rc<InlineContent>) -> InlineFlow {
-    InlineFlow { content, on_act: None, on_tip: None, hovering_tip: Rc::new(Cell::new(false)) }
+    InlineFlow { content, on_act: None, on_tip: None, hovering_tip: Rc::new(Cell::new(false)), fit: false }
 }
 
 impl InlineFlow {
+    /// Shrink to the content's width (an inline span among flex items) instead of filling the parent.
+    pub fn fit(mut self) -> Self {
+        self.fit = true;
+        self
+    }
     pub fn on_act(mut self, f: OnAct) -> Self {
         self.on_act = Some(f);
         self
@@ -629,7 +638,10 @@ impl Element for InlineFlow {
         let content = self.content.clone();
         let imgs = cx.global::<ImagesHandle>().clone();
         let mut style = Style::default();
-        style.size.width = relative(1.).into();
+        let fit = self.fit;
+        if !fit {
+            style.size.width = relative(1.).into();
+        }
         let id = window.request_measured_layout(style, move |known, avail, window, cx| {
             let w = known.width.map(|w| w.f()).unwrap_or_else(|| match avail.width {
                 gpui::AvailableSpace::Definite(w) => w.f(),
@@ -642,7 +654,7 @@ impl Element for InlineFlow {
                 *c = Some(layout(&content, w, window, &imgs, epoch));
             }
             let l = c.as_ref().unwrap();
-            size(px(w.min(l.width)), px(l.height))
+            size(px(if fit { l.used_w.min(w).ceil() } else { w.min(l.width) }), px(l.height))
         });
         (id, ())
     }

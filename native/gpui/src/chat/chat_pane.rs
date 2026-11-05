@@ -1263,18 +1263,15 @@ impl ChatPane {
             BuiltRow::Notice(n) => {
                 let w = width - 2.0 - 16.0;
                 let h = 4.0 + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
-                if std::env::var_os("AGU_DEBUG_LAYOUT").is_some() {
-                    eprintln!("[notice] w={w} sys={} text={:?} urls={:?}", n.system.height_at(w, window, cx), n.text.as_ref().map(|t| t.height_at(w, window, cx)), n.text.as_ref().map(|t| t.urls()));
-                }
                 ItemMetrics { h, mt: 0.0, mb: 0.0 }
             }
             BuiltRow::Feed(f) => ItemMetrics { h: 2.0 + fl(f.base * 0.9 * LINE_HEIGHT), mt: 0.0, mb: 0.0 },
             BuiltRow::Automod(a) => {
+                // py-1 + header line (the chip makes it 18.5) + body + the buttons / resolved line
                 let w = width - 3.0 - 16.0;
-                let hs = a.base * 0.92;
-                let head = a.header.height_at(w, window, cx).max(fl(hs * LINE_HEIGHT));
+                let head = a.header.height_at(w, window, cx).max(18.5);
                 let body = a.body.height_at(w, window, cx);
-                let tail = if a.status == "held" { if a.can_resolve { 4.0 + 16.0 + 2.0 + 2.0 } else { 0.0 } } else { 16.0 };
+                let tail = if a.status == "held" { if a.can_resolve { 4.0 + 19.95 } else { 0.0 } } else { 15.95 };
                 ItemMetrics { h: 8.0 + head + body + tail, mt: 1.0, mb: 1.0 }
             }
         }
