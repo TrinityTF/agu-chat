@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 //! Port of src/renderer/main.tsx, plus the window setup from src/main/main.js (`createWindow`): a frameless
 //! 1280x800 window (min 280x300) that restores `window.json`, whose title bar is the notebook's tab bar.
 //! The backend is the real `agu_chat_core::Backend`; `AGU_MOCK=1` selects the mock bridge (port of
