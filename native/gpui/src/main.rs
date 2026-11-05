@@ -5,6 +5,7 @@
 //! selects it explicitly, and for now it is also what runs without that variable.
 #![allow(dead_code)] // Ports of pieces later rounds use (theme tokens, icons, Toggle, hotkey helpers) stay in.
 mod assets;
+mod chat;
 mod icons;
 mod layout;
 mod text_input;
