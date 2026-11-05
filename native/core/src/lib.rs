@@ -5,6 +5,7 @@ pub mod images;
 pub mod irc;
 pub mod maps;
 pub mod net;
+pub mod protocol;
 pub mod sys;
 pub mod tokens;
 
