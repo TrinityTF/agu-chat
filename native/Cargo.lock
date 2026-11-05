@@ -49,7 +49,9 @@ name = "agu-chat-gpui"
 version = "0.1.0"
 dependencies = [
  "agu-chat-core",
+ "futures",
  "gpui",
+ "image",
 ]
 
 [[package]]

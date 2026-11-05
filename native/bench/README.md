@@ -16,20 +16,25 @@ real 7TV/BTTV/FFZ channel emotes resolve), then streams PRIVMSGs (500 users, bad
 emotes, some Twitch native emotes, `/me`, CJK/emoji), plus USERNOTICE subs, CLEARMSG and a CLEARCHAT
 timeout every ~30 s. Same `SEED` gives the same sequence.
 
-## 2. Native app (two splits)
+## 2. Native apps (two splits)
+
+`native/` is a cargo workspace: `core` (shared networking, parsing, image decoding, chat model),
+`egui` (binary `agu-chat-native`) and `gpui` (binary `agu-chat-gpui`). One shared `target/`.
 
 ```powershell
-cd D:\webAPP\agu-chat\native
+cd D:\webAPPgu-chat
+ative
 # one-time build: MSVC toolchain (pinned in rust-toolchain.toml) + Windows SDK
-$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
-cargo build --release
+$env:Path = "$env:USERPROFILE\.cargoin;$env:Path"
+cargo build --release              # builds both; or: -p agu-chat-native / -p agu-chat-gpui
 
 $env:AGU_IRC_URL = "ws://127.0.0.1:6680"
-.\target\release\agu-chat-native.exe a_g_u__ benchtwo
-# F12 toggles the stats overlay. AGU_LOG=1 writes agu-chat-native.log, AGU_NO_ANIM=1 freezes animations.
+.	argeteleasegu-chat-native.exe a_g_u__ benchtwo     # egui
+.	argeteleasegu-chat-gpui.exe   a_g_u__ benchtwo     # GPUI
+# F12 toggles the stats overlay. AGU_LOG=1 writes <exe name>.log, AGU_NO_ANIM=1 freezes animations.
 ```
 
-Without `AGU_IRC_URL` it connects to real Twitch (only use it on your own channel).
+Without `AGU_IRC_URL` they connect to real Twitch (only use it on your own channel).
 
 ## 3. Electron app (two splits of the same channels)
 
@@ -56,7 +61,8 @@ function Sum-App($name) {
     CpuSeconds   = [math]::Round(($ps | Measure-Object CPU -Sum).Sum, 1)
   }
 }
-Sum-App 'agu-chat-native'      # native
+Sum-App 'agu-chat-native'      # egui
+Sum-App 'agu-chat-gpui'        # GPUI
 Sum-App 'Agu Chat*'            # Electron (adjust to the exe/process name; `electron` in dev)
 ```
 

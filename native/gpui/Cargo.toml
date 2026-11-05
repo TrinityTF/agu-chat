@@ -10,3 +10,5 @@ path = "src/main.rs"
 [dependencies]
 agu-chat-core = { path = "../core" }
 gpui = "=0.2.2"
+image = { version = "0.25", default-features = false }
+futures = "0.3"
