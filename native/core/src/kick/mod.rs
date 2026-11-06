@@ -1,4 +1,4 @@
-//! Port of src/main/kick/index.js: the Kick platform module (read-only). See docs/ARCHITECTURE.md.
+//! Port of src/main/kick/index.js: the Kick platform module. See docs/ARCHITECTURE.md.
 //!
 //! HOW CHAT GETS HERE. Kick's own web client reads chat over a public Pusher websocket, and so does this:
 //!   1. GET  kick.com/api/v2/channels/<slug>   -> channel id, chatroom id, live status (honest UA)
@@ -9,22 +9,29 @@
 //! Emits the frames /ws/kick sends (chatlog, chat, status, emotes, banned) plus the uniform conn frame, plus
 //! {type:"delete", ids}, {type:"clear"}, {type:"pin", message|null}.
 //!
-//! SENDING IS NOT SUPPORTED (Kick's token exchange needs a client secret): no routes and no accounts.
+//! SENDING (not in the JS): Kick's token exchange needs a client secret, so the login goes through the Agu Chat
+//! broker (auth.rs) and messages are posted with the user's own token through Kick's public API. Reading stays
+//! anonymous and works without a login.
 //!
 //! Differences from the JS: timers are `util::Timer`s, the socket is `ws::connect` (whose `Error` event ends
 //! the socket without a `Close`, so it is handled as one), `ws.terminate()` is followed by the close handling
 //! by hand for the same reason, and `stop()` aborts the source's tasks (`net::Jobs`) instead of an
 //! `AbortController`.
+pub mod auth;
 pub mod vendor;
 
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
+
+use futures_util::future::BoxFuture;
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
 use crate::net::Jobs;
-use crate::platforms::{Ctx, Emit, PlatformModule, Source};
-use crate::protocol::{Frame, Platform};
+use crate::platforms::{Accounts, Ctx, Emit, PlatformModule, Source};
+use crate::protocol::{AccountState, Frame, Platform};
+use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, js_string, now_ms, parse_rfc3339_ms, truthy, uuid_v4, Timer};
 use crate::ws::{self, WsEvent, WsHandle};
 use vendor::kick::{fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, KickChannel, SubBadge};
@@ -43,7 +50,7 @@ const DEAD_AFTER_MS: i64 = 150_000;
 const FALLBACK_DESCRIPTOR: (&str, &str) = ("34bf7a0ff419a2a775b9", "us2");
 const PUSHER_VERSION: &str = "8.4.0";
 
-const READ_ONLY_REASON: &str = "Kick sending needs a server-side app secret; read-only in this beta";
+static USER_IDS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static LAST_DESCRIPTOR: LazyLock<Mutex<Option<(String, String)>>> = LazyLock::new(|| Mutex::new(None));
 
@@ -61,8 +68,82 @@ impl PlatformModule for Kick {
     fn create_source(&self, channel: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<dyn Source> {
         // JS normalizes again here; the relay hands over an already normalized slug, and a stray input falls back to itself.
         let slug = parse_kick_source(&channel).unwrap_or(channel);
+        auth::ensure_ctx(&ctx); // sources can be created before init() in tests
         KickSource::new(slug, emit, ctx)
     }
+
+    fn routes(&self) -> Vec<(String, Handler)> {
+        vec![("POST /api/kick/send".into(), Arc::new(|req| Box::pin(route_send(req)))), ("GET /api/kick/caps".into(), Arc::new(|req| Box::pin(route_caps(req))))]
+    }
+
+    fn accounts(&self) -> Option<Arc<dyn Accounts>> {
+        Some(Arc::new(KickAccounts))
+    }
+
+    fn init(&self, ctx: Arc<Ctx>) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            auth::init(ctx);
+            Ok(())
+        })
+    }
+}
+
+struct KickAccounts;
+
+impl Accounts for KickAccounts {
+    fn state(&self) -> AccountState {
+        auth::state()
+    }
+    fn login(&self, _args: Value) -> BoxFuture<'static, Result<Value, String>> {
+        Box::pin(auth::login())
+    }
+    fn cancel(&self) {
+        auth::cancel();
+    }
+    fn logout(&self) -> BoxFuture<'static, ()> {
+        Box::pin(auth::logout())
+    }
+}
+
+fn route_err(status: u16, msg: &str) -> RouteRes {
+    RouteRes { status, body: json!({"error": msg}) }
+}
+
+/// The broadcaster's user id (what Kick's chat API wants), from the reader's own channel lookup when it has run.
+async fn broadcaster_id(slug: &str, ua: &str) -> Result<i64, String> {
+    if let Some(id) = USER_IDS.lock().unwrap().get(slug).copied() {
+        return Ok(id);
+    }
+    let c = get_kick_channel(slug, ua).await?.ok_or_else(|| format!("No Kick channel called \"{slug}\"."))?;
+    let id = c.user_id.parse::<i64>().map_err(|_| "Kick did not say who owns this channel".to_string())?;
+    USER_IDS.lock().unwrap().insert(slug.to_string(), id);
+    Ok(id)
+}
+
+/// POST /api/kick/send {text, replyTo?}
+async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let text = js_str_or_empty(Some(&req.body["text"])).trim().to_string();
+    if text.is_empty() {
+        return Ok(route_err(400, "empty message"));
+    }
+    if !auth::is_logged_in() {
+        return Ok(route_err(401, auth::LOGGED_OUT_REASON));
+    }
+    let slug = parse_kick_source(&req.source.channel).unwrap_or_else(|| req.source.channel.clone());
+    let id = match broadcaster_id(&slug, &req.ctx.user_agent).await {
+        Ok(id) => id,
+        Err(e) => return Ok(route_err(502, &e)),
+    };
+    let reply = js_str_or_empty(Some(&req.body["replyTo"]));
+    match auth::send_chat(&text, id, Some(reply.as_str()).filter(|r| !r.is_empty())).await {
+        Ok(()) => Ok(RouteRes { status: 200, body: json!({"ok": true}) }),
+        Err(e) => Ok(route_err(e.status, &e.message)),
+    }
+}
+
+/// GET /api/kick/caps: moderating from here is not built; only whether the account is logged in.
+async fn route_caps(_req: RouteReq) -> Result<RouteRes, RouteError> {
+    Ok(RouteRes { status: 200, body: json!({"connected": auth::is_logged_in(), "canModerate": false, "canDelete": false}) })
 }
 
 struct St {
@@ -86,6 +167,7 @@ struct St {
     failures: u32,
     stopped: bool,
     last_conn_json: String,
+    auth_listener: Option<u64>,
 }
 
 pub struct KickSource {
@@ -108,8 +190,11 @@ fn conn_frame(st: &St) -> Value {
     if !title.is_empty() {
         f["title"] = json!(title);
     }
-    f["canSend"] = json!(false);
-    f["readOnlyReason"] = json!(READ_ONLY_REASON);
+    let can_send = auth::is_logged_in();
+    f["canSend"] = json!(can_send);
+    if !can_send {
+        f["readOnlyReason"] = json!(auth::LOGGED_OUT_REASON);
+    }
     f
 }
 
@@ -156,6 +241,7 @@ impl KickSource {
                 failures: 0,
                 stopped: false,
                 last_conn_json: String::new(),
+                auth_listener: None,
             }),
         })
     }
@@ -239,6 +325,9 @@ impl KickSource {
 
     fn apply_channel(&self, c: &KickChannel) {
         let slug = if c.slug.is_empty() { self.slug.clone() } else { c.slug.clone() };
+        if let Ok(id) = c.user_id.parse::<i64>() {
+            USER_IDS.lock().unwrap().insert(slug.clone(), id);
+        }
         {
             let mut st = self.st.lock().unwrap();
             st.info_present = true;
@@ -643,6 +732,14 @@ impl Source for KickSource {
             f
         };
         self.emit(f);
+        // canSend / readOnlyReason follow the login
+        let me = self.me.clone();
+        let id = auth::EVENTS.on(Arc::new(move |_| {
+            if let Some(s) = me.upgrade() {
+                s.publish_conn();
+            }
+        }));
+        self.st.lock().unwrap().auth_listener = Some(id);
         let s = self.clone();
         self.jobs.spawn(s.connect());
     }
@@ -654,6 +751,9 @@ impl Source for KickSource {
             st.reconnect_timer.clear();
             st.status_timer.clear();
             st.watchdog.clear();
+            if let Some(id) = st.auth_listener.take() {
+                auth::EVENTS.off(id);
+            }
             st.ws.take()
         };
         self.jobs.abort_all();

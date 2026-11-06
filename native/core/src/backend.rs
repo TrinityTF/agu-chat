@@ -105,6 +105,11 @@ impl Backend {
         let store = Store::open(data_dir.clone(), logger.clone());
         let ctx = Arc::new(Ctx::new(store.settings.clone(), store.secrets.clone(), logger.clone(), user_agent(&meta.version)));
         let modules = Arc::new(modules());
+        crate::kick::auth::set_opener(Arc::new(|url: &str| {
+            if is_openable_url(url) {
+                shell_open(url);
+            }
+        }));
 
         let frames: Arc<Listeners<(SubId, Frame)>> = Arc::new(Listeners::new());
         let accounts_cbs: Arc<Listeners<AccountsState>> = Arc::new(Listeners::new());
@@ -183,7 +188,7 @@ impl Drop for Backend {
     }
 }
 
-fn shell_open(url: &str) {
+pub(crate) fn shell_open(url: &str) {
     #[cfg(windows)]
     {
         use windows::core::{w, PCWSTR};

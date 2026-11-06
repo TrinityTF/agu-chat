@@ -61,11 +61,13 @@ impl MockBridge {
             // the harness page's accounts: a_g_u__ on Twitch, a Rumble login
             accounts.insert(Platform::Twitch, AccountState { connected: true, user: Some(AccountUser { id: "1".into(), login: "a_g_u__".into(), name: "a_g_u__".into() }), ..Default::default() });
             accounts.insert(Platform::Rumble, AccountState { connected: true, ..Default::default() });
+            accounts.insert(Platform::Kick, AccountState { connected: true, user: Some(AccountUser { id: "5".into(), login: "mock-kick".into(), name: "MockKick".into() }), ..Default::default() });
         } else {
+            accounts.insert(Platform::Kick, AccountState::default());
             accounts.insert(Platform::Twitch, AccountState::default());
             accounts.insert(Platform::Rumble, AccountState::default());
         }
-        for p in [Platform::Kick, Platform::Youtube, Platform::X] {
+        for p in [Platform::Youtube, Platform::X] {
             accounts.insert(p, AccountState { unsupported: true, ..Default::default() });
         }
         let inner = Inner {
@@ -446,6 +448,21 @@ impl AguBridge for MockBridge {
                         AccountState { connected: true, user: Some(AccountUser { id: "r1".into(), login: u.clone(), name: u }), ..Default::default() },
                     );
                     Ok(json!({ "ok": true }))
+                }
+                Platform::Kick => {
+                    // the browser round trip: pending, then logged in a few seconds later
+                    let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) + 5 * 60_000;
+                    inner.set_account(Platform::Kick, AccountState { pending: Some(DevicePrompt { user_code: String::new(), verification_uri: "https://kick.com/".into(), expires_at: expires }), ..Default::default() });
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    *inner.twitch_login.lock().unwrap() = Some(cancelled.clone());
+                    let inner2 = inner.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(4));
+                        if !cancelled.load(Ordering::Relaxed) {
+                            inner2.set_account(Platform::Kick, AccountState { connected: true, user: Some(AccountUser { id: "5".into(), login: "mock-kick".into(), name: "MockKick".into() }), ..Default::default() });
+                        }
+                    });
+                    Ok(json!({ "pending": true }))
                 }
                 _ => Err("Not supported in the mock.".into()),
             }

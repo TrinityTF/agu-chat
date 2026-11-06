@@ -869,6 +869,39 @@ impl SettingsDialog {
         Self::card().child(Self::account_title(platform)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
     }
 
+    /// Kick signs in through the browser (the Agu Chat login service holds Kick's app secret): there is no code to
+    /// type, the app just waits for the browser to come back.
+    fn kick_account(&mut self, st: &AccountState, cx: &mut Context<Self>) -> AnyElement {
+        let err = self.err.get("kick").cloned().or_else(|| st.error.clone()).unwrap_or_default();
+        let body: AnyElement = if st.connected {
+            self.connected_line(Platform::Kick, st, cx)
+        } else if let Some(p) = st.pending.clone() {
+            let uri = p.verification_uri.clone();
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_color(c(theme::MUTED)).child("Waiting for you to approve in your browser…"))
+                .child(btn(eid("kick-reopen"), "Open browser again", BtnOpts::default()).on_click({
+                    let bridge = self.bridge.clone();
+                    cx.listener(move |_, _: &ClickEvent, _, _| bridge.open_external(uri.clone()))
+                }))
+                .child(btn(eid("kick-cancel"), "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_login(Platform::Kick, cx))))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(8.))
+                .child(btn(eid("login-kick"), "Log in", BtnOpts::primary()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.login(Platform::Kick, json!({}), cx))))
+                .child(txt(11.).text_color(c(theme::FAINT)).child("You approve it on kick.com in your browser; your password never goes through Agu Chat."))
+                .into_any_element()
+        };
+        Self::card().child(Self::account_title(Platform::Kick)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
+    }
+
     fn render_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(accounts) = self.accounts.clone() else { return div().text_color(c(theme::FAINT)).child("Loading…").into_any_element() };
         let get = |p: Platform| accounts.get(&p).cloned().unwrap_or_default();
@@ -876,7 +909,7 @@ impl SettingsDialog {
             .child(Self::h("Accounts"))
             .child(self.twitch_account(&get(Platform::Twitch), window, cx))
             .child(self.rumble_account(&get(Platform::Rumble), window, cx))
-            .child(self.other_account(Platform::Kick, &get(Platform::Kick), cx))
+            .child(self.kick_account(&get(Platform::Kick), cx))
             .child(self.other_account(Platform::Youtube, &get(Platform::Youtube), cx))
             .child(self.other_account(Platform::X, &get(Platform::X), cx))
             .into_any_element()
