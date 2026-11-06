@@ -988,10 +988,14 @@ impl gpui::Element for TextElement {
             let view_h = f32::from(bounds.size.height);
             let max_scroll = (area.total_h - view_h).max(0.0);
             let mut scroll = input.scroll_y.clamp(0.0, max_scroll);
+            // Bottom first, then top, so the top wins: the one-line box (30px tall, scrollHeight rounding)
+            // is ~1.5px shorter than a 17.55px line, and with `if top {..} else if bottom {..}` the scroll
+            // flipped between 0 and 1.55 on every frame, which made the text shake while chat animated.
+            if cy + line_h > scroll + view_h {
+                scroll = cy + line_h - view_h;
+            }
             if cy < scroll {
                 scroll = cy;
-            } else if cy + line_h > scroll + view_h {
-                scroll = cy + line_h - view_h;
             }
             scroll = scroll.clamp(0.0, max_scroll);
 

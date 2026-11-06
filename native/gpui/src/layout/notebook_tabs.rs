@@ -414,7 +414,7 @@ impl AguApp {
             .min_w_0()
             .flex_1()
             .h_full()
-            .when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag));
+            .when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag).occlude());
         let grab = self.drop_targets(grab, cx, move |_, _| drop_end);
 
         let zone = div()
@@ -443,6 +443,11 @@ impl AguApp {
                 .text_color(c(theme::MUTED))
                 .hover(move |s| if danger { s.bg(c(theme::RED_600)).text_color(c(theme::WHITE)) } else { s.bg(c(theme::RAISED_2)).text_color(c(theme::TEXT)) })
                 .window_control_area(area)
+                // GPUI on Windows first offers a title-bar press to the app as a MouseDown; any focusable
+                // ancestor (the root tracks focus) then calls prevent_default, GPUI reports the press as
+                // handled and Windows never moves/minimizes/closes. Blocking the hitbox keeps the press
+                // away from those ancestors (the control area itself still hit-tests: it is the top hitbox).
+                .occlude()
                 .child(icons::icon(ico, size))
         };
 
@@ -461,7 +466,7 @@ impl AguApp {
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SourcesDrag>, _w, cx| this.clear_bar_mark(cx)))
             .child(zone)
             // Always some bare title bar to grab the window by, however many tabs there are.
-            .child(div().w(px(28.)).flex_none().h_full().when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag)))
+            .child(div().w(px(28.)).flex_none().h_full().when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag).occlude()))
             .child(win_btn("win-min", WindowControlArea::Min, icons::WIN_MIN, 14., false))
             .child(if maximized {
                 win_btn("win-max", WindowControlArea::Max, icons::WIN_RESTORE, 14., false)

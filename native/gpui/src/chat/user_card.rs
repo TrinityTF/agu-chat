@@ -424,7 +424,8 @@ impl Render for UserCardView {
             .border_b_1()
             .border_color(c(theme::LINE))
             .p(px(10.))
-            .child(div().flex_none().window_control_area(WindowControlArea::Drag).child(Self::avatar(&avatar_src, &display)))
+            // occlude: see notebook_tabs' window buttons (a focusable ancestor would swallow the press)
+            .child(div().flex_none().window_control_area(WindowControlArea::Drag).occlude().child(Self::avatar(&avatar_src, &display)))
             .child(
                 div()
                     .min_w_0()
@@ -432,7 +433,7 @@ impl Render for UserCardView {
                     .child(div().flex().items_center().gap(px(6.)).child(icons::platform_icon(self.platform, 14., true)).child(name_el))
                     .when(!display.is_empty() && !login.is_empty() && display.to_lowercase() != login.to_lowercase(), |d| d.child(div().text_size(px(11.)).line_height(px(16.)).text_color(c(theme::FAINT)).child(SharedString::from(format!("@{login}"))))),
             )
-            .child(div().flex_none().h(px(20.)).w(px(4.)).window_control_area(WindowControlArea::Drag))
+            .child(div().flex_none().h(px(20.)).w(px(4.)).window_control_area(WindowControlArea::Drag).occlude())
             .child(
                 div()
                     .id("card-close")
