@@ -58,6 +58,47 @@ pub fn save(s: &WindowState) {
     }
 }
 
+// ---- user card size ---------------------------------------------------------------------
+// Once the user resizes a user card by hand, that size sticks: later cards open at it (`card.json`, kept
+// across restarts). Not in the Electron app, where every card starts at its content height.
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CardSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+const CARD_FILE: &str = "card.json";
+static CARD: std::sync::Mutex<Option<Option<CardSize>>> = std::sync::Mutex::new(None);
+
+/// The size the user last gave a card, if they ever resized one.
+pub fn card_size() -> Option<CardSize> {
+    let mut g = CARD.lock().unwrap_or_else(|e| e.into_inner());
+    *g.get_or_insert_with(|| {
+        let bytes = std::fs::read(data_dir()?.join(CARD_FILE)).ok()?;
+        let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+        serde_json::from_slice::<CardSize>(bytes).ok().filter(|s| s.width.is_finite() && s.height.is_finite() && s.width > 0.0 && s.height > 0.0)
+    })
+}
+
+pub fn set_card_size(s: CardSize) {
+    let mut g = CARD.lock().unwrap_or_else(|e| e.into_inner());
+    if *g == Some(Some(s)) {
+        return;
+    }
+    *g = Some(Some(s));
+    drop(g);
+    if !writable() {
+        return;
+    }
+    if let Some(dir) = data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(j) = serde_json::to_string_pretty(&s) {
+            let _ = std::fs::write(dir.join(CARD_FILE), j);
+        }
+    }
+}
+
 // ---- windowPlace.js ---------------------------------------------------------------------
 
 const TITLE_BAR: f32 = 28.0; // the tab bar, which is also the drag area

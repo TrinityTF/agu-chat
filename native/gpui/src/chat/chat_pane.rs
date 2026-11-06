@@ -1380,17 +1380,22 @@ impl ChatPane {
         let Some((rect, wb)) = self.last_act else { return };
         let stagger = 24.0 * (self.cards.len() % 4) as f32;
         let above = f32::from(rect.top()) > f32::from(wb.size.height) / 2.0;
+        // A card the user once resized by hand sets the size of every card after it.
+        let remembered = crate::window_state::card_size();
+        let (cw, ch) = remembered.map(|s| (s.width.max(240.0), s.height.max(super::popout::POPOUT_MIN_H))).unwrap_or((300.0, super::popout::POPOUT_H0));
         // The pop-out opens beside the name: below it, or above it in the lower half (cards run ~380px tall).
+        let up = if remembered.is_some() { ch } else { 380.0 };
         let x = f32::from(wb.origin.x) + f32::from(rect.left()) + stagger;
-        let y = f32::from(wb.origin.y) + if above { f32::from(rect.top()) - 380.0 } else { f32::from(rect.bottom()) + 4.0 } + stagger;
+        let y = f32::from(wb.origin.y) + if above { f32::from(rect.top()) - up } else { f32::from(rect.bottom()) + 4.0 } + stagger;
+        let user_sized = remembered.is_some();
         let weak = cx.entity().downgrade();
         let title = format!("{} - Agu Chat", user.name);
         let (id2, sk2) = (id.clone(), sk.clone());
         // Opened a beat later: the new window reads this pane while it builds, which it can't while we are updating it.
         cx.spawn(async move |this, cx| {
             let handle = cx.update(|cx| {
-                super::popout::open_popout(cx, &title, x, y, 300.0, move |window, cx| {
-                    cx.new(|cx| super::user_card::UserCardView::new(window, cx, weak, id2, sk2, platform, user))
+                super::popout::open_popout(cx, &title, x, y, cw, ch, move |window, cx| {
+                    cx.new(|cx| super::user_card::UserCardView::new(window, cx, weak, id2, sk2, platform, user, user_sized))
                 })
             });
             let Ok(Some(h)) = handle else { return };

@@ -12,7 +12,7 @@ pub const POPOUT_H0: f32 = 200.0;
 pub const POPOUT_MIN_H: f32 = 120.0;
 
 /// Clamp a screen position so the window sits on the display that holds the point (`availLeft`..).
-pub fn clamp_to_screen(cx: &App, x: f32, y: f32, width: f32) -> (f32, f32, Option<gpui::DisplayId>) {
+pub fn clamp_to_screen(cx: &App, x: f32, y: f32, width: f32, height: f32) -> (f32, f32, Option<gpui::DisplayId>) {
     let displays = cx.displays();
     let hit = displays.iter().find(|d| {
         let b = d.bounds();
@@ -22,18 +22,19 @@ pub fn clamp_to_screen(cx: &App, x: f32, y: f32, width: f32) -> (f32, f32, Optio
     let b = d.bounds();
     let (l, t) = (f32::from(b.origin.x), f32::from(b.origin.y));
     let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
-    (x.clamp(l, (l + w - width).max(l)), y.clamp(t, (t + h - 200.0).max(t)), Some(d.id()))
+    (x.clamp(l, (l + w - width).max(l)), y.clamp(t, (t + h - height).max(t)), Some(d.id()))
 }
 
 /// Open the window; `None` when the platform refused (the caller drops the card, like `w.open` returning null).
-pub fn open_popout<V: Render + 'static>(cx: &mut App, title: &str, x: f32, y: f32, width: f32, build: impl FnOnce(&mut Window, &mut App) -> Entity<V>) -> Option<AnyWindowHandle> {
+/// `height` is POPOUT_H0 for a card that fits its content, or the user's remembered card size.
+pub fn open_popout<V: Render + 'static>(cx: &mut App, title: &str, x: f32, y: f32, width: f32, height: f32, build: impl FnOnce(&mut Window, &mut App) -> Entity<V>) -> Option<AnyWindowHandle> {
     // the display is named: the platform only accepts bounds that lie on the display it opens the window on
-    let (x, y, display_id) = clamp_to_screen(cx, x, y, width);
+    let (x, y, display_id) = clamp_to_screen(cx, x, y, width, height);
     // A Normal window, not WindowKind::PopUp: on Windows GPUI gives pop-ups no frame style at all (style 0), so
     // they can't be resized. The Normal window gets the resizable frame (hidden, like the main window's), then
     // loses its taskbar button below so it still behaves like Electron's frameless pop-out.
     let opts = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), size(px(width), px(POPOUT_H0))))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), size(px(width), px(height))))),
         titlebar: Some(TitlebarOptions { title: Some(title.to_string().into()), appears_transparent: true, traffic_light_position: None }),
         kind: WindowKind::Normal,
         display_id,

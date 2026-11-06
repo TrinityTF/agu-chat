@@ -129,17 +129,19 @@ pub struct UserCardView {
     rules: Vec<String>,
     selected_rules: BTreeSet<String>,
     custom_in: Entity<TextInput>,
-    /// The window height we last set (`fit_height`), and whether the user resized the window by hand since:
-    /// then the card fills the window (`PopoutFill`) instead of the window following the card.
+    /// The window size we last fitted (`fit_height`), and whether the user resized the window by hand since:
+    /// then the card fills the window (`PopoutFill`) instead of the window following the card, and its size
+    /// is remembered for the next card (`window_state::card_size`).
     fitted_h: f32,
+    fitted_w: f32,
     user_sized: bool,
-    mismatches: u8,
     focus: gpui::FocusHandle,
     _subs: Vec<gpui::Subscription>,
 }
 
 impl UserCardView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, pane: WeakEntity<ChatPane>, id: String, sk: String, platform: Platform, user: CardUser) -> Self {
+    /// `user_sized`: the window opens at the user's remembered card size, so the card fills it from the start.
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, pane: WeakEntity<ChatPane>, id: String, sk: String, platform: Platform, user: CardUser, user_sized: bool) -> Self {
         let reason_in = cx.new(|cx| {
             let mut t = TextInput::new(window, cx, "Reason (optional)", InputStyle::Chat);
             t.set_max_chars(Some(500));
@@ -150,7 +152,21 @@ impl UserCardView {
             t.set_max_chars(Some(500));
             t
         });
-        let subs = vec![cx.observe(&reason_in, |_, _, cx| cx.notify()), cx.observe(&custom_in, |_, _, cx| cx.notify())];
+        let mut subs = vec![cx.observe(&reason_in, |_, _, cx| cx.notify()), cx.observe(&custom_in, |_, _, cx| cx.notify())];
+        // A size we didn't set is the user's hand: from then on the window keeps it (no more fitting, which
+        // used to snap the edge back mid-drag) and the next card opens at it.
+        subs.push(cx.observe_window_bounds(window, |this, window, cx| {
+            let s = window.bounds().size;
+            let (w, h) = (f32::from(s.width), f32::from(s.height));
+            if !this.user_sized {
+                if this.fitted_h <= 0.0 || ((h - this.fitted_h).abs() < 3.0 && (w - this.fitted_w).abs() < 3.0) {
+                    return;
+                }
+                this.user_sized = true;
+                cx.notify();
+            }
+            crate::window_state::set_card_size(crate::window_state::CardSize { width: w.round(), height: h.round() });
+        }));
         let focus = cx.focus_handle();
         window.focus(&focus);
         let mut v = UserCardView {
@@ -170,8 +186,8 @@ impl UserCardView {
             selected_rules: BTreeSet::new(),
             custom_in,
             fitted_h: 0.0,
-            user_sized: false,
-            mismatches: 0,
+            fitted_w: 0.0,
+            user_sized,
             focus,
             _subs: subs,
         };
@@ -179,8 +195,8 @@ impl UserCardView {
         v
     }
 
-    fn fit_state(&self) -> (bool, f32, u8) {
-        (self.user_sized, self.fitted_h, self.mismatches)
+    fn fit_state(&self) -> bool {
+        self.user_sized
     }
 
     fn pane_ctx(&self, cx: &gpui::App) -> Option<CardCtx> {
@@ -809,28 +825,18 @@ impl Render for UserCardView {
                             let h = f32::from(b.size.height);
                             let me = me.clone();
                             window.defer(cx, move |w, cx| {
-                                // The window's height follows the card, until the user drags the window's edge.
-                                let cur = f32::from(w.bounds().size.height);
-                                let (user_sized, fitted, mismatches) = me.read(cx).fit_state();
-                                if user_sized {
+                                // The window's height follows the card, until the user drags the window's edge
+                                // (the bounds observer in `new` notices that).
+                                if me.read(cx).fit_state() {
                                     return;
                                 }
-                                // our own resize may take a frame or two to show; a window that stays at another
-                                // height than the one we set, with the card unchanged, was resized by hand
-                                if fitted > 0.0 && (cur - fitted).abs() >= 3.0 {
-                                    if mismatches >= 4 {
-                                        me.update(cx, |this, cx| {
-                                            this.user_sized = true;
-                                            cx.notify();
-                                        });
-                                        return;
-                                    }
-                                    me.update(cx, |this, _| this.mismatches += 1);
-                                } else {
-                                    me.update(cx, |this, _| this.mismatches = 0);
-                                }
                                 let max = w.display(cx).map(|d| f32::from(d.bounds().size.height) - 40.0).unwrap_or(1000.0);
-                                me.update(cx, |this, _| this.fitted_h = h.round().clamp(super::popout::POPOUT_MIN_H, max));
+                                let cur_w = f32::from(w.bounds().size.width);
+                                // recorded before the resize, so the bounds change it causes reads as ours
+                                me.update(cx, |this, _| {
+                                    this.fitted_h = h.round().clamp(super::popout::POPOUT_MIN_H, max);
+                                    this.fitted_w = cur_w;
+                                });
                                 super::popout::fit_height(w, cx, h);
                             });
                         }
