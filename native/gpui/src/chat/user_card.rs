@@ -409,6 +409,7 @@ impl Render for UserCardView {
                     .text_color(c(theme::TEXT))
                     .hover(|s| s.underline())
                     .cursor_pointer()
+                    .occlude()
                     .child(SharedString::from(if display.is_empty() { login.clone() } else { display.clone() }))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         let _ = this.pane.update(cx, |p, _| p.open_url(&url));
@@ -424,8 +425,12 @@ impl Render for UserCardView {
             .border_b_1()
             .border_color(c(theme::LINE))
             .p(px(10.))
-            // occlude: see notebook_tabs' window buttons (a focusable ancestor would swallow the press)
-            .child(div().flex_none().window_control_area(WindowControlArea::Drag).occlude().child(Self::avatar(&avatar_src, &display)))
+            // The whole header row is the window's grab handle (`app-drag`), except the name link and the close
+            // button (`app-no-drag`, their own hitboxes block it). occlude: see notebook_tabs' window buttons (a
+            // focusable ancestor would otherwise swallow the press).
+            .window_control_area(WindowControlArea::Drag)
+            .occlude()
+            .child(div().flex_none().child(Self::avatar(&avatar_src, &display)))
             .child(
                 div()
                     .min_w_0()
@@ -433,7 +438,6 @@ impl Render for UserCardView {
                     .child(div().flex().items_center().gap(px(6.)).child(icons::platform_icon(self.platform, 14., true)).child(name_el))
                     .when(!display.is_empty() && !login.is_empty() && display.to_lowercase() != login.to_lowercase(), |d| d.child(div().text_size(px(11.)).line_height(px(16.)).text_color(c(theme::FAINT)).child(SharedString::from(format!("@{login}"))))),
             )
-            .child(div().flex_none().h(px(20.)).w(px(4.)).window_control_area(WindowControlArea::Drag).occlude())
             .child(
                 div()
                     .id("card-close")
@@ -442,9 +446,14 @@ impl Render for UserCardView {
                     .p(px(4.))
                     .text_color(c(theme::FAINT))
                     .hover(|s| s.text_color(c(theme::TEXT)))
+                    .occlude()
                     .child(icon(icons::X, 16.))
                     .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx))),
-            );
+            )
+            // the top 4px are the window's top resize edge, not the grab handle: the strip's hitbox blocks the
+            // drag area, so the platform falls through to its own top-edge resize
+            .relative()
+            .child(div().id("card-top-edge").absolute().top_0().left_0().right_0().h(px(4.)).occlude());
 
         let mut card = div()
             .id("user-card")
