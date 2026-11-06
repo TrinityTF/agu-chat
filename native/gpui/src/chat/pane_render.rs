@@ -680,9 +680,78 @@ impl ChatPane {
         )
     }
 
-    fn scrollbar(&self) -> Option<AnyElement> {
+    /// The `overflow-y: auto` scrollbar: drag the thumb, or press the track to page (Chromium pages by
+    /// most of a viewport toward the press).
+    fn scrollbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (top, h) = self.list_state.thumb()?;
-        Some(div().absolute().right_0().top(px(top)).w(px(8.)).h(px(h)).rounded(px(4.)).bg(c(theme::SCROLLBAR_THUMB)).into_any_element())
+        let thumb = div()
+            .id("sb-thumb")
+            .absolute()
+            .right_0()
+            .top(px(top))
+            .w(px(8.))
+            .h(px(h))
+            .rounded(px(4.))
+            .bg(c(theme::SCROLLBAR_THUMB))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                cx.stop_propagation();
+                this.sb_drag = Some((ev.position.y.f(), top));
+                cx.notify();
+            }));
+        let track = div()
+            .id("sb-track")
+            .absolute()
+            .right_0()
+            .top_0()
+            .w(px(8.))
+            .h_full()
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                let (track_top, vh) = this.list_state.track();
+                let page = (vh * 0.875).max(40.0);
+                let y = ev.position.y.f() - track_top;
+                this.list_state.scroll_by(if y < top { -page } else { page });
+                cx.notify();
+            }));
+        let mut el = div().absolute().right_0().top_0().w(px(8.)).h_full().child(track).child(thumb);
+        // while dragging, follow the pointer anywhere in the window until the button is released
+        if self.sb_drag.is_some() {
+            let this = cx.entity().downgrade();
+            el = el.child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let this2 = this.clone();
+                        window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, _w, cx| {
+                            if phase != gpui::DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = this2.update(cx, |p, cx| {
+                                if let Some((y0, t0)) = p.sb_drag {
+                                    if ev.pressed_button != Some(gpui::MouseButton::Left) {
+                                        p.sb_drag = None;
+                                    } else {
+                                        p.list_state.scroll_to_thumb(t0 + ev.position.y.f() - y0);
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        });
+                        let this3 = this.clone();
+                        window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _w, cx| {
+                            if phase == gpui::DispatchPhase::Capture {
+                                let _ = this3.update(cx, |p, cx| {
+                                    p.sb_drag = None;
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_0(),
+            );
+        }
+        Some(el.into_any_element())
     }
 
     fn toasts_el(&self) -> Option<AnyElement> {
@@ -977,7 +1046,7 @@ chat_list(
             }))
             .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(list_el))
             .when(overflow, |d| d.child(div().flex_none().w(px(8.)).h_full()))
-            .children(self.scrollbar())
+            .children(self.scrollbar(cx))
             .children(self.pill(cx));
 
         let message_list = div().relative().flex().flex_col().flex_1().min_h_0().children(self.search_bar(cx)).child(list_area);

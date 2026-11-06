@@ -36,6 +36,9 @@ struct Inner {
     dist_to_bottom: f32,
     placed: Vec<(usize, f32, ItemMetrics)>,
     thumb: Option<(f32, f32)>,
+    /// estimated content height (scrollbar), and the list's top edge in window coordinates
+    total: f32,
+    origin_y: f32,
 }
 
 #[derive(Clone)]
@@ -43,7 +46,7 @@ pub struct ChatListState(Rc<RefCell<Inner>>);
 
 impl ChatListState {
     pub fn new() -> Self {
-        ChatListState(Rc::new(RefCell::new(Inner { items: Vec::new(), anchor: None, vp: (0.0, 0.0), dist_to_bottom: 0.0, placed: Vec::new(), thumb: None })))
+        ChatListState(Rc::new(RefCell::new(Inner { items: Vec::new(), anchor: None, vp: (0.0, 0.0), dist_to_bottom: 0.0, placed: Vec::new(), thumb: None, total: 0.0, origin_y: 0.0 })))
     }
 
     pub fn item_count(&self) -> usize {
@@ -166,6 +169,59 @@ impl ChatListState {
             }
         }
         s.anchor = Some((ix, off));
+        // The pane decides "back at the bottom, follow again" from dist_to_bottom BEFORE the next prepaint
+        // re-measures it; left stale (0 while following) it snapped every wheel-up straight back down.
+        if s.dist_to_bottom != f32::MAX {
+            s.dist_to_bottom = (s.dist_to_bottom - d).max(0.0);
+        }
+    }
+
+    /// The scrollbar's window-space track: (top, height), plus the thumb (top, height) inside it.
+    pub fn track(&self) -> (f32, f32) {
+        let s = self.0.borrow();
+        (s.origin_y, s.vp.1)
+    }
+
+    /// Put the scrollbar thumb's top at `thumb_top` px (inside the track): the scrollbar drag.
+    pub fn scroll_to_thumb(&self, thumb_top: f32) {
+        let (vh, total, thumb_h) = {
+            let s = self.0.borrow();
+            match s.thumb {
+                Some((_, h)) => (s.vp.1, s.total, h),
+                None => return,
+            }
+        };
+        let room = (vh - thumb_h).max(1.0);
+        let top = (thumb_top.clamp(0.0, room) / room) * (total - vh).max(0.0);
+        self.scroll_to_top(top, total - vh);
+    }
+
+    /// Scroll so the content `top` px down (estimated heights for unmeasured rows) is at the viewport top.
+    fn scroll_to_top(&self, top: f32, max_top: f32) {
+        let mut s = self.0.borrow_mut();
+        let n = s.items.len();
+        if n == 0 {
+            return;
+        }
+        if top >= max_top - 0.5 {
+            s.anchor = None;
+            s.dist_to_bottom = 0.0;
+            return;
+        }
+        let known: Vec<f32> = s.items.iter().filter_map(|m| m.map(|m| m.h + m.mb.max(m.mt))).collect();
+        let avg = if known.is_empty() { 20.0 } else { known.iter().sum::<f32>() / known.len() as f32 };
+        let mut y = PAD;
+        let mut anchor = (n - 1, 0.0);
+        for (i, m) in s.items.iter().enumerate() {
+            let step = m.map(|m| m.h + m.mb.max(m.mt)).unwrap_or(avg);
+            if y + step > top {
+                anchor = (i, top - y);
+                break;
+            }
+            y += step;
+        }
+        s.anchor = Some(anchor);
+        s.dist_to_bottom = (max_top - top).max(0.0);
     }
 }
 
@@ -245,6 +301,7 @@ impl Element for ChatList {
                 }
             }
             s.vp = (w, vh);
+            s.origin_y = bounds.origin.y.f();
         }
         let n = self.state.item_count();
         let mut placed: Vec<(usize, f32, ItemMetrics)> = Vec::new();
@@ -336,10 +393,11 @@ impl Element for ChatList {
                 break;
             }
             // scrollbar: estimates from the heights known so far
-            let s = self.state.0.borrow();
+            let mut s = self.state.0.borrow_mut();
             let known: Vec<f32> = s.items.iter().filter_map(|m| m.map(|m| m.h + m.mb.max(m.mt))).collect();
             let avg = if known.is_empty() { 20.0 } else { known.iter().sum::<f32>() / known.len() as f32 };
             let total: f32 = PAD * 2.0 + s.items.iter().map(|m| m.map(|m| m.h + m.mb.max(m.mt)).unwrap_or(avg)).sum::<f32>();
+            s.total = total;
             if total > vh + 0.5 {
                 let first = placed.first().map(|(i, y, _)| (*i, *y)).unwrap_or((0, 0.0));
                 let before: f32 = PAD + s.items[..first.0].iter().map(|m| m.map(|m| m.h + m.mb.max(m.mt)).unwrap_or(avg)).sum::<f32>();

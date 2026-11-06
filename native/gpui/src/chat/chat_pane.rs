@@ -139,6 +139,8 @@ pub struct ChatPane {
     // derived row list
     pub(super) shown: Vec<ShownRow>,
     pub(super) list_state: ChatListState,
+    /// scrollbar thumb drag in progress: (pointer y at press, thumb top at press), window px
+    pub(super) sb_drag: Option<(f32, f32)>,
     /// bumped whenever what a built row depends on changes
     pub(super) gen: u64,
     pub(super) highlighter: Highlighter,
@@ -359,6 +361,7 @@ impl ChatPane {
             store,
             shown: Vec::new(),
             list_state: ChatListState::new(),
+            sb_drag: None,
             gen: 1,
             twitch: HashMap::new(),
             envs: HashMap::new(),
