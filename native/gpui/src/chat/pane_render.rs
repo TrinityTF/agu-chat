@@ -655,40 +655,22 @@ impl ChatPane {
         Some(col.into_any_element())
     }
 
-    /// The logged-out `SendBox`: a disabled input bar (the input itself is a later round).
-    fn send_box(&self, cx: &mut Context<Self>) -> AnyElement {
-        use agu_chat_core::protocol::Platform as P;
-        let sendable: Vec<&super::store::SourceState> = self
-            .store
-            .sources
-            .iter()
-            .filter(|s| matches!(s.source.platform, P::Twitch | P::Rumble | P::Kick) && s.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false))
-            .collect();
-        let placeholder = if sendable.is_empty() {
-            if let Some(r) = self.store.sources.iter().find_map(|s| s.conn.as_ref().and_then(|c| c.read_only_reason.clone()).filter(|r| !r.is_empty())) {
-                r
-            } else if self.store.sources.iter().any(|s| s.conn.as_ref().map(|c| c.state == "connecting").unwrap_or(true)) {
-                "Connecting...".to_string()
-            } else {
-                "Chat is read-only".to_string()
-            }
-        } else if let Some(r) = &self.reply_target {
-            format!("Reply to @{}", r.user)
-        } else if sendable.len() > 1 {
-            format!("Send to {}", sendable.iter().map(|s| crate::icons::platform_label(s.source.platform)).collect::<Vec<_>>().join(" + "))
-        } else {
-            let s = sendable[0];
-            format!("Message {}{}", if s.source.platform == P::Twitch { "#" } else { "" }, s.source.channel)
-        };
-        let mut root = div().flex_none().border_t_1().border_color(c(theme::LINE)).bg(c(theme::RAISED));
+    /// The send box: the pane's own (Rumble / Kick ban) confirm bar over the `SendBox` entity.
+    fn send_box(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use super::input::send_box::SendBox;
+        let weak = cx.entity().downgrade();
+        let sb = self.send_box.get_or_insert_with(|| cx.new(|cx| SendBox::new(window, cx, weak))).clone();
+        let (sources, focused, reply) = (self.send_sources(), self.focused, self.reply_target.clone());
+        sb.update(cx, |b, cx| b.set_props(sources, focused, reply, window, cx));
+        let mut root = div().flex_none();
         if let Some(cf) = &self.confirm {
             root = root.child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .border_b_1()
-                    .border_color(token_a(theme::RED_500, 0.3))
+                    .border_t_1()
+                    .border_color(c(theme::LINE))
                     .bg(token_a(theme::RED_500, 0.1))
                     .px(px(8.))
                     .py(px(4.))
@@ -696,112 +678,14 @@ impl ChatPane {
                     .line_height(px(16.))
                     .text_color(c(theme::RED_300))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(cf.text.clone())))
-                    .child(
-                        div()
-                            .id("confirm-yes")
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(token_a(theme::RED_500, 0.4))
-                            .bg(token_a(theme::RED_500, 0.1))
-                            .px(px(10.))
-                            .py(px(4.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .hover(|s| s.bg(token_a(theme::RED_500, 0.2)))
-                            .child("Confirm")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.confirm_yes(cx))),
-                    )
-                    .child(
-                        div()
-                            .id("confirm-no")
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(c(theme::LINE))
-                            .px(px(10.))
-                            .py(px(4.))
-                            .text_color(c(theme::MUTED))
-                            .hover(|s| s.border_color(token_a(theme::WHITE, 0.25)).text_color(c(theme::TEXT)))
-                            .child("Cancel")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                this.confirm = None;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(crate::layout::ui::btn("pc-yes", "Confirm", crate::layout::ui::BtnOpts::danger()).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.confirm_yes(cx))))
+                    .child(crate::layout::ui::btn("pc-no", "Cancel", Default::default()).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.confirm = None;
+                        cx.notify();
+                    }))),
             );
         }
-        if let Some(r) = &self.reply_target {
-            root = root.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .border_b_1()
-                    .border_color(c(theme::LINE))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(c(theme::MUTED))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(format!("↩ Replying to @{}: {}", r.user, r.text))))
-                    .child(
-                        div()
-                            .id("reply-x")
-                            .flex_none()
-                            .rounded(px(2.))
-                            .p(px(2.))
-                            .hover(|s| s.text_color(c(theme::TEXT)))
-                            .child(icon(icons::X, 14.0))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                this.reply_target = None;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
-        root.child(
-            div()
-                .flex()
-                .items_end()
-                .gap(px(6.))
-                .p(px(6.))
-                .child(div().flex_none().rounded(px(4.)).border_1().border_color(c(theme::LINE)).p(px(6.)).text_color(c(theme::MUTED)).opacity(0.4).child(icon(icons::SMILE, 16.0)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(c(theme::LINE))
-                        .bg(c(theme::PANEL))
-                        .h(px(30.))
-                        .px(px(8.))
-                        .py(px(6.))
-                        .text_size(px(13.))
-                        .line_height(px(16.))
-                        .text_color(c(theme::FAINT))
-                        .opacity(0.6)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(SharedString::from(placeholder)),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .h(px(30.))
-                        .rounded(px(4.))
-                        .bg(c(theme::ACCENT))
-                        .px(px(10.))
-                        .py(px(4.))
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(c(theme::WHITE))
-                        .opacity(0.4)
-                        .child("Send"),
-                ),
-        )
-        .into_any_element()
+        root.child(sb).into_any_element()
     }
 
     fn tip_el(&self, window: &Window) -> Option<AnyElement> {
@@ -916,7 +800,7 @@ chat_list(
             .children(cards)
             .child(message_list)
             .children(self.toasts_el())
-            .child(self.send_box(cx))
+            .child(self.send_box(window, cx))
             .children(self.tip_el(window))
     }
 }

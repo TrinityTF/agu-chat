@@ -143,6 +143,10 @@ pub struct ChatPane {
     pub(super) hover_bar: Option<String>,
     pin_tick: Option<gpui::Task<()>>,
     pub(super) reply_target: Option<ReplyTarget>,
+    pub(super) send_box: Option<Entity<super::input::send_box::SendBox>>,
+    /// the acting account's 7TV personal emote set (picker / autocomplete)
+    pub(super) personal: Vec<Arc<super::twitch::emotes::ProviderEmote>>,
+    pub(super) inv_cache: RefCell<HashMap<String, (u64, Arc<super::input::inventory::Inventory>)>>,
     pub(super) hidden_pins: Vec<String>,
     pub(super) pin_open: HashSet<String>,
     pub(super) pin_menu: Option<(String, bool)>,
@@ -335,6 +339,9 @@ impl ChatPane {
             hover_bar: None,
             pin_tick: None,
             reply_target: None,
+            send_box: None,
+            personal: Vec::new(),
+            inv_cache: RefCell::new(HashMap::new()),
             hidden_pins,
             pin_open: HashSet::new(),
             pin_menu: None,
@@ -423,6 +430,7 @@ impl ChatPane {
     fn start_loads(&mut self, cx: &mut Context<Self>) {
         let sks: Vec<(String, SourceRef, Option<String>)> = self.store.sources.iter().map(|s| (s.sk.clone(), s.source.clone(), s.channel_id.clone())).collect();
         let acct = format!("{}:{}", self.accounts.get(&Platform::Twitch).map(|a| a.connected).unwrap_or(false), self.me_id());
+        self.load_personal(cx);
         for (sk, source, channel_id) in sks {
             match source.platform {
                 Platform::Twitch => {
@@ -447,6 +455,17 @@ impl ChatPane {
                             let caps = fetch_mod_caps(&bridge, &s2).await;
                             let _ = this.update(cx, |p, cx| {
                                 p.twitch.entry(sk2).or_default().caps = caps;
+                                p.data_changed(cx);
+                            });
+                        })
+                        .detach();
+                    }
+                    if self.requested.insert(format!("pickeremotes:{sk}:{}", channel_id.clone().unwrap_or_default())) {
+                        let (bridge, s2, sk2, cid) = (self.bridge.clone(), source.clone(), sk.clone(), channel_id.clone().unwrap_or_else(|| sk.clone()));
+                        cx.spawn(async move |this, cx| {
+                            let r = super::twitch::emotes::fetch_twitch_picker_emotes(&bridge, &s2, &cid).await;
+                            let _ = this.update(cx, |p, cx| {
+                                p.twitch.entry(sk2).or_default().twitch_emotes = r;
                                 p.data_changed(cx);
                             });
                         })
@@ -487,6 +506,106 @@ impl ChatPane {
                 _ => {}
             }
         }
+    }
+
+    /// The acting account's 7TV personal set, loaded once per account.
+    fn load_personal(&mut self, cx: &mut Context<Self>) {
+        let id = self.me_id();
+        if id.is_empty() || !self.requested.insert(format!("personal:{id}")) {
+            return;
+        }
+        let task = self.svc.net.run({
+            let client = self.svc.net.client.clone();
+            async move { super::twitch::emotes::fetch_seven_tv_personal(&client, &id).await }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some(list) = task.await {
+                let _ = this.update(cx, |p, cx| {
+                    p.personal = list;
+                    p.data_changed(cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Display names newest-first for the given source keys (read lazily: only when "@" or Tab is used).
+    pub(super) fn chatters(&self, sks: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in self.store.rows().iter().rev() {
+            if !sks.contains(&r.sk) {
+                continue;
+            }
+            let n = match &r.body {
+                RowBody::Msg(m) => &m.user.name,
+                RowBody::Rumble(m) => &m.user.name,
+                RowBody::Kick(m) => &m.user.name,
+                RowBody::YouTube(m) => &m.user.name,
+                RowBody::X(m) => &m.user.name,
+                _ => continue,
+            };
+            if !n.is_empty() {
+                out.push(n.clone());
+            }
+            if out.len() >= 1000 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// (newest message id, pinned message id) of a source.
+    pub(super) fn message_ids(&self, sk: &str) -> (Option<String>, Option<String>) {
+        let last = self.store.rows().iter().rev().find_map(|r| match &r.body {
+            RowBody::Msg(m) if r.sk == sk => Some(m.id.clone()),
+            _ => None,
+        });
+        (last, self.store.source(sk).and_then(|s| s.pinned.as_ref().map(|p| p.id.clone())))
+    }
+
+    /// The send box view of each source: can it post, caps, and its emote inventory (cached per data generation).
+    pub(super) fn send_sources(&self) -> Vec<super::input::send_box::SendSource> {
+        use super::input::inventory::*;
+        let rs = &self.settings;
+        let mut out = Vec::new();
+        for st in &self.store.sources {
+            let conn = st.conn.as_ref();
+            let inv = {
+                let mut cache = self.inv_cache.borrow_mut();
+                match cache.get(&st.sk) {
+                    Some((g, i)) if *g == self.gen => i.clone(),
+                    _ => {
+                        let i = Arc::new(match st.source.platform {
+                            Platform::Twitch => {
+                                let d = self.twitch.get(&st.sk).cloned().unwrap_or_default();
+                                let empty = ProviderScopedMap::default();
+                                let sets = d.provider_sets.as_ref().map(|ps| ProviderSets {
+                                    seven: if rs.seven_tv { ps.seven.clone() } else { empty.clone() },
+                                    bttv: if rs.bttv { ps.bttv.clone() } else { empty.clone() },
+                                    ffz: if rs.ffz { ps.ffz.clone() } else { empty.clone() },
+                                });
+                                build_twitch_inventory(sets.as_ref(), &d.twitch_emotes, &self.personal)
+                            }
+                            Platform::Rumble => build_rumble_inventory(&st.rumble_emotes),
+                            Platform::Kick => build_kick_inventory(&st.kick_emotes),
+                            _ => Inventory::default(),
+                        });
+                        cache.insert(st.sk.clone(), (self.gen, i.clone()));
+                        i
+                    }
+                }
+            };
+            out.push(super::input::send_box::SendSource {
+                sk: st.sk.clone(),
+                source: st.source.clone(),
+                can_send: conn.and_then(|c| c.can_send).unwrap_or(false),
+                read_only_reason: conn.and_then(|c| c.read_only_reason.clone()),
+                pending: conn.map(|c| c.state == "connecting").unwrap_or(true),
+                caps: self.twitch.get(&st.sk).map(|d| d.caps.clone()).unwrap_or_default(),
+                inventory: inv,
+            });
+        }
+        out
     }
 
     fn data_changed(&mut self, cx: &mut Context<Self>) {

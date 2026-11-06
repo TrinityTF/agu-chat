@@ -884,3 +884,8 @@ fn atom_rect(content: &InlineContent, laid: &Laid, p: &Placed, origin: Point<Pix
 
 #[allow(dead_code)]
 fn _unused(_: AnyElement, _: Size<Pixels>) {}
+
+/// `tracking-wide` (letter-spacing 0.025em) is applied in the flow text shaping; plain strings pass through.
+pub fn tracked(s: &str) -> String {
+    s.to_string()
+}

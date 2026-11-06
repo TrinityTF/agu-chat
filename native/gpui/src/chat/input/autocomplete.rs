@@ -326,20 +326,9 @@ pub fn autocomplete_dropdown(state: &AutoState, on_pick: impl Fn(usize, &mut gpu
     let is_cmd = state.mode == AutoMode::Cmd;
     let mut panel = div()
         .id("auto-dd")
-        .absolute()
-        .bottom(relative(1.))
-        .left_0()
-        .mb(px(4.))
         .max_h(px(224.))
-        .w(px(288.))
         .overflow_y_scroll()
-        .occlude()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(c(theme::LINE))
-        .bg(c(theme::RAISED))
         .py(px(4.))
-        .shadow_2xl()
         .text_size(px(12.))
         .line_height(px(16.));
     for (i, m) in state.matches.iter().enumerate() {
@@ -379,27 +368,29 @@ pub fn autocomplete_dropdown(state: &AutoState, on_pick: impl Fn(usize, &mut gpu
         }
         panel = panel.child(row);
     }
-    panel.into_any_element()
+    div()
+        .absolute()
+        .bottom(relative(1.))
+        .left_0()
+        .mb(px(4.))
+        .w(px(288.))
+        .occlude()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(c(theme::LINE))
+        .bg(c(theme::RAISED))
+        .shadow_2xl()
+        .child(panel)
+        .into_any_element()
 }
 
 /// `MentionDropdown`: like the above, w-56, an "@" then the name.
 pub fn mention_dropdown(state: &MentionState, on_pick: impl Fn(usize, &mut gpui::Window, &mut gpui::App) + Clone + 'static) -> AnyElement {
     let mut panel = div()
         .id("mention-dd")
-        .absolute()
-        .bottom(relative(1.))
-        .left_0()
-        .mb(px(4.))
         .max_h(px(224.))
-        .w(px(224.))
         .overflow_y_scroll()
-        .occlude()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(c(theme::LINE))
-        .bg(c(theme::RAISED))
         .py(px(4.))
-        .shadow_2xl()
         .text_size(px(12.))
         .line_height(px(16.));
     for (i, name) in state.matches.iter().enumerate() {
@@ -425,7 +416,20 @@ pub fn mention_dropdown(state: &MentionState, on_pick: impl Fn(usize, &mut gpui:
                 .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(name.clone()))),
         );
     }
-    panel.into_any_element()
+    div()
+        .absolute()
+        .bottom(relative(1.))
+        .left_0()
+        .mb(px(4.))
+        .w(px(224.))
+        .occlude()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(c(theme::LINE))
+        .bg(c(theme::RAISED))
+        .shadow_2xl()
+        .child(panel)
+        .into_any_element()
 }
 
 #[cfg(test)]
