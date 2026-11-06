@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use crate::layout::channel_dialog::{ChannelDialog, DialogEvent};
+use crate::layout::settings_dialog::{Section, SettingsDialog};
 use crate::chat::chat_pane::{Activity, ChatPane, PaneEvent};
 use crate::layout::hotkeys::{
     binding_map, event_to_binding, resolve_hotkeys, HotkeyAction, HotkeyTable, KeyLike, HOTKEY_RECORDING,
@@ -97,7 +98,7 @@ pub struct PaneSlot {
 }
 
 /// Runs the backend's unsubscribe when dropped.
-struct Unsub(Option<Unsubscribe>);
+pub(crate) struct Unsub(Option<Unsubscribe>);
 impl Drop for Unsub {
     fn drop(&mut self) {
         if let Some(u) = self.0.take() {
@@ -107,7 +108,7 @@ impl Drop for Unsub {
 }
 
 /// Bridge callbacks fire on backend threads: forward them through a channel the UI task reads.
-fn stream<T: Clone + Send + 'static>(register: impl FnOnce(Arc<dyn Fn(&T) + Send + Sync>) -> Unsubscribe) -> (UnboundedReceiver<T>, Unsub) {
+pub(crate) fn stream<T: Clone + Send + 'static>(register: impl FnOnce(Arc<dyn Fn(&T) + Send + Sync>) -> Unsubscribe) -> (UnboundedReceiver<T>, Unsub) {
     let (tx, rx) = unbounded::<T>();
     let unsub = register(Arc::new(move |v: &T| {
         let _ = tx.unbounded_send(v.clone());
@@ -121,6 +122,7 @@ pub struct AguApp {
     pub focus_by_tab: HashMap<String, String>,
     pub dialog: Option<Dialog>,
     pub dialog_view: Option<(Entity<ChannelDialog>, Subscription)>,
+    pub settings_view: Option<(Entity<SettingsDialog>, Subscription)>,
     /// a tab being dragged from the tab bar
     pub tab_drag: Option<String>,
     /// Tabs that got live chat while not selected.
@@ -173,6 +175,7 @@ impl AguApp {
             focus_by_tab: HashMap::new(),
             dialog: None,
             dialog_view: None,
+            settings_view: None,
             tab_drag: None,
             unread: HashMap::new(),
             updater,
@@ -248,7 +251,7 @@ impl AguApp {
             "dialog" => self.open_dialog(Dialog::Split { tab_id: tab.id, leaf_id: leaf, below: false }, window, cx),
             "change" => self.open_dialog(Dialog::Change { tab_id: tab.id, leaf_id: leaf }, window, cx),
             "confirm" => self.open_dialog(Dialog::CloseTab { tab_id: tab.id, others: false }, window, cx),
-            "settings" => self.open_dialog(Dialog::Settings, window, cx),
+            s if s == "settings" || s.starts_with("settings:") => self.open_dialog(Dialog::Settings, window, cx),
             "menu" => {
                 let entries = self.split_menu_entries(&tab.id, &leaf);
                 self.menu = Some(MenuState { key: "demo".into(), pos: gpui::point(px(560.), px(54.)), align_right: true, entries, anchor: None });
@@ -616,11 +619,26 @@ impl AguApp {
     pub fn close_dialog(&mut self, cx: &mut Context<Self>) {
         self.dialog = None;
         self.dialog_view = None;
+        self.settings_view = None;
         cx.notify();
     }
 
     pub fn open_dialog(&mut self, dialog: Dialog, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        if dialog == Dialog::Settings {
+            // AGU_SHOT=settings:<section> opens that page (screenshots)
+            let section = std::env::var("AGU_SHOT").ok().and_then(|v| v.strip_prefix("settings:").and_then(|n| Section::from_name(n))).unwrap_or(Section::Accounts);
+            let bridge = self.bridge.clone();
+            let view = cx.new(|cx| SettingsDialog::new(bridge, section, window, cx));
+            let sub = cx.subscribe_in(&view, window, |this, _v, _ev: &DialogEvent, window, cx| {
+                this.close_dialog(cx);
+                window.focus(&this.focus);
+            });
+            self.dialog = Some(dialog);
+            self.settings_view = Some((view, sub));
+            cx.notify();
+            return;
+        }
         let (title, initial, label) = match &dialog {
             Dialog::Add { .. } => ("Select channel".to_string(), vec![], "Add channel"),
             Dialog::Change { tab_id, leaf_id } => {
@@ -843,11 +861,7 @@ impl AguApp {
     fn render_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.dialog.clone()?;
         match dialog {
-            Dialog::Settings => {
-                // Placeholder: the settings dialog is ported in round 3.
-                let body = div().p(px(12.)).text_size(px(12.)).text_color(c(theme::MUTED)).child("Settings arrive in a later round of the port.");
-                Some(modal("Settings", 520., self.close_fn(cx), body, None))
-            }
+            Dialog::Settings => self.settings_view.as_ref().map(|(v, _)| v.clone().into_any_element()),
             Dialog::CloseTab { tab_id, others } => {
                 let tab = self.layout.tabs.iter().find(|t| t.id == tab_id).cloned();
                 let n_others = if others { self.layout.tabs.iter().filter(|t| t.id != tab_id).count() } else { 0 };
@@ -942,7 +956,7 @@ impl AguApp {
 }
 
 /// Builds the DOM-style event `eventToBinding` expects from a GPUI keystroke.
-fn key_like(ks: &Keystroke) -> KeyLike {
+pub(crate) fn key_like(ks: &Keystroke) -> KeyLike {
     let k = ks.key.as_str();
     let mut chars = k.chars();
     let code = match (chars.next(), chars.next()) {

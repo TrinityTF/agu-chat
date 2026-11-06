@@ -105,6 +105,7 @@ impl Images {
 
     /// Frame index to paint now, and note when the next change is due.
     pub fn frame(&self, img: &GpuImg, window: &mut Window, cx: &mut App) -> usize {
+        self.free_evicted(window);
         let freeze = !self.animate.get() || self.cache.borrow().freeze;
         let t = self.cache.borrow().now_ms();
         let (idx, next_ms) = img.frame_at(t, freeze);
@@ -113,6 +114,14 @@ impl Images {
             self.schedule(next_ms, window, cx);
         }
         idx
+    }
+
+    /// Frees the atlas tiles of images the cache evicted (their CPU buffers go with the last Arc).
+    pub fn free_evicted(&self, window: &mut Window) {
+        let gone = self.cache.borrow_mut().take_evicted();
+        for img in gone {
+            window.drop_image(img.gpu.clone()).ok();
+        }
     }
 
     fn schedule(&self, ms: u32, window: &mut Window, cx: &mut App) {

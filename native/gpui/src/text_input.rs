@@ -41,6 +41,8 @@ pub enum InputStyle {
     Field,
     /// the tab rename box: w-32 rounded-sm border border-accent bg-app px-1 text-[12px]
     Rename,
+    /// settings: `px-1.5 py-0.5 text-[11px]` (a small field beside other controls)
+    Small,
     /// chat search box: min-w-0 flex-1 bg-transparent text-xs, no border or outline
     Bare,
 }
@@ -65,6 +67,12 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// password field: the text shows as bullets
+    masked: bool,
+    /// red border (a value the field's owner would reject)
+    invalid: bool,
+    /// `font-mono`
+    mono: bool,
     _blur: gpui::Subscription,
 }
 
@@ -83,6 +91,9 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            masked: false,
+            invalid: false,
+            mono: false,
             _blur: blur,
         }
     }
@@ -99,8 +110,30 @@ impl TextInput {
     }
 
     pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
+        if self.placeholder.as_ref() == placeholder {
+            return;
+        }
         self.placeholder = placeholder.to_string().into();
         cx.notify();
+    }
+
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid != invalid {
+            self.invalid = invalid;
+            cx.notify();
+        }
+    }
+
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    pub fn set_mono(&mut self, mono: bool) {
+        self.mono = mono;
+    }
+
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
     }
 
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
@@ -247,7 +280,11 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        let i = line.closest_index_for_x(position.x - bounds.left());
+        if self.masked {
+            return self.content.char_indices().nth(i / 3).map(|(b, _)| b).unwrap_or(self.content.len());
+        }
+        i
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -413,10 +450,18 @@ impl gpui::Element for TextElement {
         let cursor = input.cursor_offset();
         let style = window.text_style();
 
-        let (display_text, text_color) = if content.is_empty() { (input.placeholder.clone(), c(theme::FAINT).into()) } else { (content, style.color) };
+        let masked = input.masked && !content.is_empty();
+        let map = |i: usize| if masked { content[..i.min(content.len())].chars().count() * 3 } else { i };
+        let (display_text, text_color) = if content.is_empty() {
+            (input.placeholder.clone(), c(theme::FAINT).into())
+        } else if masked {
+            (SharedString::from("\u{2022}".repeat(content.chars().count())), style.color)
+        } else {
+            (content.clone(), style.color)
+        };
 
         let run = TextRun { len: display_text.len(), font: style.font(), color: text_color, background_color: None, underline: None, strikethrough: None };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let (false, Some(marked_range)) = (masked, input.marked_range.as_ref()) {
             vec![
                 TextRun { len: marked_range.start, ..run.clone() },
                 TextRun { len: marked_range.end - marked_range.start, underline: Some(UnderlineStyle { color: Some(run.color), thickness: px(1.0), wavy: false }), ..run.clone() },
@@ -432,7 +477,7 @@ impl gpui::Element for TextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
 
-        let cursor_pos = line.x_for_index(cursor);
+        let cursor_pos = line.x_for_index(map(cursor));
         let (selection, cursor) = if selected_range.is_empty() {
             // The caret is the text colour, 1px wide, like Chromium's.
             (None, Some(fill(Bounds::new(point(bounds.left() + cursor_pos, bounds.top()), size(px(1.), bounds.bottom() - bounds.top())), c(theme::TEXT))))
@@ -440,8 +485,8 @@ impl gpui::Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(bounds.left() + line.x_for_index(map(selected_range.start)), bounds.top()),
+                        point(bounds.left() + line.x_for_index(map(selected_range.end)), bounds.bottom()),
                     ),
                     a(theme::ACCENT, 0.45),
                 )),
@@ -503,10 +548,12 @@ impl Render for TextInput {
             .text_color(c(theme::TEXT))
             .text_size(px(12.))
             .line_height(px(18.))
-            .overflow_hidden();
+            .overflow_hidden()
+            .when(self.mono, |d| d.font_family("Consolas"));
         let child = div().w_full().min_w_0().child(TextElement { input: cx.entity() });
         match self.style {
-            InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(c(if focused { theme::ACCENT } else { theme::LINE })).child(child),
+            InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(if self.invalid { a(theme::RED_500, 0.7) } else { c(if focused { theme::ACCENT } else { theme::LINE }) }).child(child),
+            InputStyle::Small => base.w_full().rounded(px(4.)).px(px(6.)).py(px(2.)).text_size(px(11.)).line_height(px(16.)).border_color(if self.invalid { a(theme::RED_500, 0.7) } else { c(if focused { theme::ACCENT } else { theme::LINE }) }).child(child),
             InputStyle::Bare => base.flex_1().min_w_0().bg(gpui::transparent_black()).border_0().line_height(px(16.)).child(child),
             InputStyle::Rename => base.w(px(128.)).rounded(px(2.)).px(px(4.)).border_color(c(theme::ACCENT)).child(child),
         }
