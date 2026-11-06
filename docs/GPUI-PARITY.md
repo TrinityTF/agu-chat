@@ -40,7 +40,7 @@ draws text with ClearType (colour fringes) where GPUI draws grey-scale anti-alia
 | Window placement | fixed | bounds on a second monitor opened on the primary one (GPUI needs the display id) |
 | Hover transitions (150 ms colour fades, toggle knob slide, chevron rotate) | differs | GPUI has no CSS transitions; states switch instantly |
 | Smooth scrolling | differs | Chromium animates wheel steps (~150 ms); the list jumps |
-| 7TV name paints | matches | gradients, repeating/radial, image paints (`background-size: cover`) and the stacked drop-shadow glows are drawn like the CSS: the name is rasterised with DirectWrite/Direct2D, filled with the CSS gradient geometry and shadowed (`chat/paint_text.rs`). Image paints show their first frame only; the /me message body of a painted chatter still uses per-glyph colours |
+| 7TV name paints | matches | gradients, repeating/radial, image paints (stretched `100% 100%` like the 7TV extension, animated webp/gif follow the animation setting), `shape: ellipse` radials and the stacked drop-shadow glows are drawn like the CSS: the name is rasterised with DirectWrite/Direct2D, filled with the CSS gradient geometry and shadowed (`chat/paint_text.rs`). the /me message body of a painted chatter still uses per-glyph colours |
 | Row text baseline (`TEXT_DY` = -1) | differs by <= 1 px | checked at 10, 13, 16 and 20 px: text sits 1 px higher inside its row than Chromium's at every size (icons and backgrounds are right), so the constant is size independent; left as is because a 1 px shift of every row would need the list's pixel snapping reworked |
 | Native `<select>` open popup, OS colour picker | differs | deliberate (own list / palette) |
 

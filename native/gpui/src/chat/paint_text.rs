@@ -14,6 +14,7 @@
 //! only the glyph mask needs Windows.
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::RenderImage;
@@ -55,6 +56,16 @@ pub fn radial_t(w: f32, h: f32, x: f32, y: f32) -> f32 {
         return 0.0;
     }
     ((x - w / 2.0).hypot(y - h / 2.0)) / r
+}
+
+/// `radial-gradient(ellipse, ...)` (7TV's `shape: "ellipse"`, e.g. "Heavy Rain"): centred, `farthest-corner`; the
+/// ellipse keeps the box's aspect ratio, so its radii are the half sides times sqrt 2.
+pub fn ellipse_t(w: f32, h: f32, x: f32, y: f32) -> f32 {
+    let (rx, ry) = (w / 2.0 * std::f32::consts::SQRT_2, h / 2.0 * std::f32::consts::SQRT_2);
+    if rx <= 0.0 || ry <= 0.0 {
+        return 0.0;
+    }
+    (((x - w / 2.0) / rx).powi(2) + ((y - h / 2.0) / ry).powi(2)).sqrt()
 }
 
 /// CSS colour-stop fix-up: a stop positioned before an earlier one is moved up to it.
@@ -106,7 +117,7 @@ pub fn color_at(stops: &[(f32, Pm)], t: f32, repeat: bool) -> Pm {
 #[derive(Clone, Debug)]
 pub enum Underlay {
     Linear { angle: f32, repeat: bool, stops: Vec<(f32, Pm)> },
-    Radial { repeat: bool, stops: Vec<(f32, Pm)> },
+    Radial { repeat: bool, ellipse: bool, stops: Vec<(f32, Pm)> },
     Solid(Pm),
 }
 
@@ -117,7 +128,7 @@ pub fn underlay_of(p: &SevenTvPaint) -> Option<Underlay> {
         return Some(Underlay::Linear { angle: p.angle, repeat: p.repeat, stops });
     }
     if p.function == "RADIAL_GRADIENT" && !stops.is_empty() {
-        return Some(Underlay::Radial { repeat: p.repeat, stops });
+        return Some(Underlay::Radial { repeat: p.repeat, ellipse: p.shape == "ellipse", stops });
     }
     p.color.map(|c| Underlay::Solid(premul(c)))
 }
@@ -126,7 +137,7 @@ impl Underlay {
     fn at(&self, w: f32, h: f32, x: f32, y: f32) -> Pm {
         match self {
             Underlay::Linear { angle, repeat, stops } => color_at(stops, linear_t(*angle, w, h, x, y), *repeat),
-            Underlay::Radial { repeat, stops } => color_at(stops, radial_t(w, h, x, y), *repeat),
+            Underlay::Radial { repeat, ellipse, stops } => color_at(stops, if *ellipse { ellipse_t(w, h, x, y) } else { radial_t(w, h, x, y) }, *repeat),
             Underlay::Solid(c) => *c,
         }
     }
@@ -254,8 +265,8 @@ pub struct PaintImage {
     pub bgra: Arc<Vec<u8>>,
 }
 
-/// `background-size: cover` from the box's top-left corner (the default `background-position: 0 0`), resampled
-/// to device px: the premultiplied pixel at device offset (`x`, `y`) in the box.
+/// The image layer as the 7TV extension styles it (`background-size: 100% 100%`), resampled to the box in
+/// device px.
 struct CoverImage {
     w: u32,
     h: u32,
@@ -266,8 +277,8 @@ fn cover(img: &PaintImage, box_w_dev: f32, box_h_dev: f32) -> Option<CoverImage>
     if img.w == 0 || img.h == 0 || box_w_dev < 1.0 || box_h_dev < 1.0 {
         return None;
     }
-    let s = (box_w_dev / img.w as f32).max(box_h_dev / img.h as f32);
-    let (tw, th) = (((img.w as f32 * s).round().max(1.0)) as u32, ((img.h as f32 * s).round().max(1.0)) as u32);
+    // the 7TV extension sizes the image layer `100% 100%`: stretched over the whole box, aspect not kept
+    let (tw, th) = (box_w_dev.round().max(1.0) as u32, box_h_dev.round().max(1.0) as u32);
     // premultiplied RGBA for filtering
     let mut rgba = Vec::with_capacity(img.bgra.len());
     for p in img.bgra.chunks_exact(4) {
@@ -297,7 +308,8 @@ pub struct NameReq<'a> {
     pub above: f32,
     pub below: f32,
     pub paint: &'a PaintSpec,
-    pub image: Option<&'a PaintImage>,
+    /// The paint image's frame to draw (animated paints) and how to get its pixels (only called on a cache miss).
+    pub image: Option<(usize, &'a dyn Fn() -> Option<PaintImage>)>,
 }
 
 pub struct Rendered {
@@ -324,16 +336,16 @@ pub fn render(req: &NameReq) -> Option<Rendered> {
     if w * h > 4_000_000 {
         return None;
     }
-    let (mask, dwrite_dev) = glyph_mask(req.text, req.size * scale, req.weight, w as u32, h as u32, origin_x as f32, baseline_y as f32)?;
+    let mask = cached_mask(req.text, req.size * scale, req.weight, w as u32, h as u32, origin_x as f32, baseline_y as f32)?;
 
     // the box the paint is evaluated in, in CSS px relative to its top-left; device px (x + .5) maps into it
     let box_top_dev = baseline_y as f32 - req.above * scale;
     let (bw, bh) = (req.box_w, req.above + req.below);
-    let cov = req.image.and_then(|i| cover(i, bw * scale, bh * scale));
+    let cov = req.image.and_then(|(_, get)| get()).and_then(|i| cover(&i, bw * scale, bh * scale));
     let mut layer: Vec<Pm> = vec![[0.0; 4]; w * h];
     for y in 0..h {
         for x in 0..w {
-            let m = (mask[y * w + x] as f32 / 255.0).powf(MASK_GAMMA);
+            let m = (mask.0[y * w + x] as f32 / 255.0).powf(MASK_GAMMA);
             if m <= 0.0 {
                 continue;
             }
@@ -364,7 +376,30 @@ pub fn render(req: &NameReq) -> Option<Rendered> {
             bgra.extend_from_slice(&[q(p[2]), q(p[1]), q(p[0]), (a * 255.0 + 0.5) as u8]);
         }
     }
-    Some(Rendered { w: w as u32, h: h as u32, bgra, origin_x, baseline_y, dwrite_w: dwrite_dev / scale })
+    Some(Rendered { w: w as u32, h: h as u32, bgra, origin_x, baseline_y, dwrite_w: mask.1 / scale })
+}
+
+type MaskKey = (String, u32, u16, u32, u32, i32, i32);
+
+thread_local! {
+    static MASKS: RefCell<std::collections::HashMap<MaskKey, Rc<(Vec<u8>, f32)>>> = RefCell::new(Default::default());
+}
+
+/// `glyph_mask` memoised: an animated paint re-renders a name per frame but its glyphs never change.
+fn cached_mask(text: &str, size_px: f32, weight: u16, w: u32, h: u32, ox: f32, by: f32) -> Option<Rc<(Vec<u8>, f32)>> {
+    let key: MaskKey = (text.to_string(), (size_px * 100.0) as u32, weight, w, h, ox as i32, by as i32);
+    if let Some(m) = MASKS.with(|c| c.borrow().get(&key).cloned()) {
+        return Some(m);
+    }
+    let m = Rc::new(glyph_mask(text, size_px, weight, w, h, ox, by)?);
+    MASKS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 64 {
+            c.clear();
+        }
+        c.insert(key, m.clone());
+    });
+    Some(m)
 }
 
 /// White glyphs' coverage (0..255) on a `w` x `h` canvas plus DirectWrite's advance width in CSS px
@@ -473,7 +508,7 @@ struct Key {
     above: i32,
     below: i32,
     box_w: u32,
-    image: bool,
+    image: Option<usize>,
 }
 
 /// A rendered name ready to paint.
@@ -486,17 +521,20 @@ pub struct NameImage {
     pub baseline_y: i32,
 }
 
-const CACHE_MAX: usize = 96;
+/// Rendered names kept (an animated paint keeps one per visited frame): by count and by pixel bytes.
+const CACHE_MAX: usize = 400;
+const CACHE_MAX_BYTES: usize = 12 << 20;
 
 struct Cache {
     map: std::collections::HashMap<Key, Option<NameImage>>,
     order: VecDeque<Key>,
     /// evicted images whose atlas tiles the next paint frees
     dropped: Vec<Arc<RenderImage>>,
+    bytes: usize,
 }
 
 thread_local! {
-    static CACHE: RefCell<Cache> = RefCell::new(Cache { map: Default::default(), order: VecDeque::new(), dropped: Vec::new() });
+    static CACHE: RefCell<Cache> = RefCell::new(Cache { map: Default::default(), order: VecDeque::new(), dropped: Vec::new(), bytes: 0 });
 }
 
 /// The painted name, from the cache or freshly rendered. None when rendering is not possible (the caller draws
@@ -511,7 +549,7 @@ pub fn name_image(req: &NameReq) -> Option<NameImage> {
         above: (req.above * 64.0) as i32,
         below: (req.below * 64.0) as i32,
         box_w: (req.box_w * 64.0) as u32,
-        image: req.image.is_some(),
+        image: req.image.map(|(f, _)| f),
     };
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -529,11 +567,13 @@ pub fn name_image(req: &NameReq) -> Option<NameImage> {
             }
             to_render_image(&r).map(|image| NameImage { image, w: r.w, h: r.h, origin_x: r.origin_x, baseline_y: r.baseline_y })
         });
+        c.bytes += ni.as_ref().map(|n| (n.w * n.h * 4) as usize).unwrap_or(0);
         c.map.insert(key.clone(), ni.clone());
         c.order.push_back(key);
-        while c.order.len() > CACHE_MAX {
+        while c.order.len() > CACHE_MAX || (c.bytes > CACHE_MAX_BYTES && c.order.len() > 1) {
             if let Some(old) = c.order.pop_front() {
                 if let Some(Some(v)) = c.map.remove(&old) {
+                    c.bytes = c.bytes.saturating_sub((v.w * v.h * 4) as usize);
                     c.dropped.push(v.image);
                 }
             }
@@ -588,6 +628,16 @@ mod tests {
         assert!(radial_t(100.0, 20.0, 50.0, 10.0).abs() < 1e-6);
         assert!((radial_t(100.0, 20.0, 0.0, 0.0) - 1.0).abs() < 1e-5);
         assert!((radial_t(100.0, 20.0, 100.0, 20.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ellipse_is_farthest_corner_with_the_box_aspect() {
+        assert!(ellipse_t(100.0, 20.0, 50.0, 10.0).abs() < 1e-6);
+        // every corner is at 1.0, the side midpoints at 1/sqrt 2
+        assert!((ellipse_t(100.0, 20.0, 0.0, 0.0) - 1.0).abs() < 1e-5);
+        assert!((ellipse_t(100.0, 20.0, 100.0, 20.0) - 1.0).abs() < 1e-5);
+        assert!((ellipse_t(100.0, 20.0, 100.0, 10.0) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+        assert!((ellipse_t(100.0, 20.0, 50.0, 0.0) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
     }
 
     #[test]

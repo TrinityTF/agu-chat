@@ -29,6 +29,8 @@ pub struct SevenTvPaint {
     pub color: Option<u32>,
     pub angle: f32,
     pub repeat: bool,
+    /// radial gradients: "circle" or "ellipse" (7TV's `shape`, default circle)
+    pub shape: String,
     pub image_url: Option<String>,
     pub stops: Vec<PaintStop>,
     pub shadows: Vec<PaintShadow>,
@@ -63,9 +65,9 @@ pub struct ChatterStyle {
     pub badge_id: Option<String>,
 }
 
-const DEFS_KEY: &str = "emotes:7tv:cosmetics:global";
+const DEFS_KEY: &str = "emotes:7tv:cosmetics:global:v2";
 const DEFS_TTL_MS: i64 = 6 * 3_600_000;
-const GQL_QUERY: &str = "{cosmetics{paints{id name function color angle repeat image_url stops{at color}shadows{x_offset y_offset radius color}}badges{id name tooltip}}}";
+const GQL_QUERY: &str = "{cosmetics{paints{id name function color angle shape repeat image_url stops{at color}shadows{x_offset y_offset radius color}}badges{id name tooltip}}}";
 
 /// Paint colours arrive as signed 32-bit RGBA ints; reinterpret as unsigned.
 fn to_u32(v: &Value) -> Option<u32> {
@@ -83,6 +85,7 @@ pub fn defs_from_raw(data: &Value) -> SevenTvDefs {
             color: p.get("color").and_then(to_u32),
             angle: p.get("angle").and_then(|a| a.as_f64()).unwrap_or(0.0) as f32,
             repeat: p.get("repeat").and_then(|a| a.as_bool()).unwrap_or(false),
+            shape: s("shape"),
             image_url: p.get("image_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()),
             stops: p
                 .get("stops")

@@ -12,6 +12,7 @@ export type SevenTvPaint = {
   color: number | null;
   angle: number;
   repeat: boolean;
+  shape?: string;
   image_url: string | null;
   stops: SevenTvPaintStop[];
   shadows: SevenTvShadow[];
@@ -22,10 +23,10 @@ export type SevenTvDefs = { paints: Map<string, SevenTvPaint>; badges: Map<strin
 // Key follows the same `emotes:<provider>:<scope>:<...>` scheme as the
 // emote-set caches above, stored in localStorage (not sessionStorage) so it
 // survives tab close — same 6h TTL as before.
-const SEVENTV_DEFS_CACHE_KEY = "emotes:7tv:cosmetics:global";
+const SEVENTV_DEFS_CACHE_KEY = "emotes:7tv:cosmetics:global:v2";
 const SEVENTV_DEFS_TTL_MS = 6 * 3600_000;
 const SEVENTV_GQL_QUERY =
-  "{cosmetics{paints{id name function color angle repeat image_url stops{at color}shadows{x_offset y_offset radius color}}badges{id name tooltip}}}";
+  "{cosmetics{paints{id name function color angle shape repeat image_url stops{at color}shadows{x_offset y_offset radius color}}badges{id name tooltip}}}";
 
 function defsFromRaw(data: any): SevenTvDefs {
   const paints = new Map<string, SevenTvPaint>();
@@ -167,7 +168,7 @@ export function paintStyle(paint: SevenTvPaint): CSSProperties {
     // Rain") are REPEATING radial gradients whose concentric-ring pattern
     // collapses into one smooth blob when rendered as a plain radial-gradient.
     const fn = paint.repeat ? "repeating-radial-gradient" : "radial-gradient";
-    underlay = `${fn}(circle, ${stopsCss})`;
+    underlay = `${fn}(${paint.shape === "ellipse" ? "ellipse" : "circle"}, ${stopsCss})`;
   } else if (paint.color != null) {
     const solid = decodeSignedRgba(paint.color);
     underlay = `linear-gradient(${solid}, ${solid})`;
@@ -176,7 +177,7 @@ export function paintStyle(paint: SevenTvPaint): CSSProperties {
     return {
       ...base,
       backgroundImage: underlay ? `url(${paint.image_url}), ${underlay}` : `url(${paint.image_url})`,
-      backgroundSize: underlay ? "cover, cover" : "cover",
+      backgroundSize: underlay ? "100% 100%, 100% 100%" : "100% 100%",
     };
   }
   if (underlay) return { ...base, backgroundImage: underlay };

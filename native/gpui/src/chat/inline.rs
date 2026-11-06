@@ -771,7 +771,7 @@ impl Element for InlineFlow {
                     let top = base_abs - (*hl + *asc) + TEXT_DY;
                     let painted = match &self.content.items[*item] {
                         Item::Text(t) if t.paint.is_some() && shaped.text.as_ref() == t.text.as_ref() => {
-                            paint_name(window, &imgs, t, p.atom.w, (*asc, shaped.descent.f()), line_h, x0, base_abs)
+                            paint_name(window, cx, &imgs, t, p.atom.w, (*asc, shaped.descent.f()), line_h, x0, base_abs)
                         }
                         _ => false,
                     };
@@ -923,16 +923,21 @@ impl Element for InlineFlow {
 /// Draws a 7TV-painted name (`paint_text`) with its text origin at `x0` and its baseline on pixel row `base_abs`.
 /// False when it could not be rendered (the caller draws the plain glyphs).
 #[allow(clippy::too_many_arguments)]
-fn paint_name(window: &mut Window, imgs: &ImagesHandle, t: &TextItem, width: f32, (asc, desc): (f32, f32), line_h: f32, x0: f32, base_abs: f32) -> bool {
+fn paint_name(window: &mut Window, cx: &mut App, imgs: &ImagesHandle, t: &TextItem, width: f32, (asc, desc): (f32, f32), line_h: f32, x0: f32, base_abs: f32) -> bool {
     let Some(spec) = t.paint.as_ref() else { return false };
     let scale = window.scale_factor();
     let (above, below) = blink_above_below(asc, desc, line_h);
     // the paint image, first frame only
-    let image = spec.image_url.as_ref().and_then(|u| imgs.0.get(u, 1024.0, 1024.0, 1.0)).and_then(|g| {
-        let sz = g.gpu.size(0);
-        g.gpu.as_bytes(0).map(|b| PaintImage { w: sz.width.0 as u32, h: sz.height.0 as u32, bgra: std::sync::Arc::new(b.to_vec()) })
-    });
-    let req = NameReq { text: &t.text, size: t.size, weight: t.weight.0 as u16, scale, box_w: width, above, below, paint: spec, image: image.as_ref() };
+    // the paint image: the frame of the global animation clock (first frame when animations are off)
+    let gimg = spec.image_url.as_ref().and_then(|u| imgs.0.get(u, 1024.0, 1024.0, 1.0));
+    let frame = gimg.as_ref().map(|g| imgs.0.frame(g, window, cx)).unwrap_or(0);
+    let getter = || {
+        let g = gimg.as_ref()?;
+        let idx = frame.min(g.gpu.frame_count().saturating_sub(1));
+        let sz = g.gpu.size(idx);
+        g.gpu.as_bytes(idx).map(|b| PaintImage { w: sz.width.0 as u32, h: sz.height.0 as u32, bgra: std::sync::Arc::new(b.to_vec()) })
+    };
+    let req = NameReq { text: &t.text, size: t.size, weight: t.weight.0 as u16, scale, box_w: width, above, below, paint: spec, image: gimg.as_ref().map(|_| (frame, &getter as &dyn Fn() -> Option<PaintImage>)) };
     let ni = paint_text::name_image(&req);
     for d in paint_text::take_dropped() {
         window.drop_image(d).ok();
