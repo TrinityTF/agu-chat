@@ -23,6 +23,9 @@ pub struct Images {
     due: Cell<Option<Instant>>,
     inboxes: RefCell<Vec<std::rc::Weak<RefCell<Vec<String>>>>>,
     pub painted_animated: Cell<usize>,
+    /// AGU_LOG only: (image id, frame) tiles painted so far (what the GPU atlas holds) and when stats were last logged.
+    atlas: RefCell<std::collections::HashMap<(usize, usize), u64>>,
+    last_stats: Cell<Option<Instant>>,
 }
 
 #[derive(Clone)]
@@ -39,7 +42,7 @@ fn upload(_url: &str, d: &Decoded) -> (Arc<RenderImage>, u64) {
             px.swap(0, 2);
         }
         bytes += buf.len() as u64;
-        let img = RgbaImage::from_raw(d.w, d.h, buf).expect("frame size");
+        let img = RgbaImage::from_raw(d.fw, d.fh, buf).expect("frame size");
         frames.push(Frame::from_parts(img, 0, 0, Delay::from_numer_denom_ms(*ms, 1)));
     }
     (Arc::new(RenderImage::new(frames)), bytes)
@@ -55,11 +58,14 @@ impl Images {
             due: Cell::new(None),
             inboxes: RefCell::new(Vec::new()),
             painted_animated: Cell::new(0),
+            atlas: RefCell::new(std::collections::HashMap::new()),
+            last_stats: Cell::new(None),
         })
     }
 
     pub fn set_animate(&self, on: bool) {
         self.animate.set(on);
+        self.cache.borrow_mut().anim_off = !on;
     }
 
     /// A pane's inbox of URLs that finished loading (rows that waited for their size re-layout).
@@ -69,12 +75,13 @@ impl Images {
         inbox
     }
 
-    /// The decoded image, starting its fetch on first sight. None while loading or when it failed.
-    pub fn get(&self, url: &str) -> Option<GpuImg> {
+    /// The decoded image for being drawn inside `max_w` x `max_h` logical pixels at `scale`, starting its fetch on
+    /// first sight (decoded at that size, fetched again if the box later grows). None while loading or failed.
+    pub fn get(&self, url: &str, max_w: f32, max_h: f32, scale: f32) -> Option<GpuImg> {
         if url.is_empty() {
             return None;
         }
-        match self.cache.borrow_mut().get(url) {
+        match self.cache.borrow_mut().get(url, want(max_w, max_h, scale)) {
             State::Ready(i) => Some(i.clone()),
             _ => None,
         }
@@ -82,14 +89,14 @@ impl Images {
 
     /// The natural size for layout: known from the first decode on, also while the pixels are evicted (so an
     /// eviction never changes a row's height). Starts the fetch on first sight.
-    pub fn dims(&self, url: &str) -> Option<(u32, u32)> {
+    pub fn dims(&self, url: &str, max_w: f32, max_h: f32, scale: f32) -> Option<(u32, u32)> {
         if url.is_empty() {
             return None;
         }
         if let Some(d) = self.cache.borrow().size_of(url) {
             return Some(d);
         }
-        self.get(url).map(|i| (i.w, i.h))
+        self.get(url, max_w, max_h, scale).map(|i| (i.w, i.h))
     }
 
     pub fn failed(&self, url: &str) -> bool {
@@ -121,6 +128,9 @@ impl Images {
         let freeze = !self.animate.get() || self.cache.borrow().freeze;
         let t = self.cache.borrow().now_ms();
         let (idx, next_ms) = img.frame_at(t, freeze);
+        if agu_chat_core::sys::log_enabled() {
+            self.note_painted(img, idx);
+        }
         if next_ms != u32::MAX {
             self.painted_animated.set(self.painted_animated.get() + 1);
             self.schedule(next_ms, window, cx);
@@ -128,9 +138,40 @@ impl Images {
         idx
     }
 
+    /// AGU_LOG only: remember the painted tile and log the memory attribution every 10 s.
+    fn note_painted(&self, img: &GpuImg, idx: usize) {
+        let sz = img.gpu.size(idx.min(img.gpu.frame_count().saturating_sub(1)));
+        self.atlas.borrow_mut().insert((img.gpu.id.0, idx), sz.width.0 as u64 * sz.height.0 as u64 * 4);
+        let now = Instant::now();
+        if self.last_stats.get().map(|l| now.duration_since(l) < Duration::from_secs(10)).unwrap_or(false) {
+            return;
+        }
+        self.last_stats.set(Some(now));
+        let (ws, commit) = agu_chat_core::sys::mem_mb();
+        #[cfg(feature = "alloc-stats")]
+        agu_chat_core::logf!("heap live={:.1}MB", crate::alloc_stats::live_mb());
+        let atlas = self.atlas.borrow();
+        let atlas_bytes: u64 = atlas.values().sum();
+        let c = self.cache.borrow();
+        agu_chat_core::logf!(
+            "memstat ws={ws:.0}MB commit={commit:.0}MB images={} frames={} cpu_frames={:.1}MB src_frames={:.1}MB atlas_tiles={} atlas={:.1}MB failed={}",
+            c.loaded,
+            c.frames,
+            c.decoded_bytes as f64 / 1048576.0,
+            c.source_bytes as f64 / 1048576.0,
+            atlas.len(),
+            atlas_bytes as f64 / 1048576.0,
+            c.failed
+        );
+    }
+
     /// Frees the atlas tiles of images the cache evicted (their CPU buffers go with the last Arc).
     pub fn free_evicted(&self, window: &mut Window) {
         let gone = self.cache.borrow_mut().take_evicted();
+        if agu_chat_core::sys::log_enabled() {
+            let ids: Vec<usize> = gone.iter().map(|i| i.gpu.id.0).collect();
+            self.atlas.borrow_mut().retain(|k, _| !ids.contains(&k.0));
+        }
         for img in gone {
             window.drop_image(img.gpu.clone()).ok();
         }
@@ -156,6 +197,11 @@ impl Images {
         let c = self.cache.borrow();
         (c.loads_total as usize, c.failed, c.decoded_bytes)
     }
+}
+
+/// The decode box in physical pixels for an image drawn inside `max_w` x `max_h` logical pixels.
+fn want(max_w: f32, max_h: f32, scale: f32) -> (u32, u32) {
+    ((max_w * scale).ceil().max(1.0) as u32, (max_h * scale).ceil().max(1.0) as u32)
 }
 
 /// Image sizes as the CSS fit rules draw them: scaled DOWN to fit `max_w` x `max_h` (aspect kept), never up.

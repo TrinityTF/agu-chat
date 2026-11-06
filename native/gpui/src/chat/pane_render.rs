@@ -85,7 +85,7 @@ impl Element for ImageBox {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut Window, _: &mut App) {}
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
         let imgs = cx.global::<ImagesHandle>().clone();
-        if let Some(img) = imgs.0.get(&self.url) {
+        if let Some(img) = imgs.0.get(&self.url, self.side, self.side, window.scale_factor()) {
             let s = (self.side / img.w as f32).min(self.side / img.h as f32);
             let (w, h) = (img.w as f32 * s, img.h as f32 * s);
             let r = Bounds::new(point(bounds.origin.x + px((self.side - w) / 2.0), bounds.origin.y + px((self.side - h) / 2.0)), size(px(w), px(h)));

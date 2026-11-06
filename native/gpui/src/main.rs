@@ -36,6 +36,12 @@ fn route_stderr_to_log() {
     eprintln!("[ui] agu-chat-gpui {} started, stderr routed here", env!("CARGO_PKG_VERSION"));
 }
 
+#[cfg(feature = "alloc-stats")]
+mod alloc_stats;
+#[cfg(feature = "alloc-stats")]
+#[global_allocator]
+static GLOBAL: alloc_stats::Counting = alloc_stats::Counting;
+
 fn main() {
     route_stderr_to_log();
     Application::new().with_assets(Assets).run(|cx: &mut App| {

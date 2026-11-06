@@ -63,6 +63,12 @@ pub fn tz_offset_min() -> i32 {
     0
 }
 
+/// Whether AGU_LOG is on (debug stats are only gathered then).
+pub fn log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AGU_LOG").ok().map(|v| !v.is_empty() && v != "0").unwrap_or(false))
+}
+
 pub fn log(msg: &str) {
     use std::io::Write;
     static ON: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

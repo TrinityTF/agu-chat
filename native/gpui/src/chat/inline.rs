@@ -173,11 +173,57 @@ pub struct InlineContent {
     pub base_size: f32,
     pub line_ratio: f32,
     cache: RefCell<Option<Laid>>,
+    /// (width, epoch, height) of the last measure that did not keep its layout: a row that is only measured
+    /// (off screen) needs its height, not the shaped words.
+    height_memo: Cell<Option<(f32, u64, f32)>>,
+    /// When the layout was last used for painting (ms, `clock_ms`); `sweep_layouts` drops the ones idle for long.
+    used_ms: Cell<u64>,
+    tracked: Cell<bool>,
+}
+
+fn clock_ms() -> u64 {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Layouts to sweep (rows paint a lot less than they exist: only the ones on screen need their shaped words).
+const LAYOUT_IDLE_MS: u64 = 2_000;
+
+thread_local! {
+    static LAID: RefCell<Vec<std::rc::Weak<InlineContent>>> = const { RefCell::new(Vec::new()) };
+    static LAID_ADDS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Remember that `c` holds a layout and, every so often, drop the layouts of rows that have not been painted
+/// for a while (they are laid out again when they come back on screen; shaped lines are cached by the text system).
+fn track_layout(c: &Rc<InlineContent>) {
+    c.used_ms.set(clock_ms());
+    if !c.tracked.replace(true) {
+        LAID.with(|l| l.borrow_mut().push(Rc::downgrade(c)));
+        let n = LAID_ADDS.with(|a| {
+            a.set(a.get().wrapping_add(1));
+            a.get()
+        });
+        if n % 64 == 0 {
+            let now = clock_ms();
+            LAID.with(|l| {
+                l.borrow_mut().retain(|w| match w.upgrade() {
+                    None => false,
+                    Some(c) if now.saturating_sub(c.used_ms.get()) > LAYOUT_IDLE_MS => {
+                        *c.cache.borrow_mut() = None;
+                        c.tracked.set(false);
+                        false
+                    }
+                    Some(_) => true,
+                });
+            });
+        }
+    }
 }
 
 impl InlineContent {
     pub fn new(items: Vec<Item>, base_size: f32, line_ratio: f32) -> Rc<InlineContent> {
-        Rc::new(InlineContent { items, base_size, line_ratio, cache: RefCell::new(None) })
+        Rc::new(InlineContent { items, base_size, line_ratio, cache: RefCell::new(None), height_memo: Cell::new(None), used_ms: Cell::new(0), tracked: Cell::new(false) })
     }
 
     /// Every image URL the flow draws (rows re-layout when one of them finishes loading).
@@ -200,17 +246,23 @@ impl InlineContent {
     pub fn height_at(&self, width: f32, window: &Window, cx: &App) -> f32 {
         let imgs = cx.global::<ImagesHandle>().clone();
         let epoch = epoch_of(cx);
-        let mut c = self.cache.borrow_mut();
-        let reuse = matches!(&*c, Some(l) if (l.width - width).abs() < 0.01 && l.epoch == epoch);
-        if !reuse {
-            *c = Some(layout(self, width, window, &imgs, epoch));
+        if let Some(l) = self.cache.borrow().as_ref().filter(|l| (l.width - width).abs() < 0.01 && l.epoch == epoch) {
+            return l.height;
         }
-        c.as_ref().unwrap().height
+        if let Some((w, e, h)) = self.height_memo.get() {
+            if (w - width).abs() < 0.01 && e == epoch {
+                return h;
+            }
+        }
+        let h = layout(self, width, window, &imgs, epoch).height;
+        self.height_memo.set(Some((width, epoch, h)));
+        h
     }
 
     /// Forget the cached layout (an image size became known).
     pub fn invalidate(&self) {
         *self.cache.borrow_mut() = None;
+        self.height_memo.set(None);
     }
 }
 
@@ -342,11 +394,11 @@ fn base_metrics(window: &Window, size: f32) -> (f32, f32) {
     (s.ascent.f(), s.descent.f())
 }
 
-fn image_dims(i: &ImageItem, imgs: &ImagesHandle) -> (f32, f32) {
+fn image_dims(i: &ImageItem, imgs: &ImagesHandle, scale: f32) -> (f32, f32) {
     if i.fixed {
         return (i.max_w, i.max_h);
     }
-    match imgs.0.dims(&i.url) {
+    match imgs.0.dims(&i.url, i.max_w, i.max_h, scale) {
         Some((w, h)) => fit_down(w as f32, h as f32, i.max_w, i.max_h),
         // size unknown until it loads: a square box of the emote height
         None => (i.max_h, i.max_h),
@@ -357,7 +409,7 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
     let (bs, ratio) = (content.base_size, content.line_ratio);
     match &items[item] {
         Item::Image(i) => {
-            let (w, h) = image_dims(i, imgs);
+            let (w, h) = image_dims(i, imgs, window.scale_factor());
             let mh = if i.wrap { i.max_h } else { h } + 2.0 * i.vmargin;
             let c = box_center(i.valign, mh, bs, ratio, window);
             Atom { w: w + 2.0 * i.margin_x, above: mh / 2.0 - c, below: mh / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (w, h) }
@@ -378,7 +430,7 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
         Item::Gap(w) => Atom { w: *w, above: 0.0, below: 0.0, kind: AtomKind::Box { item }, break_before: false, dims: (*w, 0.0) },
         Item::Gif(g) => {
             // `my-1 block max-h-40 max-w-full rounded object-contain`
-            let (w, h) = match imgs.0.get(&g.url) {
+            let (w, h) = match imgs.0.get(&g.url, max_w.max(240.0), 160.0, window.scale_factor()) {
                 Some(img) => fit_down(img.w as f32, img.h as f32, max_w, 160.0),
                 None => (0.0, 0.0),
             };
@@ -649,6 +701,7 @@ impl Element for InlineFlow {
                 _ => 100000.0,
             });
             let epoch = epoch_of(cx);
+            track_layout(&content);
             let mut c = content.cache.borrow_mut();
             let reuse = matches!(&*c, Some(l) if (l.width - w).abs() < 0.01 && l.epoch == epoch);
             if !reuse {
@@ -664,6 +717,7 @@ impl Element for InlineFlow {
         let imgs = cx.global::<ImagesHandle>().clone();
         let epoch = epoch_of(cx);
         let w = bounds.size.width.f();
+        track_layout(&self.content);
         let mut c = self.content.cache.borrow_mut();
         let reuse = matches!(&*c, Some(l) if (l.width - w).abs() < 0.01 && l.epoch == epoch);
         if !reuse {
@@ -692,6 +746,7 @@ impl Element for InlineFlow {
 
     fn paint(&mut self, _id: Option<&GlobalElementId>, _ins: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _rl: &mut (), pp: &mut Prepaint, window: &mut Window, cx: &mut App) {
         let imgs = cx.global::<ImagesHandle>().clone();
+        self.content.used_ms.set(clock_ms());
         let c = self.content.cache.borrow();
         let Some(laid) = c.as_ref() else { return };
         let hover_of = |pi: usize, window: &Window| pp.hitboxes.iter().find(|(i, _)| *i == pi).map(|(_, h)| h.is_hovered(window)).unwrap_or(false);
@@ -719,7 +774,7 @@ impl Element for InlineFlow {
                     match &self.content.items[*item] {
                         Item::Image(i) => {
                             let draw = |url: &str, r: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
-                                if let Some(img) = imgs.0.get(url) {
+                                if let Some(img) = imgs.0.get(url, i.max_w, i.max_h, window.scale_factor()) {
                                     let idx = imgs.0.frame(&img, window, cx);
                                     let radius = px(i.radius);
                                     let _ = window.paint_image(r, gpui::Corners::all(radius), img.gpu.clone(), idx, false);
@@ -728,7 +783,7 @@ impl Element for InlineFlow {
                             draw(&i.url, r, window, cx);
                             for o in &i.overlays {
                                 // same fit as the base so a zero-width overlay keeps sitting on top of it
-                                if let Some(img) = imgs.0.get(o) {
+                                if let Some(img) = imgs.0.get(o, i.max_w, i.max_h, window.scale_factor()) {
                                     let (ow, oh) = fit_down(img.w as f32, img.h as f32, i.max_w, i.max_h);
                                     let c = r.center();
                                     let or = Bounds::new(point(c.x - px(ow / 2.0), c.y - px(oh / 2.0)), size(px(ow), px(oh)));
@@ -779,7 +834,7 @@ impl Element for InlineFlow {
                 AtomKind::Block { item } => {
                     if let Item::Gif(g) = &self.content.items[*item] {
                         let (w, h) = p.atom.dims;
-                        if let Some(img) = imgs.0.get(&g.url) {
+                        if let Some(img) = imgs.0.get(&g.url, p.atom.w.max(240.0), 160.0, window.scale_factor()) {
                             let idx = imgs.0.frame(&img, window, cx);
                             let r = Bounds::new(point(px(x0), px(origin.y.f() + line.y + 4.0)), size(px(w), px(h)));
                             let _ = window.paint_image(r, gpui::Corners::all(px(4.)), img.gpu.clone(), idx, false);
