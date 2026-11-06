@@ -917,35 +917,61 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     BuiltRow::Frame(spec)
 }
 
-fn rumble_text(f: &mut Flow, text: &str, emotes: &RumbleEmotes, col: Hsla, strike: bool, rs: &Settings) {
+/// Port of `splitRumbleEmotes` (CoChatRows.tsx): `:name:` tokens (RUMBLE_TOKEN = /:([A-Za-z0-9_+.-]{1,60}):/g)
+/// resolved against the chat's emote list; a token with no emote stays text, and like the global regex the
+/// scan then resumes AFTER its closing colon (so in "a:b:c:" a missing ":b:" never makes ":c:" a token).
+#[derive(Debug, PartialEq)]
+pub(crate) enum RumblePart<'a> {
+    Text(&'a str),
+    Emote { name: &'a str, file: String },
+}
+
+pub(crate) fn split_rumble_emotes<'a>(text: &'a str, emotes: &RumbleEmotes) -> Vec<RumblePart<'a>> {
+    if text.is_empty() {
+        return vec![];
+    }
+    if emotes.is_empty() {
+        return vec![RumblePart::Text(text)];
+    }
+    let is_tok = |c: char| c.is_ascii_alphanumeric() || "_+.-".contains(c);
+    let mut parts = Vec::new();
     let mut last = 0;
-    let bytes = text.as_bytes();
     let mut i = 0;
-    let mut any = false;
-    while i < bytes.len() {
-        if bytes[i] == b':' {
-            if let Some(end) = text[i + 1..].find(':') {
-                let name = &text[i + 1..i + 1 + end];
-                let ok = !name.is_empty() && name.len() <= 60 && name.chars().all(|c| c.is_ascii_alphanumeric() || "_+.-".contains(c));
-                if ok {
-                    if let Some(file) = emotes.get(name).and_then(|e| e.get("file")).and_then(|v| v.as_str()) {
-                        if i > last {
-                            run_text(f, &text[last..i], col, strike);
-                        }
-                        plain_emote(f, file.to_string(), &format!(":{name}:"), "Rumble", rs);
-                        last = i + 1 + end + 1;
-                        i = last;
-                        any = true;
-                        continue;
+    while i < text.len() {
+        if text.as_bytes()[i] == b':' {
+            let rest = &text[i + 1..];
+            let len = rest.find(|c: char| !is_tok(c)).unwrap_or(rest.len());
+            if (1..=60).contains(&len) && rest[len..].starts_with(':') {
+                let name = &rest[..len];
+                let end = i + 1 + len + 1;
+                if let Some(file) = emotes.get(name).and_then(|e| e.get("file")).and_then(|v| v.as_str()) {
+                    if i > last {
+                        parts.push(RumblePart::Text(&text[last..i]));
                     }
+                    parts.push(RumblePart::Emote { name, file: file.to_string() });
+                    last = end;
                 }
+                i = end;
+                continue;
             }
         }
         i += 1;
     }
-    let _ = any;
+    if parts.is_empty() {
+        return vec![RumblePart::Text(text)];
+    }
     if last < text.len() {
-        run_text(f, &text[last..], col, strike);
+        parts.push(RumblePart::Text(&text[last..]));
+    }
+    parts
+}
+
+fn rumble_text(f: &mut Flow, text: &str, emotes: &RumbleEmotes, col: Hsla, strike: bool, rs: &Settings) {
+    for p in split_rumble_emotes(text, emotes) {
+        match p {
+            RumblePart::Text(t) => run_text(f, t, col, strike),
+            RumblePart::Emote { name, file } => plain_emote(f, file, &format!(":{name}:"), "Rumble", rs),
+        }
     }
 }
 
@@ -1148,6 +1174,19 @@ fn _unused() -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rumble_emotes_split_like_the_global_regex() {
+        let emotes: RumbleEmotes = serde_json::from_value(serde_json::json!({ "r+cooldoge": { "file": "a.png" }, "c": { "file": "c.png" } })).unwrap();
+        use RumblePart::*;
+        assert_eq!(split_rumble_emotes("hey from rumble :r+cooldoge: yo", &emotes), vec![Text("hey from rumble "), Emote { name: "r+cooldoge", file: "a.png".into() }, Text(" yo")]);
+        // a miss consumes its closing colon, so ":c:" is never formed from the tail of ":b:"
+        assert_eq!(split_rumble_emotes("a:b:c:", &emotes), vec![Text("a:b:c:")]);
+        assert_eq!(split_rumble_emotes("::c::", &emotes), vec![Text(":"), Emote { name: "c", file: "c.png".into() }, Text(":")]);
+        assert_eq!(split_rumble_emotes("time 10:30: ok :c:", &emotes), vec![Text("time 10:30: ok "), Emote { name: "c", file: "c.png".into() }]);
+        assert_eq!(split_rumble_emotes("no list :c:", &RumbleEmotes::new()), vec![Text("no list :c:")]);
+        assert_eq!(split_rumble_emotes("", &emotes), vec![]);
+    }
 
     #[test]
     fn emote_box_matches_the_css_numbers() {
