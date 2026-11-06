@@ -28,3 +28,7 @@ raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+
+[features]
+# Counts live heap bytes (logged with the AGU_LOG memstat line) to tell heap from GPU/driver memory.
+alloc-stats = []
