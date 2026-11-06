@@ -1173,6 +1173,7 @@ impl ChatPane {
                         let input = cx.new(|cx| {
                             let mut t = TextInput::new(window, cx, "", InputStyle::Chat);
                             t.set_text("20", cx);
+                            t.set_centered(true);
                             t
                         });
                         let sub = cx.subscribe(&input, |_this, _i, _ev: &TextInputEvent, _cx| {});

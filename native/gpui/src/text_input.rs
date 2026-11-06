@@ -224,6 +224,8 @@ pub struct TextInput {
     invalid: bool,
     /// `font-mono`
     mono: bool,
+    /// `text-center` (single line): the text sits in the middle of the field
+    centered: bool,
     _blur: gpui::Subscription,
 }
 
@@ -250,6 +252,7 @@ impl TextInput {
             masked: false,
             invalid: false,
             mono: false,
+            centered: false,
             _blur: blur,
         }
     }
@@ -299,6 +302,10 @@ impl TextInput {
 
     pub fn set_mono(&mut self, mono: bool) {
         self.mono = mono;
+    }
+
+    pub fn set_centered(&mut self, centered: bool) {
+        self.centered = centered;
     }
 
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
@@ -838,6 +845,8 @@ struct TextElement {
 }
 
 struct PrepaintState {
+    /// `text-center`: how far the text is shifted right
+    dx: Pixels,
     line: Option<ShapedLine>,
     area: Option<AreaLayout>,
     scroll_y: f32,
@@ -990,11 +999,14 @@ impl gpui::Element for TextElement {
             } else if !disabled {
                 caret = Some(fill(Bounds::new(point(bounds.left() + px(cx_), bounds.top() + px(cy - scroll)), size(px(1.), px(line_h))), c(theme::TEXT)));
             }
-            return PrepaintState { line: None, area: Some(area), scroll_y: scroll, cursor: caret, selection };
+            return PrepaintState { line: None, area: Some(area), scroll_y: scroll, cursor: caret, selection, dx: px(0.) };
         }
 
         let runs = make_runs(display_text.len(), marked, &font, text_color);
-        let line =window.text_system().shape_line(display_text, font_size, &runs, None);
+        let line = window.text_system().shape_line(display_text, font_size, &runs, None);
+        let centered = input.centered;
+        let dx = if centered { ((bounds.size.width - line.width) / 2.0).max(px(0.)) } else { px(0.) };
+        let bounds = Bounds::new(point(bounds.left() + dx, bounds.top()), size(bounds.size.width - dx, bounds.size.height));
 
         let cursor_pos = line.x_for_index(map(cursor));
         let (selection, cursor) = if selected_range.is_empty() {
@@ -1012,7 +1024,7 @@ impl gpui::Element for TextElement {
                 None,
             )
         };
-        PrepaintState { line: Some(line), area: None, scroll_y: 0.0, cursor, selection }
+        PrepaintState { line: Some(line), area: None, scroll_y: 0.0, cursor, selection, dx }
     }
 
     fn paint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _request_layout: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
@@ -1053,6 +1065,7 @@ impl gpui::Element for TextElement {
             window.paint_quad(q);
         }
         let line = prepaint.line.take().unwrap();
+        let bounds = Bounds::new(point(bounds.left() + prepaint.dx, bounds.top()), size(bounds.size.width - prepaint.dx, bounds.size.height));
         line.paint(bounds.origin, window.line_height(), window, cx).unwrap();
 
         if focused {

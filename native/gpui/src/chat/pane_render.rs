@@ -561,6 +561,7 @@ impl ChatPane {
                     let input = cx.new(|cx| {
                         let mut t = TextInput::new(w, cx, "", InputStyle::Chat);
                         t.set_max_chars(Some(6));
+                        t.set_centered(true);
                         t.set_text(&amount, cx);
                         t
                     });
