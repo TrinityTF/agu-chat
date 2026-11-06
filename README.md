@@ -1,14 +1,14 @@
 # Agu Chat
 
-<img src="build/icon.png" alt="Agu Chat" width="96" align="right" />
+<img src="native/installer/icon.png" alt="Agu Chat" width="96" align="right" />
 
 A desktop chat client for Windows, made for streamers and moderators. Open Twitch, Kick, YouTube, Rumble and X
 chats side by side, or merge several platforms into one chat.
 
-**Download:** grab `Agu-Chat-Setup-<version>.exe` from [Releases](https://github.com/TrinityTF/agu-chat/releases)
-and run it. Agu Chat keeps itself up to date after that.
+**Download:** grab `Agu-Chat-Setup-<version>-x64.exe` from [Releases](https://github.com/TrinityTF/agu-chat/releases)
+and run it. Windows 10 or 11, 64-bit. Agu Chat keeps itself up to date after that.
 
-> This is a beta. Expect rough edges, and please report bugs in [Issues](https://github.com/TrinityTF/agu-chat/issues).
+> This is a beta (version 0.1.0-beta). Expect rough edges, and please report bugs in [Issues](https://github.com/TrinityTF/agu-chat/issues).
 
 ## Features
 
@@ -34,7 +34,7 @@ and run it. Agu Chat keeps itself up to date after that.
 | Platform | Read chat | Send messages | Moderate | Notes |
 | --- | --- | --- | --- | --- |
 | Twitch | Yes | Yes | Yes, where you're the broadcaster or a moderator | Log in once (see below). |
-| Kick | Yes | Not yet | Not yet | Kick doesn't yet let desktop apps log in. |
+| Kick | Yes | Yes | Yes, where you're the broadcaster or a moderator | Log in in **Settings → Accounts → Kick**. |
 | YouTube | Yes | Not yet | Not yet | Read-only in this beta. |
 | Rumble | Yes | Yes | Yes, where Rumble allows your account | Log in with your Rumble account in Settings. Your password is only used to sign in and is never saved. |
 | X | Yes | No | No | Chatters show as "X user 12345", because X only shows names to logged-in accounts. Paste the broadcast link to be sure the chat is found. |
@@ -65,6 +65,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 | Merge platforms | In the channel dialog, add several channels to one split |
 | Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |
 | Mod mode | The sword button on a split's header |
+| Reply to someone | Ctrl+click a name to add `@name` to the message box |
 | User card | Click a name: it opens in its own small window you can move anywhere, and several can be open |
 | Always on top | Settings → Appearance and chat |
 | All tabs | The arrow at the left edge of the tab bar lists every tab; the bar shows the ones that fit, always with the current tab |
@@ -80,8 +81,9 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 
 In **Settings → Updates** choose a channel:
 
-- **Beta:** every new build, so you get new features first.
-- **Stable:** only fully released versions.
+- **Beta:** every new release, so you get new features first.
+- **Stable:** only full releases (version 1.0.0 and up). Until 1.0.0 is out, every release is a beta, so Stable
+  also receives them.
 
 New versions download in the background and install when you close Agu Chat, or right away with **Restart to
 update**. Switching from Beta to Stable keeps your current version until a newer stable one is out.
@@ -93,17 +95,12 @@ to the platform they belong to. Settings and logs are in `%APPDATA%\Agu Chat\`.
 
 ## Building from source
 
-```bash
-npm install
-```
+Needs a recent Rust toolchain (the version is pinned in `native/rust-toolchain.toml`).
 
 ```bash
-npm run dev
+cd native
+cargo build --release -p agu-chat-gpui
 ```
 
-```bash
-npm test
-```
-
-`npm run dist` builds the Windows installer into `dist/`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
-[docs/RELEASING.md](docs/RELEASING.md).
+The program is `native/target/release/agu-chat-gpui.exe`. `cargo test -p agu-chat-core -p agu-chat-gpui` runs the
+tests.

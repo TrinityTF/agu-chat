@@ -50,32 +50,44 @@ moves with Zed; upgrade deliberately). Cargo lives in `%USERPROFILE%\.cargo\bin`
 
 The Electron app stays the shipping app on `main` until the port reaches parity.
 
-## Installer and updates (native app)
+## Installer and updates
 
-The native app ships as its own NSIS installer and updates itself from GitHub Releases of `TrinityTF/agu-chat`,
-next to the Electron app's releases. The two never see each other:
+The app ships as an NSIS installer and updates itself from GitHub Releases of `TrinityTF/agu-chat`.
 
-| | Electron (`release.yml`) | Native (`release-native.yml`) |
-| --- | --- | --- |
-| tag | `v<version>` (semver) | `native-v<version>` (not semver) |
-| assets | `Agu-Chat-Setup-<version>.exe`, `latest.yml`, `.blockmap` | `Agu-Chat-Native-Setup-<version>-x64.exe`, `...-x64.exe.sha256` |
-| release type | beta = prerelease, stable = "latest" | beta = prerelease, stable = full release, **never "latest"** |
-| triggers | push to `main`, manual | manual, or pushing a `native-v*` tag. Never a branch push |
-| read by | electron-updater | `native/core/src/updater.rs` |
+Versions are set by hand in `native/gpui/Cargo.toml` (keep `native/core/Cargo.toml` equal): the first native release is
+`0.1.0-beta`, small fixes `0.1.1`, `0.1.2`..., bigger updates `0.2.0`..., full releases `1.0.0` and up. Everything below
+1.0.0, and any version with a `-suffix`, is a **prerelease** (beta channel); a full release is `>= 1.0.0` with no suffix.
+There are no run numbers in versions.
 
-- electron-updater (beta) walks `releases.atom` and skips tags that are not valid semver, so `native-v...` is invisible
-  to it; electron-updater (stable) reads `/releases/latest`, which is why a native release is never marked latest.
-- The native updater (`Updater`, `GithubFeed`, `parse_releases`) pages through the releases list (3 x 100) and keeps
-  only releases tagged `native-v<semver>` that carry `Agu-Chat-Native-Setup-<version>-x64.exe`; drafts, Electron
-  releases and half-uploaded native releases are dropped. Channels are unchanged: beta = newest of prereleases and
-  full releases, stable = full releases only, never a downgrade (rules in `docs/RELEASING.md`, same code path).
-- `NativeInstaller` downloads that asset to `<data dir>\updates`, checks the size and the sha256 (GitHub's `digest`
+| | |
+| --- | --- |
+| tag | `v<version>` (e.g. `v0.1.0-beta`, `v0.1.1`, `v1.0.0`) |
+| assets | `Agu-Chat-Setup-<version>-x64.exe`, `Agu-Chat-Setup-<version>-x64.exe.sha256` |
+| title | `Agu Chat <version>` |
+| release type | prerelease: `--prerelease --latest=false`; full release: `--prerelease=false --latest` |
+| workflow | `.github/workflows/release.yml`: push of a `v*` tag, or a manual run (from `main`) |
+| read by | `native/core/src/updater.rs` |
+
+- Manual run: releases the version in `native/gpui/Cargo.toml` and creates the tag `v<version>` on the run's commit;
+  fails if that tag already exists. Tag push: the version is the tag minus `v` and must equal the Cargo version.
+- Release notes: commits since the previous native `v*` tag (tags `v0.0.*` are the old Electron app and are skipped),
+  `--no-merges`, at most 40. The first native release gets a fixed note instead.
+- The updater (`Updater`, `GithubFeed`, `parse_releases`) pages through the releases list (3 x 100) and keeps only
+  releases tagged `v<semver>` with version >= 0.1.0 that carry `Agu-Chat-Setup-<version>-x64.exe`; drafts, the old
+  Electron releases (`v0.0.1-beta.N`: below 0.1.0, installer without `-x64`, plus `latest.yml`) and half-uploaded
+  releases are dropped.
+- Channels (`settings.updateChannel`, default `"beta"`): beta = the newest of all releases; stable = full releases
+  only; never a downgrade. A release counts as a prerelease when GitHub's flag is set, its version has a `-suffix`, or
+  its major is 0. Because every release is a prerelease before 1.0.0, **stable behaves like beta while the running
+  version's major is 0** (otherwise stable users would never get an update); once the running version is >= 1.0.0
+  stable takes full releases only.
+- `NativeInstaller` downloads that asset to `<data dir>/updates`, checks the size and the sha256 (GitHub's `digest`
   field, else the `.sha256` asset), and only then reports `ready`. "Restart and update" runs
-  `Agu-Chat-Native-Setup-<version>-x64.exe /S /R` detached and quits the app (the quit goes through
+  `Agu-Chat-Setup-<version>-x64.exe /S /R` detached and quits the app (the quit goes through
   `Backend::set_quit_hook`, so the UI flushes `layout.json` first). The installer waits for `Agu Chat.exe` to be
   released, replaces it, and starts the new copy (`/R`).
-- Version: `AGU_APP_VERSION` (runtime) > `AGU_BUILD_VERSION` (set by the workflow at build time) > Cargo version.
-  The base version of a release is `native/gpui/Cargo.toml`; beta = `<base>-beta.<run number>`, stable = `<base>`.
+- Version shown and compared: `AGU_APP_VERSION` (runtime) > `AGU_BUILD_VERSION` (set by the workflow at build time) >
+  Cargo version.
 - Dev/test aid: `AGU_RELEASES_URL=http://127.0.0.1:<port>/releases` points the feed at a local fake (loopback only).
 
 ### Installer (`native/installer/`)
@@ -83,7 +95,7 @@ next to the Electron app's releases. The two never see each other:
 NSIS (the same tool electron-builder uses): `agu-chat.nsi`, built by `build-installer.ps1 -Version <v>` from
 `target\release\agu-chat-gpui.exe` (it also writes the `.sha256`). `makensis` is found through `NSIS_HOME`, `PATH`,
 Program Files, or the copy electron-builder caches in `%LOCALAPPDATA%\electron-builder\Cache`; CI installs it with
-`choco install nsis`. `make-icon.ps1` makes `app.ico` from `build/icon.png`.
+`choco install nsis`. `make-icon.ps1` makes `app.ico` from `icon.png` (same folder).
 
 Same identity as the Electron installer so it replaces it in place: per-user (no admin), default folder
 `%LOCALAPPDATA%\Programs\agu-chat`, `Agu Chat.exe`, `Uninstall Agu Chat.exe`, the same uninstall registry key

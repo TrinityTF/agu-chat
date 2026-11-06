@@ -1,4 +1,4 @@
-//! Embeds the app icon (native/installer/app.ico, made from build/icon.png) into the exe, so the taskbar, the
+//! Embeds the app icon (native/installer/app.ico, made from native/installer/icon.png) into the exe, so the taskbar, the
 //! Start-menu shortcut and Apps & features show it. Windows only.
 fn main() {
     println!("cargo:rerun-if-changed=app.rc");

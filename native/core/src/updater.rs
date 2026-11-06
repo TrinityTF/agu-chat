@@ -1,17 +1,18 @@
-//! Port of src/main/updater.js: updates from GitHub Releases (TrinityTF/agu-chat), with two channels:
-//!   beta   = GitHub prereleases (0.0.1-beta.N) AND full releases, whichever is newer
-//!   stable = full releases only
-//! Rules and the behaviour behind them: docs/RELEASING.md.
+//! Updates from GitHub Releases (TrinityTF/agu-chat), with two channels:
+//!   beta   = every release: prereleases (any `-suffix` version, or any 0.x version) AND full releases
+//!   stable = full releases only (>= 1.0.0, no suffix)
+//! Rules and the behaviour behind them: docs/GPUI-PORT.md "Installer and updates".
 //!
-//! electron-updater did three things for the JS: pick the release for the channel, download it, install it on
-//! quit. This port keeps the first as pure code (`pick_update`, `Version`) and the state machine around it as
-//! `Updater`; the download and install step sits behind the `Installer` trait.
+//! This file does three things: pick the release for the channel (`pick_update`, `Version`, pure code), run the
+//! state machine around it (`Updater`), and download and install it on request. The download and install step
+//! sits behind the `Installer` trait.
 //!
-//! Native release scheme (so this app and the Electron app can share one GitHub repo without seeing each other):
-//!   tag      `native-v<version>`                      (Electron: `v<version>`, which this file never reads)
-//!   assets   `Agu-Chat-Native-Setup-<version>-x64.exe` and `<same>.sha256`   (Electron: `Agu-Chat-Setup-*`,
-//!            `latest.yml`, `.blockmap`, which electron-updater reads and this file never touches)
-//!   native releases are never marked "latest" and their tags are not semver, so electron-updater skips them.
+//! Release scheme:
+//!   tag      `v<version>`                              e.g. `v0.1.0-beta`, `v0.1.1`, `v1.0.0`
+//!   assets   `Agu-Chat-Setup-<version>-x64.exe` and `<same>.sha256`
+//!   Releases of the old Electron app (tags `v0.0.1-beta.N`, installers `Agu-Chat-Setup-<ver>.exe` without `-x64`,
+//!   plus `latest.yml`) are never offered: they lack the exact installer asset, and versions below 0.1.0 are
+//!   skipped outright (`MIN_VERSION`).
 //! `NativeInstaller` downloads the installer asset, checks its size and sha256, and `install` runs it silently
 //! (`/S /R`) and quits the app. `NoInstaller` (a found update stays "available") is for builds without one.
 use std::cmp::Ordering;
@@ -30,11 +31,13 @@ const FIRST_CHECK_MS: u64 = 5_000; // shortly after start
 const CHECK_EVERY_MS: u64 = 4 * 60 * 60_000; // then every 4 hours
 const RETRY_AFTER_ERROR_MS: u64 = 15 * 60_000; // a failed background check is retried sooner than 4h
 const RELEASES_URL: &str = "https://api.github.com/repos/TrinityTF/agu-chat/releases";
-/// Native releases are mixed in with the Electron app's (a beta release per push to main), so the feed pages
-/// through up to this many pages of 100 looking for them.
+/// The feed pages through up to this many pages of 100 releases (the old Electron app's many beta releases
+/// are still in the list, below the new ones).
 const FEED_PAGES: u32 = 3;
-/// Tag prefix of native releases.
-pub const NATIVE_TAG_PREFIX: &str = "native-v";
+/// Tag prefix of releases.
+pub const TAG_PREFIX: &str = "v";
+/// The first release of this app. Anything older is the Electron app and is never an update.
+const MIN_VERSION: (u64, u64, u64) = (0, 1, 0);
 
 // ---------------------------------------------------------------------------------------------------------
 // versions and the channel rule
@@ -73,8 +76,13 @@ impl Version {
         Some(Version { major, minor, patch, pre })
     }
 
+    /// A `-suffix` version. (Before 1.0.0 every release counts as a prerelease too: see `Release::is_pre`.)
     pub fn is_prerelease(&self) -> bool {
         !self.pre.is_empty()
+    }
+
+    fn at_least_min(&self) -> bool {
+        (self.major, self.minor, self.patch) >= MIN_VERSION
     }
 }
 
@@ -133,14 +141,27 @@ fn normalize_channel(channel: &str) -> &'static str {
     }
 }
 
-/// Would an update to `version` be allowed on `channel`? (stable never takes a prerelease)
-pub fn allowed_on_channel(channel: &str, version: &str) -> bool {
-    channel == "beta" || !is_prerelease(version)
+/// A version that counts as a prerelease for the channels: it has a `-suffix`, or its major is 0.
+fn counts_as_pre(version: &str) -> bool {
+    is_prerelease(version) || Version::parse(version).map(|v| v.major == 0).unwrap_or(false)
 }
 
-/// `Agu-Chat-Native-Setup-<version>-x64.exe`: the one installer asset the native updater downloads.
+/// Stable only means "full releases" once the app itself is on a full-release line. Before 1.0.0 every release
+/// is a prerelease, so a stable user on 0.x would never be offered anything; while the CURRENT version's major
+/// is 0, stable behaves like beta. From 1.0.0 on the channels differ as documented.
+fn stable_filters(channel: &str, current: &str) -> bool {
+    channel == "stable" && Version::parse(current).map(|v| v.major > 0).unwrap_or(true)
+}
+
+/// Would an update to `version` be allowed on `channel`, for an app running `current`? (stable never takes a
+/// prerelease, except while `current` is still a 0.x version)
+pub fn allowed_on_channel(channel: &str, current: &str, version: &str) -> bool {
+    !stable_filters(channel, current) || !counts_as_pre(version)
+}
+
+/// `Agu-Chat-Setup-<version>-x64.exe`: the one installer asset the updater downloads.
 pub fn installer_asset_name(version: &str) -> String {
-    format!("Agu-Chat-Native-Setup-{version}-x64.exe")
+    format!("Agu-Chat-Setup-{version}-x64.exe")
 }
 
 /// A file attached to a release.
@@ -156,7 +177,7 @@ pub struct Asset {
 /// One GitHub release.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Release {
-    /// the tag without `native-v`
+    /// the tag without the leading `v`
     pub version: String,
     pub prerelease: bool,
     pub draft: bool,
@@ -173,16 +194,18 @@ impl Release {
     }
 }
 
-/// GitHub's releases list -> the native releases in it. Electron releases (`v0.0.1-beta.9`), releases of other
-/// tags and native releases that do not (yet) carry their installer are dropped: a half-uploaded release is
-/// never offered.
+/// GitHub's releases list -> the releases in it. Old Electron releases (`v0.0.1-beta.9`: below 0.1.0 and without
+/// the `-x64` installer), other tags and releases that do not (yet) carry their installer are dropped: a
+/// half-uploaded release is never offered.
 pub fn parse_releases(list: &Value) -> Vec<Release> {
     list.as_array()
         .map(|a| {
             a.iter()
                 .filter_map(|r| {
-                    let version = r["tag_name"].as_str()?.strip_prefix(NATIVE_TAG_PREFIX)?.to_string();
-                    Version::parse(&version)?;
+                    let version = r["tag_name"].as_str()?.strip_prefix(TAG_PREFIX)?.to_string();
+                    if !Version::parse(&version)?.at_least_min() {
+                        return None;
+                    }
                     let assets = r["assets"]
                         .as_array()
                         .map(|a| {
@@ -213,16 +236,17 @@ pub fn parse_releases(list: &Value) -> Vec<Release> {
         .unwrap_or_default()
 }
 
-/// The release to move to, or None. beta: the newest of all releases; stable: the newest full release. Never
-/// older than (or equal to) the running version (`allowDowngrade = false`).
+/// The release to move to, or None. beta: the newest of all releases; stable: the newest full release (but see
+/// `stable_filters`: while the running version is 0.x, stable takes prereleases too). Never older than (or equal
+/// to) the running version.
 pub fn pick_update(releases: &[Release], current: &str, channel: &str) -> Option<Release> {
-    let current = Version::parse(current)?;
+    let running = Version::parse(current)?;
     releases
         .iter()
         .filter(|r| !r.draft)
-        .filter(|r| channel != "stable" || (!r.prerelease && !is_prerelease(&r.version)))
+        .filter(|r| !stable_filters(channel, current) || (!r.prerelease && !counts_as_pre(&r.version)))
         .filter_map(|r| Version::parse(&r.version).map(|v| (v, r)))
-        .filter(|(v, _)| *v > current)
+        .filter(|(v, _)| *v > running)
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, r)| r.clone())
 }
@@ -369,7 +393,7 @@ impl Installer for NoInstaller {
 /// Called by `NativeInstaller::install` once the installer runs: the UI quits the app (flushing its files first).
 pub type QuitHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
-/// The installer of the native app: `Agu-Chat-Native-Setup-<version>-x64.exe` from the release's assets (see the
+/// The installer of the native app: `Agu-Chat-Setup-<version>-x64.exe` from the release's assets (see the
 /// module docs and docs/GPUI-PORT.md). The download is size- and sha256-checked before it counts as ready.
 pub struct NativeInstaller {
     dir: PathBuf,
@@ -599,7 +623,7 @@ impl Updater {
                 (true, g.enabled, false, g.in_flight_check)
             } else {
                 g.state.channel = next.to_string();
-                let pending = ["downloading", "ready"].contains(&g.state.status.as_str()) && !g.state.version.as_deref().map(|v| allowed_on_channel(next, v)).unwrap_or(true);
+                let pending = ["downloading", "ready"].contains(&g.state.status.as_str()) && !g.state.version.as_deref().map(|v| allowed_on_channel(next, &self.current_version, v)).unwrap_or(true);
                 (false, g.enabled, pending, g.in_flight_check)
             }
         };
@@ -703,7 +727,7 @@ impl Updater {
                 s.progress = 0.0;
             }),
             Ok(Some(rel)) => {
-                if !allowed_on_channel(&self.channel(), &rel.version) {
+                if !allowed_on_channel(&self.channel(), &self.current_version, &rel.version) {
                     // Channel changed while this check was running: ignore it, the queued re-check decides.
                     return self.set(|s| {
                         s.status = "none".into();
@@ -762,7 +786,7 @@ impl Updater {
         }
         match res {
             Ok(()) => {
-                if !allowed_on_channel(&self.channel(), &rel.version) {
+                if !allowed_on_channel(&self.channel(), &self.current_version, &rel.version) {
                     return self.discard_pending();
                 }
                 self.set(|s| {
@@ -803,22 +827,26 @@ mod tests {
         Release { version: v.into(), prerelease: pre, ..Default::default() }
     }
 
-    /// A GitHub releases list: native releases (with and without their installer) among Electron ones.
+    /// A GitHub releases list: new releases (with and without their installer) among old Electron ones.
     fn github_list() -> Value {
         let asset = |name: &str, size: u64| serde_json::json!({ "name": name, "browser_download_url": format!("https://example.invalid/{name}"), "size": size });
         serde_json::json!([
+            // old Electron releases: no -x64 installer, version below 0.1.0
             { "tag_name": "v0.0.1-beta.40", "prerelease": true, "draft": false, "body": "electron", "html_url": "u1",
               "assets": [asset("Agu-Chat-Setup-0.0.1-beta.40.exe", 5), asset("latest.yml", 1)] },
-            { "tag_name": "native-v0.1.0-beta.2", "prerelease": true, "draft": false, "body": "- native beta", "html_url": "u2",
-              "assets": [asset("Agu-Chat-Native-Setup-0.1.0-beta.2-x64.exe", 9), asset("Agu-Chat-Native-Setup-0.1.0-beta.2-x64.exe.sha256", 80)] },
-            { "tag_name": "native-v0.1.0", "prerelease": false, "draft": false, "body": "", "html_url": "u3",
-              "assets": [asset("Agu-Chat-Native-Setup-0.1.0-x64.exe", 9)] },
+            { "tag_name": "v0.0.1", "prerelease": false, "draft": false, "body": "electron stable", "html_url": "u7", "assets": [] },
+            // even with an -x64 installer, a version below 0.1.0 is never offered
+            { "tag_name": "v0.0.9", "prerelease": false, "draft": false, "body": "", "html_url": "u8", "assets": [asset("Agu-Chat-Setup-0.0.9-x64.exe", 9)] },
+            { "tag_name": "v0.1.0-beta", "prerelease": true, "draft": false, "body": "- first beta", "html_url": "u2",
+              "assets": [asset("Agu-Chat-Setup-0.1.0-beta-x64.exe", 9), asset("Agu-Chat-Setup-0.1.0-beta-x64.exe.sha256", 80)] },
+            { "tag_name": "v0.1.1", "prerelease": true, "draft": false, "body": "", "html_url": "u3",
+              "assets": [asset("Agu-Chat-Setup-0.1.1-x64.exe", 9)] },
             // no installer attached (yet): never offered
-            { "tag_name": "native-v0.2.0", "prerelease": false, "draft": false, "body": "", "html_url": "u4", "assets": [asset("notes.txt", 1)] },
-            // the Electron installer under a native tag: not ours
-            { "tag_name": "native-v0.3.0", "prerelease": false, "draft": false, "body": "", "html_url": "u5", "assets": [asset("Agu-Chat-Setup-0.3.0.exe", 1)] },
-            { "tag_name": "native-vnope", "prerelease": false, "draft": false, "body": "", "html_url": "u6", "assets": [asset("Agu-Chat-Native-Setup-nope-x64.exe", 1)] },
-            { "tag_name": "v0.0.1", "prerelease": false, "draft": false, "body": "electron stable", "html_url": "u7", "assets": [] }
+            { "tag_name": "v0.2.0", "prerelease": true, "draft": false, "body": "", "html_url": "u4", "assets": [asset("notes.txt", 1)] },
+            // the Electron-style installer name on a new-looking tag: not ours
+            { "tag_name": "v0.3.0", "prerelease": true, "draft": false, "body": "", "html_url": "u5", "assets": [asset("Agu-Chat-Setup-0.3.0.exe", 1)] },
+            { "tag_name": "vnope", "prerelease": false, "draft": false, "body": "", "html_url": "u6", "assets": [asset("Agu-Chat-Setup-nope-x64.exe", 1)] },
+            { "tag_name": "native-v0.4.0", "prerelease": false, "draft": false, "body": "", "html_url": "u9", "assets": [asset("Agu-Chat-Setup-0.4.0-x64.exe", 1)] }
         ])
     }
 
@@ -831,50 +859,62 @@ mod tests {
         assert!(v("v1.0.0") > v("0.9.9"));
         assert!(v("1.0.0-beta") > v("1.0.0-alpha.1"));
         assert!(Version::parse("nope").is_none());
+        assert!(v("0.1.0-beta") < v("0.1.0") && v("0.1.0") < v("0.1.1") && v("0.1.1") < v("0.2.0") && v("0.2.0") < v("1.0.0"));
     }
 
     #[test]
     fn the_channel_decides_which_release_counts() {
-        let all = vec![rel("0.0.1-beta.1", true), rel("0.0.1-beta.2", true), rel("0.0.1", false), rel("0.0.2-beta.1", true)];
-        // beta: whichever is newest, prerelease or not
-        assert_eq!(pick_update(&all, "0.0.1-beta.1", "beta").unwrap().version, "0.0.2-beta.1");
-        // stable: full releases only
-        assert_eq!(pick_update(&all, "0.0.1-beta.1", "stable").unwrap().version, "0.0.1");
+        // on a 1.x install: stable takes full releases only
+        let all = vec![rel("1.0.0-beta", true), rel("1.0.0-beta.2", true), rel("1.0.0", false), rel("1.1.0-beta", true)];
+        assert_eq!(pick_update(&all, "1.0.0-beta", "beta").unwrap().version, "1.1.0-beta");
+        assert_eq!(pick_update(&all, "0.9.0", "stable").unwrap().version, "1.1.0-beta"); // a 0.x install: stable acts like beta
+        assert_eq!(pick_update(&all, "1.0.0-beta", "stable").unwrap().version, "1.0.0");
         // never a downgrade, never the same version
-        assert!(pick_update(&all, "0.0.1", "stable").is_none());
-        assert!(pick_update(&all, "0.0.2-beta.1", "beta").is_none());
+        assert!(pick_update(&all, "1.0.0", "stable").is_none());
+        assert!(pick_update(&all, "1.1.0-beta", "beta").is_none());
         // drafts never count
         let mut d = rel("9.9.9", false);
         d.draft = true;
-        assert!(pick_update(&[d], "0.0.1", "beta").is_none());
-        assert!(allowed_on_channel("beta", "0.0.1-beta.1"));
-        assert!(!allowed_on_channel("stable", "0.0.1-beta.1"));
-        assert!(allowed_on_channel("stable", "0.0.1"));
+        assert!(pick_update(&[d], "1.0.0", "beta").is_none());
+        assert!(allowed_on_channel("beta", "1.0.0", "1.1.0-beta"));
+        assert!(!allowed_on_channel("stable", "1.0.0", "1.1.0-beta"));
+        assert!(allowed_on_channel("stable", "1.0.0", "1.1.0"));
     }
 
     #[test]
-    fn only_native_releases_with_their_installer_are_read() {
+    fn stable_acts_like_beta_while_the_running_version_is_0x() {
+        // every 0.x release is a prerelease, so stable users on 0.x would otherwise never update
+        let all = vec![rel("0.1.1", true), rel("0.2.0", true), rel("1.0.0", false)];
+        assert_eq!(pick_update(&all[..2], "0.1.0-beta", "stable").unwrap().version, "0.2.0");
+        assert_eq!(pick_update(&all, "0.1.0-beta", "stable").unwrap().version, "1.0.0");
+        assert!(allowed_on_channel("stable", "0.1.0-beta", "0.2.0"));
+        // from 1.0.0 on stable is full releases only again
+        let later = vec![rel("1.0.1-beta", true), rel("1.0.1", false), rel("1.1.0-beta", true)];
+        assert_eq!(pick_update(&later, "1.0.0", "stable").unwrap().version, "1.0.1");
+        assert!(pick_update(&later[..1], "1.0.0", "stable").is_none());
+    }
+
+    #[test]
+    fn only_current_releases_with_their_installer_are_read() {
         let rels = parse_releases(&github_list());
         let versions: Vec<_> = rels.iter().map(|r| r.version.as_str()).collect();
-        assert_eq!(versions, vec!["0.1.0-beta.2", "0.1.0"]);
-        assert_eq!(rels[0].installer().unwrap().name, "Agu-Chat-Native-Setup-0.1.0-beta.2-x64.exe");
-        assert!(rels[0].prerelease && !rels[1].prerelease);
-        // the Electron updater's files are never ours
+        assert_eq!(versions, vec!["0.1.0-beta", "0.1.1"]);
+        assert_eq!(rels[0].installer().unwrap().name, "Agu-Chat-Setup-0.1.0-beta-x64.exe");
+        assert!(rels[0].prerelease);
+        // the old Electron updater's files are never ours
         assert!(rels.iter().all(|r| r.assets.iter().all(|a| a.name != "latest.yml")));
-        assert_eq!(installer_asset_name("1.2.3"), "Agu-Chat-Native-Setup-1.2.3-x64.exe");
+        assert_eq!(installer_asset_name("1.2.3"), "Agu-Chat-Setup-1.2.3-x64.exe");
     }
 
     #[test]
     fn channels_over_a_mixed_feed() {
         let rels = parse_releases(&github_list());
-        // beta takes the newest of both kinds, stable only the full release
-        assert_eq!(pick_update(&rels, "0.0.9", "beta").unwrap().version, "0.1.0");
-        assert_eq!(pick_update(&rels, "0.0.9", "stable").unwrap().version, "0.1.0");
-        assert_eq!(pick_update(&rels[..1], "0.0.9", "beta").unwrap().version, "0.1.0-beta.2");
-        assert!(pick_update(&rels[..1], "0.0.9", "stable").is_none());
-        // a beta user on the beta that is already the newest, a stable user past it
-        assert!(pick_update(&rels[..1], "0.1.0-beta.2", "beta").is_none());
-        assert!(pick_update(&rels, "0.1.0", "beta").is_none());
+        // anyone below the first release is offered the newest one
+        assert_eq!(pick_update(&rels, "0.0.9", "beta").unwrap().version, "0.1.1");
+        assert_eq!(pick_update(&rels[..1], "0.0.9", "stable").unwrap().version, "0.1.0-beta");
+        assert!(pick_update(&rels[..1], "0.1.0-beta", "beta").is_none());
+        assert_eq!(pick_update(&rels, "0.1.0-beta", "stable").unwrap().version, "0.1.1");
+        assert!(pick_update(&rels, "0.1.1", "beta").is_none());
     }
 
     #[test]
@@ -882,7 +922,7 @@ mod tests {
         let h = "a".repeat(64);
         assert_eq!(digest_hex(&format!("sha256:{h}")), Some(h.clone()));
         assert_eq!(digest_hex("sha1:abc"), None);
-        assert_eq!(sidecar_hex(&format!("{}  Agu-Chat-Native-Setup-1-x64.exe
+        assert_eq!(sidecar_hex(&format!("{}  Agu-Chat-Setup-1-x64.exe
 ", h.to_uppercase())), Some(h));
         assert_eq!(sidecar_hex("not a hash"), None);
     }

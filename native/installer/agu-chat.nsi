@@ -1,13 +1,13 @@
 ; Installer of the native Agu Chat (GPUI). Built by build-installer.ps1; see docs/GPUI-PORT.md "Installer and updates".
 ;
-; Same identity as the Electron app's NSIS installer (package.json "build"): appId lol.agu.chat, productName
+; Same identity as the old Electron app's NSIS installer: appId lol.agu.chat, productName
 ; "Agu Chat", per-user, default folder %LOCALAPPDATA%\Programs\agu-chat, "Agu Chat.exe", "Uninstall Agu Chat.exe",
 ; the same uninstall registry key, so installing this over an Electron install replaces it in place (shortcuts,
 ; Apps & features entry and the user's data in %APPDATA%\Agu Chat all carry over).
 ;
 ; Command line (all optional):  /S  silent    /D=dir  install folder (must be last)    /R  start the app afterwards
 ; (an interactive install always starts it)    /NOWAIT  do not wait for a running copy to exit.
-; The in-app updater runs:  "Agu-Chat-Native-Setup-<ver>-x64.exe" /S /R   and then quits the app, so the
+; The in-app updater runs:  "Agu-Chat-Setup-<ver>-x64.exe" /S /R   and then quits the app, so the
 ; installer waits (up to 30 s) for "Agu Chat.exe" to release its file before it overwrites it.
 Unicode true
 SetCompressor /SOLID lzma
@@ -24,7 +24,7 @@ ManifestDPIAware true
   !error "pass /DICON_SRC=<path to app.ico>"
 !endif
 !ifndef OUT_FILE
-  !define OUT_FILE "Agu-Chat-Native-Setup-${VERSION}-x64.exe"
+  !define OUT_FILE "Agu-Chat-Setup-${VERSION}-x64.exe"
 !endif
 
 !define PRODUCT "Agu Chat"

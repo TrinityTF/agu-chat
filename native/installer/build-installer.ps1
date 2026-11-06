@@ -1,5 +1,5 @@
-# Builds the native installer:  Agu-Chat-Native-Setup-<version>-x64.exe  (+ .sha256) in -OutDir.
-#   .\build-installer.ps1 -Version 0.1.0-beta.3 [-Exe ..\target\release\agu-chat-gpui.exe] [-OutDir ..\dist] [-Test]
+# Builds the native installer:  Agu-Chat-Setup-<version>-x64.exe  (+ .sha256) in -OutDir.
+#   .\build-installer.ps1 -Version 0.1.0-beta [-Exe ..\target\release\agu-chat-gpui.exe] [-OutDir ..\dist] [-Test]
 # -Test builds an installer with its own uninstall key and shortcut name ("Agu Chat (installer test)") and a
 # default folder in %TEMP%, so trying it never touches a real install. Needs NSIS (makensis): $env:NSIS_HOME,
 # PATH, a choco install, or the copy electron-builder caches.
@@ -27,7 +27,7 @@ $ico = Join-Path $PSScriptRoot "app.ico"
 if (-not (Test-Path $ico)) { & (Join-Path $PSScriptRoot "make-icon.ps1") }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
-$name = if ($Test) { "Agu-Chat-Native-Setup-$Version-x64-TEST.exe" } else { "Agu-Chat-Native-Setup-$Version-x64.exe" }
+$name = if ($Test) { "Agu-Chat-Setup-$Version-x64-TEST.exe" } else { "Agu-Chat-Setup-$Version-x64.exe" }
 $out = Join-Path $OutDir $name
 $nsisArgs = @("/V2", "/DVERSION=$Version", "/DEXE_SRC=$((Resolve-Path $Exe).Path)", "/DICON_SRC=$((Resolve-Path $ico).Path)", "/DOUT_FILE=$out")
 if ($Test) { $nsisArgs += "/DTEST_BUILD" }

@@ -1,7 +1,7 @@
-# Builds native/installer/app.ico (PNG frames, 16..256) from build/icon.png. Usage: make-icon.ps1 [-Out path]
+# Builds native/installer/app.ico (PNG frames, 16..256) from icon.png. Usage: make-icon.ps1 [-Out path]
 param([string]$Out = (Join-Path $PSScriptRoot "app.ico"))
 Add-Type -AssemblyName System.Drawing
-$src = [System.Drawing.Image]::FromFile((Resolve-Path (Join-Path $PSScriptRoot "..\..\build\icon.png")))
+$src = [System.Drawing.Image]::FromFile((Resolve-Path (Join-Path $PSScriptRoot "icon.png")))
 $sizes = 16, 24, 32, 48, 64, 128, 256
 $frames = foreach ($s in $sizes) {
   $bmp = New-Object System.Drawing.Bitmap $s, $s, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)

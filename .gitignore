@@ -1,6 +1,3 @@
-node_modules/
-dist/
-out/
-build/release-notes.md
+native/target*/
+native/dist/
 *.log
-native/target/

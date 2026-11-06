@@ -1,23 +1,19 @@
-# Builds the Windows installer and publishes it as a GitHub release; installed copies of Agu Chat pick it up.
-#   * every push to main            -> beta release   "<base>-beta.<run number>" (GitHub prerelease, never "latest")
-#   * manual run, channel = stable  -> stable release "<base>"                    (full release, marked "latest")
-# Beta users follow prereleases and stable releases; stable users only follow full releases (docs/RELEASING.md).
+# Builds the Windows installer and publishes it as a GitHub release.
+#   * runs only by hand (workflow_dispatch, from main) or when a `v*` tag is pushed; never on a branch push
+#   * manual run: releases the version in native/gpui/Cargo.toml and creates the tag v<version> on the run's commit
+#     (fails if that tag already exists)
+#   * tag push: the version is the tag without its leading `v`; it must equal native/gpui/Cargo.toml's version
+#   * a version with a -suffix, or with major 0, is a prerelease (published with --prerelease --latest=false);
+#     a full release (>= 1.0.0, no suffix) is published as "latest"
+#   * assets: Agu-Chat-Setup-<version>-x64.exe + .sha256; title "Agu Chat <version>"
+# Versions are set by hand in Cargo.toml. Update rules (native/core/src/updater.rs): docs/GPUI-PORT.md "Installer and updates".
 name: Build and release
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
   workflow_dispatch:
-    inputs:
-      channel:
-        description: 'Release channel (beta = prerelease, stable = full release)'
-        type: choice
-        options: [beta, stable]
-        default: beta
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -29,71 +25,113 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    env:
-      CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'beta' }}
-    steps:
-      - name: Stable releases come from main only
-        if: env.CHANNEL == 'stable' && github.ref != 'refs/heads/main'
+    defaults:
+      run:
         shell: bash
-        run: |
-          echo "Stable releases must be run from the main branch."
-          exit 1
-
+    steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # full history and tags: version numbering and release notes read them
+          fetch-depth: 0 # tags: the release notes read them
 
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Set version and release notes
-        id: release
-        shell: bash
-        run: node scripts/prepare-release.mjs "$CHANNEL" "${{ github.run_number }}"
-
-      # The draft release is created up front; electron-builder only uploads files into it
-      # (letting it create the release races between its parallel uploads).
-      - name: Create draft release
-        shell: bash
+      - name: Work out the version
+        id: ver
         run: |
-          flags=""
-          if [ "${{ steps.release.outputs.prerelease }}" = "true" ]; then flags="--prerelease"; fi
-          gh release create "${{ steps.release.outputs.tag }}" --draft $flags --title "${{ steps.release.outputs.title }}" --target "$GITHUB_SHA" --notes-file build/release-notes.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build installer and upload it
-        shell: bash
-        run: npm run release # vite build, then electron-builder --win --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check the update files were uploaded
-        shell: bash
-        run: |
-          assets="$(gh release view "${{ steps.release.outputs.tag }}" --json assets --jq '.assets[].name')"
-          echo "$assets"
-          echo "$assets" | grep -q '\.exe$' && echo "$assets" | grep -q '\.yml$' && echo "$assets" | grep -q '\.blockmap$'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Published only once every file is there, so the app never sees a half-uploaded release.
-      # Beta = prerelease and never "latest" (stable users' updater reads /releases/latest); stable = "latest".
-      - name: Publish release
-        shell: bash
-        run: |
-          if [ "${{ steps.release.outputs.prerelease }}" = "true" ]; then
-            gh release edit "${{ steps.release.outputs.tag }}" --draft=false --prerelease --latest=false
+          cargo_version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' native/gpui/Cargo.toml | head -n 1)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$cargo_version" ]; then echo "Tag $GITHUB_REF_NAME does not match native/gpui/Cargo.toml ($cargo_version)"; exit 1; fi
           else
-            gh release edit "${{ steps.release.outputs.tag }}" --draft=false --prerelease=false --latest
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "Run this workflow from the main branch."; exit 1; fi
+            version="$cargo_version"
           fi
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then echo "Bad version '$version'"; exit 1; fi
+          tag="v$version"
+          if [ "${{ github.event_name }}" != "push" ] && git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then echo "Tag $tag already exists"; exit 1; fi
+          prerelease=false
+          if echo "$version" | grep -q -- '-' || [ "${version%%.*}" = "0" ]; then prerelease=true; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Agu Chat $version ($tag, prerelease=$prerelease)"
+
+      - name: Release notes
+        run: |
+          mkdir -p native/dist
+          # the previous native release: skip the old Electron tags (v0.0.*) and this release's own tag
+          prev="$(git tag --list 'v*' --sort=-creatordate | grep -v '^v0\.0\.' | grep -v -x "${{ steps.ver.outputs.tag }}" | head -n 1 || true)"
+          if [ -z "$prev" ]; then
+            notes="First release of the new Agu Chat, rebuilt as a native Windows app: faster, lighter, same look. Install it over the old version; your settings and logins carry over."
+          else
+            notes="$(git log "$prev..HEAD" --no-merges --format='- %s' -n 40)"
+            if [ -z "$notes" ]; then notes="- Improvements and fixes"; fi
+          fi
+          printf '%s\n' "$notes" > native/dist/release-notes.md
+          cat native/dist/release-notes.md
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: native-${{ runner.os }}-${{ hashFiles('native/Cargo.lock', 'native/rust-toolchain.toml') }}
+          restore-keys: native-${{ runner.os }}-
+
+      - name: Test
+        working-directory: native
+        run: cargo test -p agu-chat-core -p agu-chat-gpui
+
+      - name: Build
+        working-directory: native
+        env:
+          AGU_BUILD_VERSION: ${{ steps.ver.outputs.version }}
+        run: cargo build --release -p agu-chat-gpui
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $env:NSIS_HOME = "${env:ProgramFiles(x86)}\NSIS"
+          native\installer\build-installer.ps1 -Version "${{ steps.ver.outputs.version }}" -Exe native\target\release\agu-chat-gpui.exe -OutDir native\dist
+
+      # The draft release is created up front and published last, so the app never sees a half-uploaded release.
+      # For a manual run, --target makes GitHub create the tag v<version> on this run's commit when it is published.
+      - name: Create draft release and upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          flags=""
+          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then flags="--prerelease"; fi
+          if gh release view "$tag" > /dev/null 2>&1; then
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = "true" ]; then
+              gh release delete "$tag" --yes # an unpublished leftover of a failed earlier run of the same tag
+            else
+              echo "Release $tag is already published."; exit 1
+            fi
+          fi
+          gh release create "$tag" --draft $flags --title "Agu Chat ${{ steps.ver.outputs.version }}" --target "$GITHUB_SHA" --notes-file native/dist/release-notes.md
+          gh release upload "$tag" "native/dist/Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe" "native/dist/Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe.sha256"
+
+      - name: Check the assets are there
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets="$(gh release view "${{ steps.ver.outputs.tag }}" --json assets --jq '.assets[].name')"
+          echo "$assets"
+          echo "$assets" | grep -qx "Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe"
+          echo "$assets" | grep -qx "Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe.sha256"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
+            gh release edit "${{ steps.ver.outputs.tag }}" --draft=false --prerelease --latest=false
+          else
+            gh release edit "${{ steps.ver.outputs.tag }}" --draft=false --prerelease=false --latest
+          fi
