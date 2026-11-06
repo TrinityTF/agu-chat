@@ -48,17 +48,41 @@ pub fn open_popout<V: Render + 'static>(cx: &mut App, title: &str, x: f32, y: f3
     Some(handle.into())
 }
 
+/// The main window's HWND: pop-outs are owned by it, so they always sit above it (Electron's `parent`) and go
+/// away with it when it is minimized.
+static OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(windows)]
+fn hwnd_of(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let h = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(w) = h.as_raw() else { return None };
+    Some(windows::Win32::Foundation::HWND(w.hwnd.get() as *mut core::ffi::c_void))
+}
+
+/// Called once for the main window (main.rs).
+#[cfg(windows)]
+pub fn set_owner(window: &Window) {
+    if let Some(h) = hwnd_of(window) {
+        OWNER.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_owner(_: &Window) {}
+
 /// No taskbar button and no maximize: swap WS_EX_APPWINDOW for WS_EX_TOOLWINDOW (re-shown so the shell drops
-/// the button it already made).
+/// the button it already made). Owned by the main window, and brought to the front: the click that opened it
+/// went to the main window, which otherwise stayed on top of the new card.
 #[cfg(windows)]
 fn tool_window(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
-    let Ok(h) = HasWindowHandle::window_handle(window) else { return };
-    let RawWindowHandle::Win32(w) = h.as_raw() else { return };
-    let hwnd = HWND(w.hwnd.get() as *mut core::ffi::c_void);
+    let Some(hwnd) = hwnd_of(window) else { return };
     unsafe {
+        let owner = OWNER.load(std::sync::atomic::Ordering::Relaxed);
+        if owner != 0 && owner != hwnd.0 as isize {
+            SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner);
+        }
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let ex = (ex & !(WS_EX_APPWINDOW.0 as isize)) | WS_EX_TOOLWINDOW.0 as isize;
         let st = GetWindowLongPtrW(hwnd, GWL_STYLE) & !(WS_MAXIMIZEBOX.0 as isize);
@@ -72,6 +96,7 @@ fn tool_window(window: &Window) {
         if visible {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 

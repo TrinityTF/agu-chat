@@ -129,6 +129,7 @@ fn main() {
         .unwrap();
 
         // User cards are windows of their own: they go with the main window (Electron owned them by it).
+        let _ = main.update(cx, |_, window, _| chat::popout::set_owner(window));
         let main_id = main.window_id();
         cx.on_window_closed(move |cx| {
             if !cx.windows().iter().any(|w| w.window_id() == main_id) {

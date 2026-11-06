@@ -171,7 +171,8 @@ pub struct ChatPane {
     pub(super) toasts: Vec<Toast>,
     toast_seq: u64,
     pub(super) tip: Option<(Rc<Tip>, Point<Pixels>)>,
-    pub(super) tip_state: Rc<Cell<bool>>,
+    /// (tooltip showing, an image was hit by the current mouse move), shared by the pane's flows: `InlineFlow::on_tip`
+    pub(super) tip_state: Rc<Cell<(bool, bool)>>,
     pub(super) hover_row: Option<String>,
     pub(super) hover_bar: Option<String>,
     pin_tick: Option<gpui::Task<()>>,
@@ -380,7 +381,7 @@ impl ChatPane {
             toasts: Vec::new(),
             toast_seq: 0,
             tip: None,
-            tip_state: Rc::new(Cell::new(false)),
+            tip_state: Rc::new(Cell::new((false, false))),
             hover_row: None,
             hover_bar: None,
             pin_tick: None,

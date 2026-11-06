@@ -644,12 +644,13 @@ pub struct InlineFlow {
     content: Rc<InlineContent>,
     on_act: Option<OnAct>,
     on_tip: Option<OnTip>,
-    hovering_tip: Rc<Cell<bool>>,
+    /// shared by every flow of a pane: (tooltip showing, an image was hit by the current mouse move)
+    hovering_tip: Rc<Cell<(bool, bool)>>,
     fit: bool,
 }
 
 pub fn inline_flow(content: Rc<InlineContent>) -> InlineFlow {
-    InlineFlow { content, on_act: None, on_tip: None, hovering_tip: Rc::new(Cell::new(false)), fit: false }
+    InlineFlow { content, on_act: None, on_tip: None, hovering_tip: Rc::new(Cell::new((false, false))), fit: false }
 }
 
 impl InlineFlow {
@@ -662,7 +663,7 @@ impl InlineFlow {
         self.on_act = Some(f);
         self
     }
-    pub fn on_tip(mut self, f: OnTip, state: Rc<Cell<bool>>) -> Self {
+    pub fn on_tip(mut self, f: OnTip, state: Rc<Cell<(bool, bool)>>) -> Self {
         self.on_tip = Some(f);
         self.hovering_tip = state;
         self
@@ -901,18 +902,28 @@ impl Element for InlineFlow {
                     }
                 })
                 .collect();
-            if !tips.is_empty() || self.hovering_tip.get() {
+            // Every row's flow registers this, sharing one state. A row that is not hovered must not clear a tip
+            // another row just set in the same event (it used to: the tip then showed only when the hovered row's
+            // handler happened to run last). So each move first resets "hit" (capture runs before any bubble),
+            // a hovered image sets it, and the tip is cleared only after the event, if nothing was hit.
+            if !tips.is_empty() || self.hovering_tip.get().0 {
                 let state = self.hovering_tip.clone();
                 window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
-                    if phase != DispatchPhase::Bubble {
+                    if phase == DispatchPhase::Capture {
+                        state.set((state.get().0, false));
                         return;
                     }
                     if let Some((_, t)) = tips.iter().find(|(h, _)| h.is_hovered(window)) {
-                        state.set(true);
+                        state.set((true, true));
                         on_tip(Some((t.clone(), ev.position)), window, cx);
-                    } else if state.get() {
-                        state.set(false);
-                        on_tip(None, window, cx);
+                    } else if state.get().0 {
+                        let (state, on_tip) = (state.clone(), on_tip.clone());
+                        window.defer(cx, move |window, cx| {
+                            if state.get() == (true, false) {
+                                state.set((false, false));
+                                on_tip(None, window, cx);
+                            }
+                        });
                     }
                 });
             }
