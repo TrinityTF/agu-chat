@@ -97,11 +97,22 @@ fn main() {
             Some(r) => Bounds::new(gpui::point(px(r.x), px(r.y)), size(px(r.width), px(r.height))),
             None => Bounds::centered(None, size(px(1280.), px(800.)), cx),
         };
+        // GPUI places a window on the primary display unless told which one: bounds that sit on another monitor
+        // (a restored window.json, AGU_WIN_POS) need that display's id, or they fall back to a centred default.
+        let display_id = at.and_then(|r| {
+            let (cx0, cy0) = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+            cx.displays().iter().find(|d| {
+                let b = d.bounds();
+                let (x, y, w, h): (f32, f32, f32, f32) = (b.origin.x.into(), b.origin.y.into(), b.size.width.into(), b.size.height.into());
+                cx0 >= x && cx0 < x + w && cy0 >= y && cy0 < y + h
+            }).map(|d| d.id())
+        });
         let window_bounds = if saved.map(|s| s.maximized).unwrap_or(false) { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) };
 
         let main = cx.open_window(
             WindowOptions {
                 window_bounds: Some(window_bounds),
+                display_id,
                 // frame: false -> no OS title bar; the tab bar is the title bar.
                 titlebar: Some(TitlebarOptions { title: Some("Agu Chat".into()), appears_transparent: true, traffic_light_position: None }),
                 window_min_size: Some(size(px(window_state::MIN_W), px(window_state::MIN_H))),
