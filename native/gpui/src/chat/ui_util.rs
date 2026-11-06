@@ -69,3 +69,18 @@ mod tests {
         assert!(fmt_time(1_700_000_000_000, true).len() > t.len());
     }
 }
+
+/// `btnPrimary` / `btnGhost` / `btnDanger` of chat/ui.ts: `rounded px-2.5 py-1 text-xs`, the layout's `BtnOpts` pick which.
+pub fn cbtn(id: impl Into<gpui::ElementId>, label: impl Into<gpui::SharedString>, o: crate::layout::ui::BtnOpts) -> gpui::Stateful<gpui::Div> {
+    use gpui::{div, prelude::*, px, FontWeight};
+    use crate::theme::{self, a, c};
+    let b = div().id(id).flex_none().rounded(px(4.)).px(px(10.)).py(px(4.)).text_size(px(12.)).line_height(px(16.));
+    let b = if o.primary {
+        b.bg(c(theme::ACCENT)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::WHITE)).when(!o.disabled, |d| d.hover(|s| s.bg(c(theme::ACCENT_STRONG))))
+    } else if o.danger {
+        b.border_1().border_color(a(theme::RED_500, 0.4)).bg(a(theme::RED_500, 0.1)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::RED_300)).when(!o.disabled, |d| d.hover(|s| s.bg(a(theme::RED_500, 0.2))))
+    } else {
+        b.border_1().border_color(c(theme::LINE)).text_color(c(theme::MUTED)).when(!o.disabled, |d| d.hover(|s| s.border_color(a(theme::WHITE, 0.25)).text_color(c(theme::TEXT))))
+    };
+    b.when(o.disabled, |d| d.opacity(0.4)).child(label.into())
+}

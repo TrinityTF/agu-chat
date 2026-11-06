@@ -59,7 +59,7 @@ fn main() {
         };
         let window_bounds = if saved.map(|s| s.maximized).unwrap_or(false) { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) };
 
-        cx.open_window(
+        let main = cx.open_window(
             WindowOptions {
                 window_bounds: Some(window_bounds),
                 // frame: false -> no OS title bar; the tab bar is the title bar.
@@ -71,8 +71,10 @@ fn main() {
         )
         .unwrap();
 
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+        // User cards are windows of their own: they go with the main window (Electron owned them by it).
+        let main_id = main.window_id();
+        cx.on_window_closed(move |cx| {
+            if !cx.windows().iter().any(|w| w.window_id() == main_id) {
                 cx.quit();
             }
         })

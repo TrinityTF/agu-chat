@@ -3,8 +3,7 @@
 //! items + the few box styles around them), cached by the pane, and rendered into GPUI elements each frame by
 //! `render.rs`. The inline items flow through `inline.rs`.
 //!
-//! Left for later rounds: opening the user card from a name or @mention (`RowAction::Card` is a no-op),
-//! the Ban / Warn popover (`RowAction::Popover` toasts instead).
+//! Round 3: a name or @mention opens the user card (`RowAction::Card`), the Ban / Warn buttons the popover.
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -102,6 +101,15 @@ pub struct ReplyTarget {
     pub text: String,
 }
 
+/// The person a name click opens the card for (UserCard's `RowUser` with the avatar the platform gave).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CardUser {
+    pub id: String,
+    pub login: String,
+    pub name: String,
+    pub avatar: String,
+}
+
 /// What a click on a row's button does; the pane runs it.
 #[derive(Clone, Debug)]
 pub enum RowAction {
@@ -111,8 +119,8 @@ pub enum RowAction {
     Delete { sk: String, id: String },
     QuickTimeout { sk: String, msg: Box<ChatMsg>, seconds: u32 },
     TwitchCommand { sk: String, msg: Box<ChatMsg>, template: String },
-    Popover { kind: &'static str },
-    Card,
+    Popover { sk: String, msg: Box<ChatMsg>, kind: &'static str },
+    Card { sk: String, user: CardUser },
     Automod { sk: String, id: String, allow: bool },
     RumbleMod { sk: String, action: &'static str, msg: Box<RumbleMsg>, seconds: u32 },
     KickMod { sk: String, action: &'static str, msg: Box<KickMsg>, seconds: Option<u32> },
@@ -170,6 +178,7 @@ pub struct FeedSpec {
 #[derive(Clone)]
 pub struct AutomodSpec {
     pub sk: String,
+    pub user: CardUser,
     pub id: String,
     pub header: Rc<InlineContent>,
     pub chip: String,
@@ -269,7 +278,7 @@ fn link_item(href: &str, text: &str, base: f32) -> Item {
 }
 
 /// MessageText: the message's parts as inline items.
-fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<&EmoteSets>, text_color: Hsla, strike: bool, readable_mentions: bool) {
+fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<&EmoteSets>, text_color: Hsla, strike: bool, readable_mentions: bool, mut mention_acts: Option<(&mut Vec<RowAction>, &str)>) {
     let base = f.base;
     for p in parts {
         match p {
@@ -280,9 +289,15 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                 }
                 f.push(Item::Text(ti));
             }
-            MsgPart::Mention { name, color, .. } => {
+            MsgPart::Mention { name, color, login, user_id } => {
                 let c = if color.is_empty() { text_color } else if readable_mentions { hex(&readable_color(color)) } else { hex(color) };
-                f.push(Item::Text(TextItem::new(format!("@{name}"), base, c).weight(FontWeight::SEMIBOLD).strike(strike)));
+                let mut t = TextItem::new(format!("@{name}"), base, c).weight(FontWeight::SEMIBOLD).strike(strike);
+                // clickable only on the live message rows: it opens the card of who is mentioned
+                if let Some((acts, sk)) = mention_acts.as_mut() {
+                    acts.push(RowAction::Card { sk: sk.to_string(), user: CardUser { id: user_id.clone(), login: login.clone(), name: name.clone(), avatar: String::new() } });
+                    t = t.act(Act::Tag(acts.len() as u32 - 1), true);
+                }
+                f.push(Item::Text(t));
             }
             MsgPart::Gif { url, .. } => f.push(Item::Gif(GifItem { url: url.clone().into() })),
             MsgPart::Link { href, text } => f.push(link_item(href, text, base)),
@@ -309,7 +324,7 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
 /// The parts of a message as inline items (used by the pinned card).
 pub fn message_flow(base: f32, parts: &[MsgPart], size: SizeOpt, emotes: Option<&EmoteSets>, color: Hsla) -> Vec<Item> {
     let mut f = Flow::new(base);
-    message_items(&mut f, parts, size, emotes, color, false, true);
+    message_items(&mut f, parts, size, emotes, color, false, true, None);
     f.items
 }
 
@@ -567,9 +582,9 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
             _ => is_mod,
         };
         let run = |b: &ModButton| match b.action.as_str() {
-            "ban" => RowAction::Popover { kind: "ban" },
+            "ban" => RowAction::Popover { sk: sk.clone(), msg: Box::new((*msg).clone()), kind: "ban" },
             "timeout" => RowAction::QuickTimeout { sk: sk.clone(), msg: Box::new((*msg).clone()), seconds: b.seconds },
-            "warn" => RowAction::Popover { kind: "warn" },
+            "warn" => RowAction::Popover { sk: sk.clone(), msg: Box::new((*msg).clone()), kind: "warn" },
             "delete" => RowAction::Delete { sk: sk.clone(), id: msg.id.clone() },
             _ => RowAction::TwitchCommand { sk: sk.clone(), msg: Box::new((*msg).clone()), template: b.command.clone() },
         };
@@ -603,7 +618,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
         }
     }
     gap(&mut f, &mut first);
-    actions.push(RowAction::Card);
+    actions.push(RowAction::Card { sk: sk.clone(), user: CardUser { id: msg.user.id.clone(), login: msg.user.login.clone(), name: msg.user.name.clone(), avatar: String::new() } });
     let card_tag = actions.len() as u32 - 1;
     let mut name = TextItem::new(msg.user.name.clone(), base, color).weight(FontWeight::SEMIBOLD).act(Act::Tag(card_tag), true);
     if let Some(p) = paint {
@@ -617,7 +632,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     if msg.action {
         // /me: the message takes the name's style and medium weight
         let mark = f.items.len();
-        message_items(&mut f, &parts, size, env.emotes.as_deref(), color, struck, rs.readable_colors);
+        message_items(&mut f, &parts, size, env.emotes.as_deref(), color, struck, rs.readable_colors, Some((&mut actions, &sk)));
         for it in f.items[mark..].iter_mut() {
             if let Item::Text(t) = it {
                 t.weight = FontWeight::MEDIUM;
@@ -627,7 +642,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
             }
         }
     } else {
-        message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::TEXT), struck, rs.readable_colors);
+        message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::TEXT), struck, rs.readable_colors, Some((&mut actions, &sk)));
     }
 
     let content = f.finish();
@@ -700,7 +715,7 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
     } else {
         let parts = build_parts(&n.text, n.emotes.as_deref().unwrap_or(""), env.emotes.as_deref(), None, "");
         let mut f = Flow::new(base);
-        message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::MUTED), false, rs.readable_colors);
+        message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::MUTED), false, rs.readable_colors, None);
         Some(f.finish())
     };
     let _ = row;
@@ -734,6 +749,7 @@ pub fn automod_row(row: &Row, h: &HeldMsg, ctx: &RowCtx, env: &TwitchEnv) -> Bui
     };
     BuiltRow::Automod(AutomodSpec {
         sk: row.sk.clone(),
+        user: CardUser { id: h.user.id.clone(), login: h.user.login.clone(), name: h.user.name.clone(), avatar: String::new() },
         id: h.id.clone(),
         header: head.finish(),
         chip,
@@ -870,7 +886,7 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
             }
         }
     }
-    actions.push(RowAction::Card);
+    actions.push(RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } });
     f.push(Item::Text(TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, name_color_of(&m.user.color, rs.readable_colors)).weight(FontWeight::SEMIBOLD).act(Act::Tag(actions.len() as u32 - 1), true)));
     if let Some(ch) = &m.channel {
         if !m.user.login.is_empty() && ch.name != m.user.login {
@@ -1020,7 +1036,7 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
             }
         }
     }
-    actions.push(RowAction::Card);
+    actions.push(RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } });
     f.push(Item::Text(TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, name_color_of(&m.user.color, rs.readable_colors)).weight(FontWeight::SEMIBOLD).act(Act::Tag(actions.len() as u32 - 1), true)));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
     if let Some(r) = &m.reply {
@@ -1069,7 +1085,7 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, rule: Option<&Highli
             }
         }
     }
-    actions.push(RowAction::Card);
+    actions.push(RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: String::new(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } });
     let name_col = with_alpha(token(theme::TEXT), 0.8);
     f.push(Item::Text(TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, name_col).weight(FontWeight::SEMIBOLD).act(Act::Tag(0), true)));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
@@ -1113,7 +1129,7 @@ pub fn x_row(row: &Row, m: &XMsg, ctx: &RowCtx, rule: Option<&HighlightRule>) ->
     f.push(Item::Text(TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, with_alpha(token(theme::TEXT), 0.8)).weight(FontWeight::SEMIBOLD).act(Act::Tag(0), true)));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
     text_run_items(&mut f, &m.text, token(theme::TEXT));
-    let mut spec = frame(f.finish(), vec![RowAction::Card], ctx, row.ord);
+    let mut spec = frame(f.finish(), vec![RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } }], ctx, row.ord);
     co_frame_style(&mut spec, rule);
     spec.hover = Hover { copy: Some(m.text.clone()), ..Default::default() };
     BuiltRow::Frame(spec)

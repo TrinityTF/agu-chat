@@ -577,7 +577,8 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
 
 /// Hover tooltip callback: Some((tip, window position)) while an emote is hovered, None when it stops.
 pub type OnTip = Rc<dyn Fn(Option<(Rc<Tip>, Point<Pixels>)>, &mut Window, &mut App)>;
-pub type OnAct = Rc<dyn Fn(&Act, &mut Window, &mut App)>;
+/// The clicked part's rectangle (window coordinates) comes with it: a user card opens beside the name.
+pub type OnAct = Rc<dyn Fn(&Act, Bounds<Pixels>, &mut Window, &mut App)>;
 
 pub struct InlineFlow {
     content: Rc<InlineContent>,
@@ -807,9 +808,10 @@ impl Element for InlineFlow {
             }
             if let (Some(act), Some(cb)) = (act, self.on_act.clone()) {
                 let hb = hb.clone();
+                let rect = atom_rect(&self.content, laid, p, origin, bounds.size.width.f(), &imgs, window);
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left && hb.is_hovered(window) {
-                        cb(&act, window, cx);
+                        cb(&act, rect, window, cx);
                         cx.stop_propagation();
                     }
                 });

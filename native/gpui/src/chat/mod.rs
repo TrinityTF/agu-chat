@@ -11,6 +11,8 @@ pub mod inline;
 pub mod mod_actions;
 pub mod mod_buttons;
 pub mod mod_caps;
+pub mod mod_popover;
+pub mod popout;
 pub mod net;
 pub mod pane_render;
 pub mod rows;
@@ -20,6 +22,7 @@ pub mod store;
 pub mod twitch;
 pub mod types;
 pub mod ui_util;
+pub mod user_card;
 
 /// `Pixels` as a plain number (its field is private).
 pub trait PxF {

@@ -23,7 +23,8 @@ use crate::chat::pane_render::ImageBox;
 use crate::chat::rows::ReplyTarget;
 use crate::chat::services::Services;
 use crate::icons::{self, icon};
-use crate::layout::ui::{btn, BtnOpts};
+use crate::chat::ui_util::cbtn as btn;
+use crate::layout::ui::BtnOpts;
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
 
@@ -125,7 +126,7 @@ impl SendBox {
             i.set_max_chars(Some(500));
             i
         });
-        let picker_q = cx.new(|cx| TextInput::new(window, cx, "Search emotes...", InputStyle::Field));
+        let picker_q = cx.new(|cx| TextInput::new(window, cx, "Search emotes...", InputStyle::Chat));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&input, window, |this, _i, ev: &TextInputEvent, window, cx| match ev {
             TextInputEvent::Changed => this.handle_change(cx),
@@ -697,7 +698,7 @@ impl SendBox {
                                 .justify_center()
                                 .rounded(px(4.))
                                 .hover(|s| s.bg(c(theme::RAISED_2)))
-                                .child(ImageBox { url: it.img.clone().into(), side: 24.0 })
+                                .child(ImageBox { url: it.img.clone().into(), side: 24.0, radius: 0.0 })
                                 .on_click(move |_: &ClickEvent, w, cx| {
                                     let name = name.clone();
                                     e.update(cx, |sb, cx| sb.insert_emote(&name, w, cx));

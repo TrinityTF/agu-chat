@@ -56,6 +56,8 @@ fn bits_icon(amount: f64) -> (&'static str, u32) {
 pub struct ImageBox {
     pub url: SharedString,
     pub side: f32,
+    /// corner radius (an avatar is `rounded-full`)
+    pub radius: f32,
 }
 
 impl IntoElement for ImageBox {
@@ -87,7 +89,7 @@ impl Element for ImageBox {
             let (w, h) = (img.w as f32 * s, img.h as f32 * s);
             let r = Bounds::new(point(bounds.origin.x + px((self.side - w) / 2.0), bounds.origin.y + px((self.side - h) / 2.0)), size(px(w), px(h)));
             let idx = imgs.0.frame(&img, window, cx);
-            let _ = window.paint_image(r, gpui::Corners::default(), img.gpu.clone(), idx, false);
+            let _ = window.paint_image(r, gpui::Corners::all(px(self.radius)), img.gpu.clone(), idx, false);
         }
     }
 }
@@ -98,7 +100,10 @@ impl ChatPane {
     fn flow(&self, content: &Rc<InlineContent>, actions: Rc<Vec<RowAction>>, cx: &mut Context<Self>) -> InlineFlow {
         let weak = cx.entity().downgrade();
         let w2 = weak.clone();
-        let on_act: OnAct = Rc::new(move |act, _w, cx| match act.clone() {
+        let on_act: OnAct = Rc::new(move |act, rect, w, cx| {
+            let wb = w.bounds();
+            let _ = weak.update(cx, |p, _| p.last_act = Some((rect, wb)));
+            match act.clone() {
             Act::Url(u) => {
                 let _ = weak.update(cx, |p, _| p.open_url(&u));
             }
@@ -107,6 +112,7 @@ impl ChatPane {
                     let _ = weak.update(cx, |p, cx| p.run_action(a, cx));
                 }
             }
+        }
         });
         let on_tip: OnTip = Rc::new(move |tip, _w, cx| {
             let _ = w2.update(cx, |p, cx| {
@@ -288,7 +294,7 @@ impl ChatPane {
                 .gap(px(6.))
                 .text_size(px(hs))
                 .child(div().flex_none().text_color(c(theme::AMBER_200)).child(icon(icons::WARNING, 14.0)))
-                .child(div().flex_none().child(self.flow(&a.header, Rc::new(vec![RowAction::Card]), cx).fit()))
+                .child(div().flex_none().child(self.flow(&a.header, Rc::new(vec![RowAction::Card { sk: a.sk.clone(), user: a.user.clone() }]), cx).fit()))
                 .child(
                     div()
                         .flex_none()
@@ -688,6 +694,15 @@ impl ChatPane {
         root.child(sb).into_any_element()
     }
 
+    /// The Ban / Warn popover, created here because building its inputs needs the window.
+    fn mod_pop_el(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyView> {
+        if let Some(r) = self.pop_req.take() {
+            let weak = cx.entity().downgrade();
+            self.mod_pop = Some(cx.new(|cx| super::mod_popover::ModPopoverView::new(window, cx, weak, r.sk, r.msg, r.kind, r.pos, r.above)));
+        }
+        self.mod_pop.clone().map(|v| v.into())
+    }
+
     fn tip_el(&self, window: &Window) -> Option<AnyElement> {
         let (tip, pos) = self.tip.as_ref()?;
         let vp = window.viewport_size();
@@ -707,7 +722,7 @@ impl ChatPane {
             .line_height(px(16.))
             .shadow_2xl();
         if !tip.img.is_empty() {
-            b = b.child(ImageBox { url: tip.img.clone(), side: 64.0 });
+            b = b.child(ImageBox { url: tip.img.clone(), side: 64.0, radius: 0.0 });
         }
         b = b.child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(tip.name.clone()));
         if !tip.label.is_empty() {
@@ -800,6 +815,7 @@ chat_list(
             .children(cards)
             .child(message_list)
             .children(self.toasts_el())
+            .children(self.mod_pop_el(window, cx))
             .child(self.send_box(window, cx))
             .children(self.tip_el(window))
     }
@@ -852,6 +868,11 @@ impl InlineContentBuilder {
             }
         }
         self.items.extend(f);
+    }
+    /// line-height as a multiple of the font size (`text-xs` is 16/12)
+    pub fn ratio(mut self, r: f32) -> Self {
+        self.ratio = r;
+        self
     }
     pub fn finish(self) -> Rc<InlineContent> {
         InlineContent::new(self.items, self.base, self.ratio)

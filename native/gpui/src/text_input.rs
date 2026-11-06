@@ -84,6 +84,8 @@ pub enum InputStyle {
     Rename,
     /// chat search box: min-w-0 flex-1 bg-transparent text-xs, no border or outline
     Bare,
+    /// `inputCls` of chat/ui.ts: rounded border border-line bg-panel px-2 py-1 text-xs focus:border-accent/60
+    Chat,
     /// the send box textarea: min-w-0 flex-1 rounded border border-line bg-panel px-2 py-1.5 text-[13px]
     /// leading-[1.35] focus:border-accent/60 disabled:opacity-60, rows=1, grows to 96px
     Area,
@@ -1068,6 +1070,7 @@ impl Render for TextInput {
         let child = div().w_full().min_w_0().child(TextElement { input: cx.entity() });
         match self.style {
             InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(c(if focused { theme::ACCENT } else { theme::LINE })).child(child),
+            InputStyle::Chat => base.w_full().bg(c(theme::PANEL)).rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(if focused { a(theme::ACCENT, 0.6) } else { c(theme::LINE).into() }).child(child),
             InputStyle::Bare => base.flex_1().min_w_0().bg(gpui::transparent_black()).border_0().line_height(px(16.)).child(child),
             InputStyle::Rename => base.w(px(128.)).rounded(px(2.)).px(px(4.)).border_color(c(theme::ACCENT)).child(child),
             // `rounded border border-line bg-panel px-2 py-1.5 text-[13px] leading-[1.35]`, focus:border-accent/60

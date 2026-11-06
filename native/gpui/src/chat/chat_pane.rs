@@ -19,7 +19,7 @@ use std::time::Duration;
 use agu_chat_core::protocol::{AccountsState, AguBridge, ConnFrame, Frame, HighlightRule, Platform, Settings, SourceRef, SubId, Unsubscribe};
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
-use gpui::{AppContext as _, Context, Entity, EventEmitter, Point, Pixels, Subscription, Window};
+use gpui::{point, px, AppContext as _, Context, Entity, EventEmitter, Point, Pixels, Subscription, Window};
 use super::chat_list::{ChatListState, ItemMetrics};
 use serde_json::{json, Value};
 
@@ -31,7 +31,7 @@ use super::ignores::{apply_ignores, compile_ignores, filter_ignored, ignore_logi
 use super::inline::Tip;
 use super::mod_actions::{self, AutomodResult, ToastMsg};
 use super::mod_buttons::{expand_template, format_duration, normalize_mod_buttons, TemplateVars};
-use super::mod_caps::{badge_names, fetch_co_caps, fetch_mod_caps, relay_api, CoCaps, ModViewer};
+use super::mod_caps::{badge_names, fetch_co_caps, fetch_mod_caps, mod_reach, relay_api, CoCaps, ModReach, ModViewer, REACH_ALL};
 use super::rows::*;
 use super::search::{is_empty_query, match_row, parse_search};
 use super::services::Services;
@@ -78,6 +78,14 @@ struct Routes {
 pub(super) struct ShownRow {
     pub row: RowRef,
     pub built: RefCell<Option<(u64, Option<Rc<BuiltRow>>)>>,
+}
+
+pub(super) struct PopReq {
+    pub sk: String,
+    pub msg: ChatMsg,
+    pub kind: super::mod_popover::PopKind,
+    pub pos: Point<Pixels>,
+    pub above: bool,
 }
 
 pub(super) struct Toast {
@@ -144,6 +152,13 @@ pub struct ChatPane {
     pin_tick: Option<gpui::Task<()>>,
     pub(super) reply_target: Option<ReplyTarget>,
     pub(super) send_box: Option<Entity<super::input::send_box::SendBox>>,
+    /// the Ban / Warn popover (`modPop`) and the request to open one (built in render, which has the window)
+    pub(super) mod_pop: Option<Entity<super::mod_popover::ModPopoverView>>,
+    pub(super) pop_req: Option<PopReq>,
+    /// open user cards (pop-out windows), oldest first
+    pub(super) cards: Vec<(String, gpui::AnyWindowHandle)>,
+    /// the last clicked name / button: its rectangle and its window's bounds, both in screen-space terms
+    pub(super) last_act: Option<(gpui::Bounds<Pixels>, gpui::Bounds<Pixels>)>,
     /// the acting account's 7TV personal emote set (picker / autocomplete)
     pub(super) personal: Vec<Arc<super::twitch::emotes::ProviderEmote>>,
     pub(super) inv_cache: RefCell<HashMap<String, (u64, Arc<super::input::inventory::Inventory>)>>,
@@ -251,6 +266,9 @@ impl ChatPane {
             let bridge = bridge.clone();
             let routes = routes.clone();
             cx.on_release(move |this, cx| {
+                for (_, h) in this.cards.drain(..) {
+                    let _ = h.update(cx, |_, w, _| w.remove_window());
+                }
                 if let Some(u) = this.unsub_frames.take() {
                     u();
                 }
@@ -340,6 +358,10 @@ impl ChatPane {
             pin_tick: None,
             reply_target: None,
             send_box: None,
+            mod_pop: None,
+            pop_req: None,
+            cards: Vec::new(),
+            last_act: None,
             personal: Vec::new(),
             inv_cache: RefCell::new(HashMap::new()),
             hidden_pins,
@@ -1123,6 +1145,24 @@ impl ChatPane {
                 }
             }
         }
+        // `AGU_SHOT=usercard|modpopover`: open the card / popover of the newest message's author as a click on its name would
+        if let Ok(shot) = std::env::var("AGU_SHOT") {
+            if shot == "usercard" || shot == "modpopover" {
+                let target = self.store.rows().iter().rev().find_map(|r| match &r.body {
+                    RowBody::Msg(m) if !m.user.id.is_empty() => Some((r.sk.clone(), m.clone())),
+                    _ => None,
+                });
+                if let Some((sk, m)) = target {
+                    self.last_act = Some((gpui::Bounds::new(point(px(60.), px(150.)), gpui::size(px(80.), px(16.))), window.bounds()));
+                    if shot == "usercard" {
+                        self.open_card(sk, CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: String::new() }, cx);
+                    } else {
+                        let kind = std::env::var("AGU_POP_KIND").unwrap_or_else(|_| "ban".into());
+                        self.run_action(RowAction::Popover { sk, msg: Box::new(m), kind: if kind == "warn" { "warn" } else { "ban" } }, cx);
+                    }
+                }
+            }
+        }
         if std::env::var("AGU_TIP").is_ok() {
             self.tip = Some((Rc::new(Tip { img: "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0".into(), name: "Kappa".into(), label: "Twitch".into() }), gpui::point(gpui::px(120.), gpui::px(200.))));
         }
@@ -1230,10 +1270,15 @@ impl ChatPane {
                 })
                 .detach();
             }
-            RowAction::Popover { kind } => {
-                self.toast(format!("The {kind} popover arrives with the next round"), true, cx);
+            RowAction::Popover { sk, msg, kind } => {
+                // `openModPop`: below the button, or above it in the lower half
+                let Some((rect, wb)) = self.last_act else { return };
+                let above = f32::from(rect.top()) > f32::from(wb.size.height) / 2.0;
+                let pos = if above { point(rect.left(), rect.top() - px(4.)) } else { point(rect.left(), rect.bottom() + px(4.)) };
+                self.pop_req = Some(PopReq { sk, msg: *msg, kind: super::mod_popover::PopKind::parse(kind), pos, above });
+                cx.notify();
             }
-            RowAction::Card => {}
+            RowAction::Card { sk, user } => self.open_card(sk, user, cx),
             RowAction::Automod { sk, id, allow } => {
                 let Some(src) = self.ref_of(&sk) else { return };
                 cx.spawn(async move |this, cx| {
@@ -1278,6 +1323,112 @@ impl ChatPane {
                 .detach();
             }
         }
+    }
+
+    /// `Handlers.openCard`: one card per user (an open one is brought to the front), new ones stagger, at most 4.
+    fn open_card(&mut self, sk: String, user: CardUser, cx: &mut Context<Self>) {
+        let Some(st) = self.store.source(&sk) else { return };
+        let platform = st.source.platform;
+        let id = format!("{sk}|{}", if user.id.is_empty() { user.name.to_lowercase() } else { user.id.clone() });
+        // windows the user closed are gone
+        let live: std::collections::HashSet<_> = cx.windows().into_iter().map(|w| w.window_id()).collect();
+        self.cards.retain(|(_, h)| live.contains(&h.window_id()));
+        if let Some((_, h)) = self.cards.iter().find(|(i, _)| *i == id) {
+            let _ = h.update(cx, |_, w, _| w.activate_window());
+            return;
+        }
+        let Some((rect, wb)) = self.last_act else { return };
+        let stagger = 24.0 * (self.cards.len() % 4) as f32;
+        let above = f32::from(rect.top()) > f32::from(wb.size.height) / 2.0;
+        // The pop-out opens beside the name: below it, or above it in the lower half (cards run ~380px tall).
+        let x = f32::from(wb.origin.x) + f32::from(rect.left()) + stagger;
+        let y = f32::from(wb.origin.y) + if above { f32::from(rect.top()) - 380.0 } else { f32::from(rect.bottom()) + 4.0 } + stagger;
+        let weak = cx.entity().downgrade();
+        let title = format!("{} - Agu Chat", user.name);
+        let (id2, sk2) = (id.clone(), sk.clone());
+        // Opened a beat later: the new window reads this pane while it builds, which it can't while we are updating it.
+        cx.spawn(async move |this, cx| {
+            let handle = cx.update(|cx| {
+                super::popout::open_popout(cx, &title, x, y, 300.0, move |window, cx| {
+                    cx.new(|cx| super::user_card::UserCardView::new(window, cx, weak, id2, sk2, platform, user))
+                })
+            });
+            let Ok(Some(h)) = handle else { return };
+            let _ = this.update(cx, |p, cx| {
+                if p.cards.len() >= 4 {
+                    let (_, old) = p.cards.remove(0);
+                    let _ = old.update(cx, |_, w, _| w.remove_window());
+                }
+                p.cards.push((id, h));
+            });
+        })
+        .detach();
+    }
+
+    /// What a user card draws from this pane (None once the source is gone).
+    pub(super) fn card_ctx(&self, sk: &str, user: &CardUser, platform: Platform) -> Option<super::user_card::CardCtx> {
+        let st = self.store.source(sk)?;
+        let env = self.envs.get(sk);
+        let caps = env.map(|e| e.caps.clone()).unwrap_or_default();
+        let me_id = self.me_id();
+        let reach: ModReach = if platform != Platform::Twitch {
+            REACH_ALL
+        } else if let Some(env) = env {
+            // No line from them in chat = no badges to go on: nothing is ruled out except banning yourself.
+            let badges = self.store.rows().iter().rev().find_map(|r| match &r.body {
+                RowBody::Msg(m) if r.sk == sk && m.user.id == user.id => Some(m.badges.clone()),
+                _ => None,
+            });
+            match badges {
+                Some(b) => mod_reach(&env.viewer, &user.id, &b),
+                None if user.id == me_id => ModReach { ban: false, ..REACH_ALL },
+                None => REACH_ALL,
+            }
+        } else {
+            REACH_ALL
+        };
+        let mine = |r: &Row| -> bool {
+            r.sk == sk
+                && match &r.body {
+                    RowBody::Msg(m) => m.user.id == user.id,
+                    RowBody::Rumble(m) => m.user.id == user.id,
+                    RowBody::Kick(m) => m.user.id == user.id,
+                    RowBody::YouTube(m) => m.user.id == user.id,
+                    RowBody::X(m) => m.user.id == user.id,
+                    _ => false,
+                }
+        };
+        let recent: Vec<RowRef> = self.store.rows().iter().rev().filter(|r| mine(r)).take(15).cloned().collect();
+        let login = ignore_login(&user.login, &user.name);
+        Some(super::user_card::CardCtx {
+            source: st.source.clone(),
+            caps,
+            reach,
+            suspicious: st.suspicious.get(&user.id).cloned(),
+            co_can_moderate: self.co_caps.get(sk).map(|c| c.can_moderate).unwrap_or(false),
+            ignored: !login.is_empty() && super::ignores::is_user_ignored(&self.settings.ignored_users, platform, &login),
+            can_ignore: !login.is_empty(),
+            emotes: env.and_then(|e| e.emotes.clone()),
+            recent,
+            readable_colors: self.settings.readable_colors,
+        })
+    }
+
+    /// The last lines of a person in a source (the ban popover lists the newest 5), oldest first.
+    pub(super) fn rows_of_user(&self, sk: &str, uid: &str) -> Vec<String> {
+        self.store
+            .rows()
+            .iter()
+            .filter_map(|r| match &r.body {
+                RowBody::Msg(m) if r.sk == sk && m.user.id == uid => Some(m.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(super) fn mark_deleted(&mut self, sk: &str, id: &str, cx: &mut Context<Self>) {
+        self.store.mark_deleted(sk, id);
+        self.refresh(cx);
     }
 
     pub(super) fn confirm_yes(&mut self, cx: &mut Context<Self>) {

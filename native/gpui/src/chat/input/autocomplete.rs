@@ -361,7 +361,7 @@ pub fn autocomplete_dropdown(state: &AutoState, on_pick: impl Fn(usize, &mut gpu
                 .child(if m.img.is_empty() {
                     div().size(px(20.)).flex_none().flex().items_center().justify_center().text_color(c(theme::FAINT)).child("@").into_any_element()
                 } else {
-                    ImageBox { url: m.img.clone().into(), side: 20.0 }.into_any_element()
+                    ImageBox { url: m.img.clone().into(), side: 20.0, radius: 0.0 }.into_any_element()
                 })
                 .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(m.name.clone())))
                 .child(div().flex_none().text_size(px(10.)).text_color(c(theme::FAINT)).child(SharedString::from(m.label.clone())));
