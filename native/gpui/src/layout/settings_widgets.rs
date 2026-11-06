@@ -30,14 +30,16 @@ pub fn select_button(id: ElementId, label: &str, width: f32, small: bool, open: 
         .rounded(px(4.))
         .border_1()
         .border_color(c(if open { theme::ACCENT } else { theme::LINE }))
-        .bg(c(theme::APP))
+        // index.css `select { background-color: #16161d }` is unlayered, so it beats the utility `bg-app`
+        .bg(c(theme::RAISED))
         .px(px(if small { 6. } else { 8. }))
         .py(px(4.))
         .text_size(px(12.))
         .line_height(px(18.))
         .text_color(c(theme::TEXT))
         .child(div().min_w_0().truncate().child(label.to_string()))
-        .child(div().flex_none().child(icons::icon(icons::CHEVRON, 10.).color(c(theme::MUTED))))
+        // Chromium's own select arrow: a bold white chevron a few px from the right edge
+        .child(div().flex_none().mr(px(-5.)).child(icons::icon(icons::SELECT_ARROW, 10.).color(c(theme::WHITE))))
 }
 
 /// A drop-down list under its button.
@@ -103,7 +105,8 @@ pub fn slider(id: ElementId, frac: f32, bounds: Rc<Cell<Bounds<Pixels>>>) -> Sta
         .h(px(16.))
         .cursor_pointer()
         .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
-        .child(div().absolute().top(px(6.)).left_0().w_full().h(px(4.)).rounded_full().bg(c(theme::SCROLLBAR_THUMB_HOVER)))
-        .child(div().absolute().top(px(6.)).left_0().w(px(x + thumb / 2.)).h(px(4.)).rounded_full().bg(c(theme::ACCENT)))
+        // Chromium's range track: 8 px tall, inset 1 px, #efefef under the accent-coloured filled part
+        .child(div().absolute().top(px(4.)).left(px(1.)).w(px(w - 2.)).h(px(8.)).rounded_full().bg(gpui::rgb(0xefefef)))
+        .child(div().absolute().top(px(4.)).left(px(1.)).w(px(x + thumb / 2.)).h(px(8.)).rounded_full().bg(c(theme::ACCENT)))
         .child(div().absolute().top(px(1.)).left(px(x)).size(px(thumb)).rounded_full().bg(c(theme::ACCENT)).border_1().border_color(a(theme::BLACK, 0.2)))
 }

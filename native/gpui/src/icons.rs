@@ -20,7 +20,7 @@ macro_rules! icons {
 icons! {
     GRIP => "grip", TRASH => "trash", COPY => "copy", REPLY => "reply", PIN => "pin", DOTS => "dots",
     DOTS_H => "dots-h", MINUS_CIRCLE => "minus-circle", EYE_OFF => "eye-off", SEARCH => "search", X => "x", COLUMNS => "columns",
-    POPOUT => "popout", CHEVRON => "chevron", CHEVRON_LEFT => "chevron-left", CHEVRON_RIGHT => "chevron-right", CHEVRON_UP => "chevron-up", UPLOAD => "upload", LINK => "link", GEAR => "gear", SMILE => "smile",
+    POPOUT => "popout", CHEVRON => "chevron", CHEVRON_LEFT => "chevron-left", CHEVRON_RIGHT => "chevron-right", CHEVRON_UP => "chevron-up", SELECT_ARROW => "select-arrow", UPLOAD => "upload", LINK => "link", GEAR => "gear", SMILE => "smile",
     WARNING => "warning", CAMERA => "camera", SPEAKER => "speaker", SHIELD => "shield", SCREEN => "screen",
     BOT => "bot", MIC => "mic", GLOBE => "globe", FLAME => "flame", TROPHY => "trophy", TREND => "trend",
     CLOCK => "clock", MUSIC => "music", PENCIL => "pencil", CHAT => "chat", BELL => "bell", LIST => "list",
