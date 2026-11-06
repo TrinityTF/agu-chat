@@ -204,7 +204,13 @@ pub fn decode(bytes: &[u8], want: Want, one_frame: bool) -> Result<Decoded, Stri
             }
         }
         image::ImageFormat::WebP => {
-            let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+            let mut dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+            // A frame marked "dispose" must leave its area cleared for the next one. The decoder only clears when
+            // a background colour is set, and none is by default, so every frame was drawn over the last ones
+            // (animated emotes left trails). Browsers dispose to transparent, whatever colour the file names.
+            if dec.has_animation() {
+                let _ = dec.set_background_color(image::Rgba([0, 0, 0, 0]));
+            }
             for f in dec.into_frames().take(if one_frame { 1 } else { MAX_FRAMES }) {
                 acc.push(f.map_err(|e| e.to_string())?);
             }
