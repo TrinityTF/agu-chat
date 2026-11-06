@@ -226,10 +226,34 @@ pub struct TextInput {
     mono: bool,
     /// `text-center` (single line): the text sits in the middle of the field
     centered: bool,
+    /// caret blink (Chromium: the system caret blink time, solid again after every edit or caret move)
+    blink_since: std::time::Instant,
+    blink_sig: (usize, usize, usize),
+    blink_task: Option<gpui::Task<()>>,
     _blur: gpui::Subscription,
 }
 
+/// `GetCaretBlinkTime` (ms); the OS says INFINITE (no blinking) with 0xFFFFFFFF.
+fn caret_blink_ms() -> Option<u128> {
+    let t = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+    if t == u32::MAX || t == 0 { None } else { Some(t as u128) }
+}
+
 impl TextInput {
+    /// Whether the caret is in its visible phase now. A change of text or selection since the last paint restarts
+    /// the phase (solid while typing), like Chromium's.
+    fn caret_on(&mut self) -> bool {
+        let sig = (self.selected_range.start, self.selected_range.end, self.content.len());
+        if sig != self.blink_sig {
+            self.blink_sig = sig;
+            self.blink_since = std::time::Instant::now();
+        }
+        match caret_blink_ms() {
+            None => true,
+            Some(ms) => (self.blink_since.elapsed().as_millis() / ms) % 2 == 0,
+        }
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>, placeholder: &str, style: InputStyle) -> Self {
         let focus_handle = cx.focus_handle();
         let blur = cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(TextInputEvent::Blur));
@@ -253,6 +277,9 @@ impl TextInput {
             invalid: false,
             mono: false,
             centered: false,
+            blink_since: std::time::Instant::now(),
+            blink_sig: (0, 0, 0),
+            blink_task: None,
             _blur: blur,
         }
     }
@@ -996,7 +1023,7 @@ impl gpui::Element for TextElement {
                         ));
                     }
                 }
-            } else if !disabled {
+            } else if !disabled && self.input.update(cx, |i, _| i.caret_on()) {
                 caret = Some(fill(Bounds::new(point(bounds.left() + px(cx_), bounds.top() + px(cy - scroll)), size(px(1.), px(line_h))), c(theme::TEXT)));
             }
             return PrepaintState { line: None, area: Some(area), scroll_y: scroll, cursor: caret, selection, dx: px(0.) };
@@ -1009,7 +1036,10 @@ impl gpui::Element for TextElement {
         let bounds = Bounds::new(point(bounds.left() + dx, bounds.top()), size(bounds.size.width - dx, bounds.size.height));
 
         let cursor_pos = line.x_for_index(map(cursor));
-        let (selection, cursor) = if selected_range.is_empty() {
+        let caret_on = self.input.update(cx, |i, _| i.caret_on());
+        let (selection, cursor) = if selected_range.is_empty() && !caret_on {
+            (vec![], None)
+        } else if selected_range.is_empty() {
             // The caret is the text colour, 1px wide, like Chromium's.
             (vec![], Some(fill(Bounds::new(point(bounds.left() + cursor_pos, bounds.top()), size(px(1.), bounds.bottom() - bounds.top())), c(theme::TEXT))))
         } else {
@@ -1084,6 +1114,27 @@ impl gpui::Element for TextElement {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
+        if focused && self.blink_task.is_none() {
+            if let Some(ms) = caret_blink_ms() {
+                self.blink_task = Some(cx.spawn_in(window, async move |this, cx| loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(ms as u64)).await;
+                    let alive = this
+                        .update_in(cx, |t, window, cx| {
+                            if t.focus_handle.is_focused(window) {
+                                cx.notify();
+                                true
+                            } else {
+                                t.blink_task = None;
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !alive {
+                        break;
+                    }
+                }));
+            }
+        }
         let base = div()
             .flex()
             .key_context("TextInput")

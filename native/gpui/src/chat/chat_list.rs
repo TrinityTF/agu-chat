@@ -379,7 +379,8 @@ impl Element for ChatList {
         window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, window, _cx| {
             if phase == DispatchPhase::Bubble && hb.should_handle_scroll(window) {
                 acc = acc.coalesce(ev.delta);
-                let d = acc.pixel_delta(px(20.));
+                // Chromium scrolls 100 px per notch at the default 3 lines (100 / 3 px a line); 20 px a line felt slow
+                let d = acc.pixel_delta(px(100. / 3.));
                 acc = gpui::ScrollDelta::default();
                 state.scroll_by(-d.y.f());
                 window.refresh();

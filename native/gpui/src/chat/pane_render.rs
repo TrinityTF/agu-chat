@@ -2,6 +2,7 @@
 //! and the logged-out `SendBox`: turns the pane's state and its `BuiltRow`s into GPUI elements each frame.
 use std::rc::Rc;
 
+use gpui::AnimationExt as _;
 use gpui::{
     anchored, deferred, div, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ClickEvent, Context, Corner, Div, Element, ElementId, FontWeight,
     GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Render, SharedString, Style, Window,
@@ -375,7 +376,19 @@ impl ChatPane {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().size(px(12.)).rounded_full().border_2().border_color(c(theme::FAINT)))
+                    .child(
+                        // `animate-spin rounded-full border-2 border-faint border-t-transparent`: 1 s linear
+                        gpui::svg()
+                            .path("icons/spinner.svg")
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(c(theme::FAINT))
+                            .with_animation(
+                                "connecting-spin",
+                                gpui::Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                                |s, d| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(d))),
+                            ),
+                    )
                     .child("Connecting..."),
             );
         } else {
