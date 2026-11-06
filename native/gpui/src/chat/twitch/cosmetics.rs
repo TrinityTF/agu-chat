@@ -2,10 +2,9 @@
 //! style. `use7TvStyle` (a React hook) becomes `Cosmetics::style_of`, which answers from the cache and starts a
 //! background fetch (at most 3 in flight) for an unknown chatter; `on_style` listeners then refresh the rows.
 //!
-//! Differences: CSS `background-clip: text` gradients cannot be painted per glyph here, so a paint is
-//! evaluated per character along the name (`paint_color_at`): linear/radial/repeating gradients and solid
-//! colours work, image-textured paints fall back to their gradient underlay (or the plain name colour), and
-//! the paints' drop-shadows are not drawn.
+//! Differences: a painted name is drawn whole by `chat/paint_text.rs` (DirectWrite/Direct2D mask filled with the CSS
+//! gradient / image and the paint's drop-shadows); `paint_color_at` (per character colours) remains as the fallback
+//! and for the /me message body.
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -32,6 +31,16 @@ pub struct SevenTvPaint {
     pub repeat: bool,
     pub image_url: Option<String>,
     pub stops: Vec<PaintStop>,
+    pub shadows: Vec<PaintShadow>,
+}
+
+/// One `drop-shadow(x y radius color)` of a paint's CSS `filter`.
+#[derive(Clone, Debug, Default)]
+pub struct PaintShadow {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub color: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,6 +91,16 @@ pub fn defs_from_raw(data: &Value) -> SevenTvDefs {
                 .flatten()
                 .map(|st| PaintStop { at: st.get("at").and_then(|a| a.as_f64()).unwrap_or(0.0) as f32, color: st.get("color").and_then(to_u32).unwrap_or(0) })
                 .collect(),
+            shadows: p
+                .get("shadows")
+                .and_then(|a| a.as_array())
+                .into_iter()
+                .flatten()
+                .map(|sh| {
+                    let f = |k: &str| sh.get(k).and_then(|a| a.as_f64()).unwrap_or(0.0) as f32;
+                    PaintShadow { x: f("x_offset"), y: f("y_offset"), radius: f("radius"), color: sh.get("color").and_then(to_u32).unwrap_or(0) }
+                })
+                .collect(),
         };
         d.paints.insert(paint.id.clone(), paint);
     }
@@ -119,6 +138,12 @@ async fn fetch_chatter_style(client: &reqwest::Client, user_id: &str) -> Option<
         paint_id: st.get("paint_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
         badge_id: st.get("badge_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
     })
+}
+
+/// The dev paint fixture (env `AGU_PAINT_FIXTURE`), if any.
+pub fn paint_fixture() -> Option<Value> {
+    let path = std::env::var_os("AGU_PAINT_FIXTURE")?;
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Decoded paint colour: (r, g, b, a 0..1).
@@ -177,9 +202,19 @@ pub enum StyleLookup {
 
 impl Cosmetics {
     pub fn new() -> Cosmetics {
+        // dev: `AGU_PAINT_FIXTURE=file.json` ({"defs": {paints}, "users": [{id, name, paint_id}]}) stands in for 7TV
+        let fixture = paint_fixture();
+        let mut styles = HashMap::new();
+        if let Some(f) = &fixture {
+            for u in f.get("users").and_then(|u| u.as_array()).into_iter().flatten() {
+                let id = u.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let paint_id = u.get("paint_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                styles.insert(id, Some(ChatterStyle { color: None, paint_id, badge_id: None }));
+            }
+        }
         Cosmetics(Rc::new(RefCell::new(CosmeticsState {
-            defs: None,
-            styles: HashMap::new(),
+            defs: fixture.as_ref().and_then(|f| f.get("defs")).map(|d| Arc::new(defs_from_raw(d))),
+            styles,
             pending: HashSet::new(),
             queue: VecDeque::new(),
             active: 0,
@@ -218,7 +253,7 @@ impl Cosmetics {
 
     /// Start the one-off fetch of the paint / badge definitions.
     pub fn ensure_defs(&self, net: &Arc<Net>, cx: &mut gpui::App) {
-        if std::mem::replace(&mut self.0.borrow_mut().defs_requested, true) {
+        if std::mem::replace(&mut self.0.borrow_mut().defs_requested, true) || self.0.borrow().defs.is_some() {
             return;
         }
         let this = self.clone();

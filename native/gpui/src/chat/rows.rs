@@ -623,6 +623,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     let mut name = TextItem::new(msg.user.name.clone(), base, color).weight(FontWeight::SEMIBOLD).act(Act::Tag(card_tag), true);
     if let Some(p) = paint {
         name.gradient = paint_gradient(p, color);
+        name.paint = super::paint_text::PaintSpec::from_paint(p).map(Rc::new);
     }
     f.push(Item::Text(name));
     if !msg.action {

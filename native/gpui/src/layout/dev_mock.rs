@@ -183,7 +183,19 @@ fn harness_log(platform: Platform) -> Value {
                 json!({ "notice": true, "id": "n1", "ts": now - 30000, "system": "cooldude subscribed with Prime. They've subscribed for 12 months!", "msgId": "resub", "user": b, "text": "love the stream", "emotes": "" }),
                 json!({ "notice": true, "id": "n2", "ts": now - 29000, "system": "5 raiders from somechannel have joined!", "msgId": "raid", "user": c, "text": "" }),
             ];
+            if let Some(fx) = crate::chat::twitch::cosmetics::paint_fixture() {
+                // painted-name test rows: one message per fixture user
+                messages.clear();
+                for (i, u) in fx.get("users").and_then(|u| u.as_array()).into_iter().flatten().enumerate() {
+                    let g = |k: &str| u.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let user = json!({ "id": g("id"), "login": g("name").to_lowercase(), "name": g("name"), "color": "#ff4500" });
+                    messages.push(msg(10 + i as i64, &user, &format!("filler message number {}", 10 + i), json!({})));
+                }
+            }
             for i in 10..40 {
+                if std::env::var_os("AGU_PAINT_FIXTURE").is_some() {
+                    break;
+                }
                 messages.push(msg(i, if i % 2 == 1 { &b } else { &c }, &format!("filler message number {i}"), json!({})));
             }
             json!({

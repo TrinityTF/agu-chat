@@ -15,6 +15,7 @@ pub mod mod_popover;
 pub mod popout;
 pub mod net;
 pub mod pane_render;
+pub mod paint_text;
 pub mod rows;
 pub mod search;
 pub mod services;

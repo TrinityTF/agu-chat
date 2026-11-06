@@ -17,6 +17,7 @@ use gpui::{
 };
 
 use super::images::{fit_down, ImagesHandle};
+use super::paint_text::{self, NameReq, PaintImage, PaintSpec};
 use super::twitch::parts::split_keep_ws;
 use super::PxF;
 use crate::theme;
@@ -62,13 +63,15 @@ pub struct TextItem {
     pub strike: bool,
     /// per-character colours across the text (7TV paints)
     pub gradient: Option<Rc<dyn Fn(f32) -> Hsla>>,
+    /// a 7TV paint drawn as a whole (gradient / image fill, drop-shadows) by `paint_text`; `gradient` is the fallback
+    pub paint: Option<Rc<PaintSpec>>,
     pub act: Option<Act>,
     pub underline_on_hover: bool,
 }
 
 impl TextItem {
     pub fn new(text: impl Into<SharedString>, size: f32, color: Hsla) -> Self {
-        TextItem { text: text.into(), size, color, weight: FontWeight::NORMAL, italic: false, strike: false, gradient: None, act: None, underline_on_hover: false }
+        TextItem { text: text.into(), size, color, weight: FontWeight::NORMAL, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false }
     }
     pub fn weight(mut self, w: FontWeight) -> Self {
         self.weight = w;
@@ -236,6 +239,11 @@ impl InlineContent {
                     v.extend(i.overlays.iter().map(|o| o.to_string()));
                 }
                 Item::Gif(g) => v.push(g.url.to_string()),
+                Item::Text(t) => {
+                    if let Some(u) = t.paint.as_ref().and_then(|p| p.image_url.as_ref()) {
+                        v.push(u.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -419,7 +427,7 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
             Atom { w: i.size + 2.0 * i.margin_x, above: i.size / 2.0 - c, below: i.size / 2.0 + c, kind: AtomKind::Box { item }, break_before: false, dims: (i.size, i.size) }
         }
         Item::Pill(p) => {
-            let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, act: None, underline_on_hover: false }, &p.text, 0, 1);
+            let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false }, &p.text, 0, 1);
             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
             Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc) }
         }
@@ -761,7 +769,15 @@ impl Element for InlineFlow {
                     let line_h = self.content.line_ratio * *sz;
                     let base_abs = (origin.y.f() + line.baseline).round();
                     let top = base_abs - (*hl + *asc) + TEXT_DY;
-                    let _ = shaped.paint(point(px(x0), px(top)), px(line_h), window, cx);
+                    let painted = match &self.content.items[*item] {
+                        Item::Text(t) if t.paint.is_some() && shaped.text.as_ref() == t.text.as_ref() => {
+                            paint_name(window, &imgs, t, p.atom.w, (*asc, shaped.descent.f()), line_h, x0, base_abs)
+                        }
+                        _ => false,
+                    };
+                    if !painted {
+                        let _ = shaped.paint(point(px(x0), px(top)), px(line_h), window, cx);
+                    }
                     if let Item::Text(t) = &self.content.items[*item] {
                         if t.underline_on_hover && hover_of(pi, window) {
                             let y = base_abs + 1.5;
@@ -798,7 +814,7 @@ impl Element for InlineFlow {
                             let mut q = gpui::fill(r, pl.bg);
                             q.corner_radii = gpui::Corners::all(px(pl.radius));
                             window.paint_quad(q);
-                            let ti = TextItem { text: pl.text.clone(), size: pl.size, color: pl.color, weight: pl.weight, italic: false, strike: false, gradient: None, act: None, underline_on_hover: false };
+                            let ti = TextItem { text: pl.text.clone(), size: pl.size, color: pl.color, weight: pl.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false };
                             let shaped = shape(window, &ti, &pl.text, 0, 1);
                             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
                             let hl = (self.content.line_ratio * pl.size - (asc + desc)) / 2.0;
@@ -818,7 +834,7 @@ impl Element for InlineFlow {
                                     let _ = window.paint_svg(ir, SharedString::from(*path), TransformationMatrix::unit(), col, cx);
                                 }
                                 ButtonFace::Label(text, fs) => {
-                                    let ti = TextItem { text: text.clone(), size: *fs, color: col, weight: FontWeight::BOLD, italic: false, strike: false, gradient: None, act: None, underline_on_hover: false };
+                                    let ti = TextItem { text: text.clone(), size: *fs, color: col, weight: FontWeight::BOLD, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false };
                                     let shaped = shape(window, &ti, text, 0, 1);
                                     // leading-none: centre the glyph box in the button
                                     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
@@ -902,6 +918,31 @@ impl Element for InlineFlow {
             }
         }
     }
+}
+
+/// Draws a 7TV-painted name (`paint_text`) with its text origin at `x0` and its baseline on pixel row `base_abs`.
+/// False when it could not be rendered (the caller draws the plain glyphs).
+#[allow(clippy::too_many_arguments)]
+fn paint_name(window: &mut Window, imgs: &ImagesHandle, t: &TextItem, width: f32, (asc, desc): (f32, f32), line_h: f32, x0: f32, base_abs: f32) -> bool {
+    let Some(spec) = t.paint.as_ref() else { return false };
+    let scale = window.scale_factor();
+    let (above, below) = blink_above_below(asc, desc, line_h);
+    // the paint image, first frame only
+    let image = spec.image_url.as_ref().and_then(|u| imgs.0.get(u, 1024.0, 1024.0, 1.0)).and_then(|g| {
+        let sz = g.gpu.size(0);
+        g.gpu.as_bytes(0).map(|b| PaintImage { w: sz.width.0 as u32, h: sz.height.0 as u32, bgra: std::sync::Arc::new(b.to_vec()) })
+    });
+    let req = NameReq { text: &t.text, size: t.size, weight: t.weight.0 as u16, scale, box_w: width, above, below, paint: spec, image: image.as_ref() };
+    let ni = paint_text::name_image(&req);
+    for d in paint_text::take_dropped() {
+        window.drop_image(d).ok();
+    }
+    let Some(ni) = ni else { return false };
+    let left = (x0 * scale).round() - ni.origin_x as f32;
+    let top = (base_abs * scale).round() - ni.baseline_y as f32;
+    // a hair inside the device-pixel grid: GPUI floors the origin and ceils the size
+    let r = Bounds::new(point(px((left + 0.01) / scale), px((top + 0.01) / scale)), size(px((ni.w as f32 - 0.02) / scale), px((ni.h as f32 - 0.02) / scale)));
+    window.paint_image(r, gpui::Corners::all(px(0.)), ni.image.clone(), 0, false).is_ok()
 }
 
 /// The painted rectangle of a placed atom, in window coordinates. A box's centre follows from the extents
