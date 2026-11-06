@@ -175,6 +175,9 @@ pub struct InlineContent {
     /// the row's font size (the strut) and unitless line-height
     pub base_size: f32,
     pub line_ratio: f32,
+    /// Item ranges painted as ONE span: a 7TV paint on a /me message runs across all its words (and the gaps and
+    /// emotes between them) like CSS's background on a wrapping inline span, instead of restarting per word.
+    pub spans: Vec<(usize, usize)>,
     cache: RefCell<Option<Laid>>,
     /// (width, epoch, height) of the last measure that did not keep its layout: a row that is only measured
     /// (off screen) needs its height, not the shaped words.
@@ -226,7 +229,11 @@ fn track_layout(c: &Rc<InlineContent>) {
 
 impl InlineContent {
     pub fn new(items: Vec<Item>, base_size: f32, line_ratio: f32) -> Rc<InlineContent> {
-        Rc::new(InlineContent { items, base_size, line_ratio, cache: RefCell::new(None), height_memo: Cell::new(None), used_ms: Cell::new(0), tracked: Cell::new(false) })
+        Self::with_spans(items, base_size, line_ratio, Vec::new())
+    }
+
+    pub fn with_spans(items: Vec<Item>, base_size: f32, line_ratio: f32, spans: Vec<(usize, usize)>) -> Rc<InlineContent> {
+        Rc::new(InlineContent { items, base_size, line_ratio, spans, cache: RefCell::new(None), height_memo: Cell::new(None), used_ms: Cell::new(0), tracked: Cell::new(false) })
     }
 
     /// Every image URL the flow draws (rows re-layout when one of them finishes loading).
@@ -761,6 +768,7 @@ impl Element for InlineFlow {
         let hover_of = |pi: usize, window: &Window| pp.hitboxes.iter().find(|(i, _)| *i == pi).map(|(_, h)| h.is_hovered(window)).unwrap_or(false);
         let origin = bounds.origin;
         let bs = self.content.base_size;
+        let strips = span_strips(&self.content.spans, laid);
         for (pi, p) in laid.placed.iter().enumerate() {
             let line = &laid.lines[p.line];
             let x0 = origin.x.f() + p.x;
@@ -771,8 +779,8 @@ impl Element for InlineFlow {
                     let base_abs = (origin.y.f() + line.baseline).round();
                     let top = base_abs - (*hl + *asc) + TEXT_DY;
                     let painted = match &self.content.items[*item] {
-                        Item::Text(t) if t.paint.is_some() && shaped.text.as_ref() == t.text.as_ref() => {
-                            paint_name(window, cx, &imgs, t, p.atom.w, (*asc, shaped.descent.f()), line_h, x0, base_abs)
+                        Item::Text(t) if t.paint.is_some() && (strips.contains_key(&pi) || shaped.text.as_ref() == t.text.as_ref()) => {
+                            paint_name(window, cx, &imgs, t, &shaped.text, strips.get(&pi).copied(), p.atom.w, (*asc, shaped.descent.f()), line_h, x0, base_abs)
                         }
                         _ => false,
                     };
@@ -931,10 +939,45 @@ impl Element for InlineFlow {
     }
 }
 
+/// Where each word of a painted span sits on the span's strip: placed index -> (offset of its text origin, strip
+/// width). The strip is the span's line pieces (first to last word / box of the span on each line) laid end to
+/// end, like Blink's background on a wrapping inline (`box-decoration-break: slice`).
+fn span_strips(spans: &[(usize, usize)], laid: &Laid) -> std::collections::HashMap<usize, (f32, f32)> {
+    let mut out = std::collections::HashMap::new();
+    for &(a, b) in spans {
+        let in_span = |p: &Placed| match &p.atom.kind {
+            AtomKind::Word { item, .. } | AtomKind::Box { item } => (a..b).contains(item),
+            _ => false,
+        };
+        // per line, in order: (line, left, right)
+        let mut pieces: Vec<(usize, f32, f32)> = Vec::new();
+        for p in laid.placed.iter().filter(|p| in_span(p)) {
+            match pieces.last_mut() {
+                Some(l) if l.0 == p.line => {
+                    l.1 = l.1.min(p.x);
+                    l.2 = l.2.max(p.x + p.atom.w);
+                }
+                _ => pieces.push((p.line, p.x, p.x + p.atom.w)),
+            }
+        }
+        let total: f32 = pieces.iter().map(|l| l.2 - l.1).sum();
+        let mut before = 0.0;
+        for (line, left, right) in &pieces {
+            for (pi, p) in laid.placed.iter().enumerate() {
+                if p.line == *line && matches!(p.atom.kind, AtomKind::Word { .. }) && in_span(p) {
+                    out.insert(pi, (before + p.x - left, total));
+                }
+            }
+            before += right - left;
+        }
+    }
+    out
+}
+
 /// Draws a 7TV-painted name (`paint_text`) with its text origin at `x0` and its baseline on pixel row `base_abs`.
 /// False when it could not be rendered (the caller draws the plain glyphs).
 #[allow(clippy::too_many_arguments)]
-fn paint_name(window: &mut Window, cx: &mut App, imgs: &ImagesHandle, t: &TextItem, width: f32, (asc, desc): (f32, f32), line_h: f32, x0: f32, base_abs: f32) -> bool {
+fn paint_name(window: &mut Window, cx: &mut App, imgs: &ImagesHandle, t: &TextItem, text: &str, strip: Option<(f32, f32)>, width: f32, (asc, desc): (f32, f32), line_h: f32, x0: f32, base_abs: f32) -> bool {
     let Some(spec) = t.paint.as_ref() else { return false };
     let scale = window.scale_factor();
     let (above, below) = blink_above_below(asc, desc, line_h);
@@ -948,7 +991,7 @@ fn paint_name(window: &mut Window, cx: &mut App, imgs: &ImagesHandle, t: &TextIt
         let sz = g.gpu.size(idx);
         g.gpu.as_bytes(idx).map(|b| PaintImage { w: sz.width.0 as u32, h: sz.height.0 as u32, bgra: std::sync::Arc::new(b.to_vec()) })
     };
-    let req = NameReq { text: &t.text, size: t.size, weight: t.weight.0 as u16, scale, box_w: width, above, below, paint: spec, image: gimg.as_ref().map(|_| (frame, &getter as &dyn Fn() -> Option<PaintImage>)) };
+    let req = NameReq { text, size: t.size, weight: t.weight.0 as u16, scale, box_w: width, above, below, paint: spec, strip, image: gimg.as_ref().map(|_| (frame, &getter as &dyn Fn() -> Option<PaintImage>)) };
     let ni = paint_text::name_image(&req);
     for d in paint_text::take_dropped() {
         window.drop_image(d).ok();

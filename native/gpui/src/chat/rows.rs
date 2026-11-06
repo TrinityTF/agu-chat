@@ -215,11 +215,13 @@ impl BuiltRow {
 struct Flow {
     items: Vec<Item>,
     base: f32,
+    /// item ranges painted as one span (`InlineContent::spans`)
+    spans: Vec<(usize, usize)>,
 }
 
 impl Flow {
     fn new(base: f32) -> Self {
-        Flow { items: Vec::new(), base }
+        Flow { items: Vec::new(), base, spans: Vec::new() }
     }
     fn text(&mut self, t: &str, color: Hsla) {
         if !t.is_empty() {
@@ -230,7 +232,7 @@ impl Flow {
         self.items.push(it);
     }
     fn finish(self) -> Rc<InlineContent> {
-        InlineContent::new(self.items, self.base, LINE_HEIGHT)
+        InlineContent::with_spans(self.items, self.base, LINE_HEIGHT, self.spans)
     }
 }
 
@@ -646,15 +648,22 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     f.push(Item::Text(TextItem::new(" ", base, token(theme::TEXT))));
     if msg.action {
         // /me: the message takes the name's style and medium weight
+        // A 7TV paint covers the whole message as one span (Electron puts the name's paint style on the
+        // message's <span>), not one gradient per word.
         let mark = f.items.len();
         message_items(&mut f, &parts, size, env.emotes.as_deref(), color, struck, rs.readable_colors, Some((&mut actions, &sk)));
+        let spec = paint.and_then(super::paint_text::PaintSpec::from_paint).map(Rc::new);
         for it in f.items[mark..].iter_mut() {
             if let Item::Text(t) = it {
                 t.weight = FontWeight::MEDIUM;
                 if let Some(p) = paint {
                     t.gradient = paint_gradient(p, color);
+                    t.paint = spec.clone();
                 }
             }
+        }
+        if spec.is_some() && f.items.len() > mark {
+            f.spans.push((mark, f.items.len()));
         }
     } else {
         message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::TEXT), struck, rs.readable_colors, Some((&mut actions, &sk)));

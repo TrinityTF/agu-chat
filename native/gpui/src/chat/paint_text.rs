@@ -308,6 +308,11 @@ pub struct NameReq<'a> {
     pub above: f32,
     pub below: f32,
     pub paint: &'a PaintSpec,
+    /// A piece of a longer painted span (a /me message): (CSS px from the span's paint box to this piece's text
+    /// origin, the box's width). CSS paints an inline span that wraps as one strip with its line pieces laid end
+    /// to end (`box-decoration-break: slice`), so each word shows its own slice of one gradient. None: the paint
+    /// box is the text's own (`box_w`).
+    pub strip: Option<(f32, f32)>,
     /// The paint image's frame to draw (animated paints) and how to get its pixels (only called on a cache miss).
     pub image: Option<(usize, &'a dyn Fn() -> Option<PaintImage>)>,
 }
@@ -340,7 +345,8 @@ pub fn render(req: &NameReq) -> Option<Rendered> {
 
     // the box the paint is evaluated in, in CSS px relative to its top-left; device px (x + .5) maps into it
     let box_top_dev = baseline_y as f32 - req.above * scale;
-    let (bw, bh) = (req.box_w, req.above + req.below);
+    let (sx, bw) = req.strip.unwrap_or((0.0, req.box_w));
+    let bh = req.above + req.below;
     let cov = req.image.and_then(|(_, get)| get()).and_then(|i| cover(&i, bw * scale, bh * scale));
     let mut layer: Vec<Pm> = vec![[0.0; 4]; w * h];
     for y in 0..h {
@@ -349,7 +355,7 @@ pub fn render(req: &NameReq) -> Option<Rendered> {
             if m <= 0.0 {
                 continue;
             }
-            let (bx_dev, by_dev) = (x as f32 - origin_x as f32, y as f32 - box_top_dev);
+            let (bx_dev, by_dev) = (x as f32 - origin_x as f32 + sx * scale, y as f32 - box_top_dev);
             let (cx, cy) = ((bx_dev + 0.5) / scale, (by_dev + 0.5) / scale);
             let mut c: Pm = req.paint.underlay.as_ref().map(|u| u.at(bw, bh, cx, cy)).unwrap_or([0.0; 4]);
             if let Some(ci) = &cov {
@@ -508,6 +514,7 @@ struct Key {
     above: i32,
     below: i32,
     box_w: u32,
+    strip: Option<(i32, u32)>,
     image: Option<usize>,
 }
 
@@ -549,6 +556,7 @@ pub fn name_image(req: &NameReq) -> Option<NameImage> {
         above: (req.above * 64.0) as i32,
         below: (req.below * 64.0) as i32,
         box_w: (req.box_w * 64.0) as u32,
+        strip: req.strip.map(|(x, w)| ((x * 64.0) as i32, (w * 64.0) as u32)),
         image: req.image.map(|(f, _)| f),
     };
     CACHE.with(|c| {
