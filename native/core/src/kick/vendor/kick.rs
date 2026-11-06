@@ -108,6 +108,30 @@ pub async fn get_kick_channel(slug: &str, user_agent: &str) -> Result<Option<Kic
     Ok(Some(channel_from_json(&ch, slug)))
 }
 
+/// What kick.com says about one user in one channel (`/api/v2/channels/<slug>/users/<user slug>`): the roles and badges
+/// the site itself uses. None when Kick does not know the pair (404). Unofficial and may be blocked: callers fall back.
+pub async fn get_channel_user(slug: &str, user_slug: &str, user_agent: &str) -> Result<Option<Value>, String> {
+    let url = format!("https://kick.com/api/v2/channels/{}/users/{}", enc(slug), enc(user_slug));
+    let r = kick_fetch(&url, user_agent, "", None).await.map_err(|e| e.message)?;
+    if r.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !r.status().is_success() {
+        return Err(format!("Kick answered {}", r.status().as_u16()));
+    }
+    net::json(r).await.map(Some).map_err(|e| e.message)
+}
+
+/// Does a badge list (`[{type: "moderator"}, ...]`) mark a moderator or the broadcaster?
+pub fn badges_mark_mod(badges: &Value) -> bool {
+    badges.as_array().map(|a| a.iter().any(|b| matches!(b["type"].as_str(), Some("moderator" | "broadcaster")))).unwrap_or(false)
+}
+
+/// Is this user a moderator (or the owner) of the channel, per `get_channel_user`'s answer?
+pub fn channel_user_is_mod(u: &Value) -> bool {
+    u["is_moderator"] == json!(true) || u["is_channel_owner"] == json!(true) || u["is_broadcaster"] == json!(true) || badges_mark_mod(&u["badges"])
+}
+
 /// The pure half of `getKickChannel`.
 pub fn channel_from_json(ch: &Value, slug: &str) -> KickChannel {
     let ls = &ch["livestream"];

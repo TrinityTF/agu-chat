@@ -255,15 +255,22 @@ fn user_agent() -> String {
     ctx.map(|c| c.user_agent.clone()).unwrap_or_else(|| "AguChat/0 (+https://github.com/TrinityTF/agu-chat)".to_string())
 }
 
-async fn json_post(url: &str, headers: &[(&str, String)], body: &Value) -> Result<(u16, Value), net::FetchError> {
-    let mut o = FetchOpts::new(15_000).method("POST").header("Content-Type", "application/json").header("Accept", "application/json").header("User-Agent", &user_agent());
+async fn json_call(method: &'static str, url: &str, headers: &[(&str, String)], body: Option<&Value>) -> Result<(u16, Value), net::FetchError> {
+    let mut o = FetchOpts::new(15_000).method(method).header("Accept", "application/json").header("User-Agent", &user_agent());
     for (k, v) in headers {
         o = o.header(k, v);
     }
-    let r = net::fetch(url, o.body(body.to_string())).await?;
+    if let Some(b) = body {
+        o = o.header("Content-Type", "application/json").body(b.to_string());
+    }
+    let r = net::fetch(url, o).await?;
     let status = r.status().as_u16();
     let v = net::json(r).await.unwrap_or(Value::Null);
     Ok((status, v))
+}
+
+async fn json_post(url: &str, headers: &[(&str, String)], body: &Value) -> Result<(u16, Value), net::FetchError> {
+    json_call("POST", url, headers, Some(body)).await
 }
 
 fn unreachable(e: &net::FetchError, what: &str) -> String {
@@ -425,6 +432,20 @@ pub fn ensure_ctx(ctx: &Arc<Ctx>) {
 
 pub fn is_logged_in() -> bool {
     st().record.is_some()
+}
+
+/// The logged-in Kick account, if any.
+pub fn me() -> Option<KickUser> {
+    st().record.as_ref().map(|r| r.user.clone())
+}
+
+/// Whether the login was granted `s` (the stored scope is space-separated).
+pub fn has_scope(s: &str) -> bool {
+    st().record.as_ref().map(|r| scope_has(&r.scope, s)).unwrap_or(false)
+}
+
+pub fn scope_has(scope: &str, s: &str) -> bool {
+    scope.split(|c: char| c.is_whitespace() || c == ',').any(|x| x == s)
 }
 
 pub fn state() -> AccountState {
@@ -606,8 +627,33 @@ pub struct SendError {
     pub message: String,
 }
 
-async fn post_chat(url: &str, token: &str, body: &Value) -> Result<(u16, Value), SendError> {
-    json_post(url, &[("Authorization", format!("Bearer {token}"))], body).await.map_err(|e| SendError { status: 502, message: unreachable(&e, "Kick") })
+/// Kick's error text for a moderation call: 403 means the account is not a moderator there.
+pub fn action_error_message(status: u16, body: &Value) -> String {
+    if status == 403 {
+        return "You are not a moderator in this Kick chat".into();
+    }
+    match error_text(body) {
+        Some(m) => m,
+        None => format!("Kick rejected the action ({status})"),
+    }
+}
+
+/// One call to Kick's API as the logged-in user. A 401 refreshes the token and retries once.
+pub async fn kick_api(method: &'static str, url: &str, body: Option<&Value>) -> Result<(u16, Value), SendError> {
+    let call = |token: String| async move {
+        json_call(method, url, &[("Authorization", format!("Bearer {token}"))], body).await.map_err(|e| SendError { status: 502, message: unreachable(&e, "Kick") })
+    };
+    let Some(token) = access_token().await else { return Err(SendError { status: 401, message: LOGGED_OUT_REASON.into() }) };
+    let (mut status, mut v) = call(token.clone()).await?;
+    if status == 401 {
+        if !refresh_if(&token).await {
+            return Err(SendError { status: 401, message: EXPIRED_MESSAGE.into() });
+        }
+        let t2 = st().record.as_ref().map(|r| r.access_token.clone());
+        let Some(t2) = t2 else { return Err(SendError { status: 401, message: EXPIRED_MESSAGE.into() }) };
+        (status, v) = call(t2).await?;
+    }
+    Ok((status, v))
 }
 
 /// Post one chat message as the logged-in user. A 401 from Kick refreshes the token and retries once.
@@ -619,17 +665,8 @@ pub async fn send_chat_to(url: &str, text: &str, broadcaster_user_id: i64, reply
     if text.chars().count() > MAX_CHARS {
         return Err(SendError { status: 400, message: format!("Kick messages can be at most {MAX_CHARS} characters") });
     }
-    let Some(token) = access_token().await else { return Err(SendError { status: 401, message: LOGGED_OUT_REASON.into() }) };
     let body = build_send_body(text, broadcaster_user_id, reply_to);
-    let (mut status, mut v) = post_chat(url, &token, &body).await?;
-    if status == 401 {
-        if !refresh_if(&token).await {
-            return Err(SendError { status: 401, message: EXPIRED_MESSAGE.into() });
-        }
-        let t2 = st().record.as_ref().map(|r| r.access_token.clone());
-        let Some(t2) = t2 else { return Err(SendError { status: 401, message: EXPIRED_MESSAGE.into() }) };
-        (status, v) = post_chat(url, &t2, &body).await?;
-    }
+    let (status, v) = kick_api("POST", url, Some(&body)).await?;
     if (200..300).contains(&status) {
         if v["data"]["is_sent"] == json!(false) {
             return Err(SendError { status: 422, message: "Kick did not send the message".into() });
@@ -712,6 +749,21 @@ mod tests {
     fn kick_errors_surface_their_message() {
         assert_eq!(send_error_message(403, &json!({"message": "You are banned from this chat"})), "You are banned from this chat");
         assert_eq!(send_error_message(500, &Value::Null), "Kick rejected the message (500)");
+    }
+
+    #[test]
+    fn scopes_are_matched_whole() {
+        assert!(scope_has("user:read moderation:ban chat:write", "moderation:ban"));
+        assert!(!scope_has("user:read moderation:ban", "moderation:chat_message:manage"));
+        assert!(!scope_has("moderation:banned", "moderation:ban"));
+        assert!(!scope_has("", "moderation:ban"));
+    }
+
+    #[test]
+    fn moderation_errors_read_well() {
+        assert_eq!(action_error_message(403, &json!({"message": "Forbidden"})), "You are not a moderator in this Kick chat");
+        assert_eq!(action_error_message(400, &json!({"message": "User is already banned"})), "User is already banned");
+        assert_eq!(action_error_message(500, &Value::Null), "Kick rejected the action (500)");
     }
 
     #[test]

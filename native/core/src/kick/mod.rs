@@ -34,7 +34,7 @@ use crate::protocol::{AccountState, Frame, Platform};
 use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, js_string, now_ms, parse_rfc3339_ms, truthy, uuid_v4, Timer};
 use crate::ws::{self, WsEvent, WsHandle};
-use vendor::kick::{fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, KickChannel, SubBadge};
+use vendor::kick::{badges_mark_mod, channel_user_is_mod, get_channel_user, fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, KickChannel, SubBadge};
 
 const MAX_BACKLOG: usize = 300;
 // Kick's chat works whether or not the channel is live, so the socket stays up; this only keeps the header's
@@ -73,7 +73,7 @@ impl PlatformModule for Kick {
     }
 
     fn routes(&self) -> Vec<(String, Handler)> {
-        vec![("POST /api/kick/send".into(), Arc::new(|req| Box::pin(route_send(req)))), ("GET /api/kick/caps".into(), Arc::new(|req| Box::pin(route_caps(req))))]
+        vec![("POST /api/kick/send".into(), Arc::new(|req| Box::pin(route_send(req)))), ("GET /api/kick/caps".into(), Arc::new(|req| Box::pin(route_caps(req)))), ("POST /api/kick/action".into(), Arc::new(|req| Box::pin(route_action(req))))]
     }
 
     fn accounts(&self) -> Option<Arc<dyn Accounts>> {
@@ -141,9 +141,146 @@ async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
     }
 }
 
-/// GET /api/kick/caps: moderating from here is not built; only whether the account is logged in.
-async fn route_caps(_req: RouteReq) -> Result<RouteRes, RouteError> {
-    Ok(RouteRes { status: 200, body: json!({"connected": auth::is_logged_in(), "canModerate": false, "canDelete": false}) })
+const SCOPE_BAN: &str = "moderation:ban";
+const SCOPE_DELETE: &str = "moderation:chat_message:manage";
+const API_BASE: &str = "https://api.kick.com/public/v1";
+const MOD_CACHE_MS: i64 = 10 * 60_000;
+const MAX_TIMEOUT_MINUTES: i64 = 10_080;
+
+/// (channel slug, my user id) -> (when asked, is a mod there)
+static MOD_CACHE: LazyLock<Mutex<HashMap<(String, String), (i64, bool)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// channel slug -> my own chat messages there carried a moderator / broadcaster badge (the fallback when kick.com's
+/// user lookup is unavailable)
+static MOD_SEEN: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Remember it when a message of the logged-in account carries a moderator badge in this channel.
+fn note_own_badges(slug: &str, msg: &Value) {
+    let Some(me) = auth::me() else { return };
+    if msg["user"]["id"].as_str() == Some(me.id.as_str()) && badges_mark_mod(&msg["badges"]) {
+        MOD_SEEN.lock().unwrap().insert(slug.to_string(), true);
+    }
+}
+
+/// Is the logged-in account the broadcaster or a moderator of this channel? Cached for ten minutes.
+async fn is_mod_here(slug: &str, ua: &str) -> bool {
+    let Some(me) = auth::me() else { return false };
+    if !me.slug.is_empty() && me.slug.eq_ignore_ascii_case(slug) {
+        return true;
+    }
+    let key = (slug.to_string(), me.id.clone());
+    if let Some((at, v)) = MOD_CACHE.lock().unwrap().get(&key).copied() {
+        if now_ms() - at < MOD_CACHE_MS {
+            return v;
+        }
+    }
+    let seen = MOD_SEEN.lock().unwrap().get(slug).copied().unwrap_or(false);
+    // kick.com files the slug with dashes where the display name has underscores
+    let user_slug = me.slug.to_lowercase().replace('_', "-");
+    match get_channel_user(slug, &user_slug, ua).await {
+        Ok(u) => {
+            let v = u.map(|u| channel_user_is_mod(&u)).unwrap_or(false) || seen;
+            MOD_CACHE.lock().unwrap().insert(key, (now_ms(), v));
+            v
+        }
+        Err(_) => seen,
+    }
+}
+
+/// GET /api/kick/caps: `connected` follows the login. canModerate (timeout, ban, unban) needs the moderation:ban scope and
+/// canDelete the moderation:chat_message:manage scope, and both need the account to be the broadcaster or a moderator of
+/// this channel (kick.com's user lookup, else a moderator badge seen on the account's own messages).
+async fn route_caps(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let connected = auth::is_logged_in();
+    let (mut can_mod, mut can_del) = (false, false);
+    if connected && (auth::has_scope(SCOPE_BAN) || auth::has_scope(SCOPE_DELETE)) {
+        let slug = parse_kick_source(&req.source.channel).unwrap_or_else(|| req.source.channel.clone());
+        if is_mod_here(&slug, &req.ctx.user_agent).await {
+            can_mod = auth::has_scope(SCOPE_BAN);
+            can_del = auth::has_scope(SCOPE_DELETE);
+        }
+    }
+    Ok(RouteRes { status: 200, body: json!({"connected": connected, "canModerate": can_mod, "canDelete": can_del}) })
+}
+
+/// A failure the UI toasts verbatim: the body is the plain message, not {error}.
+fn action_err(status: u16, msg: &str) -> RouteRes {
+    RouteRes { status, body: Value::String(msg.to_string()) }
+}
+
+/// Whole seconds -> Kick's timeout minutes: rounded up, 1 minute to 7 days.
+pub fn timeout_minutes(seconds: f64) -> i64 {
+    ((seconds / 60.0).ceil() as i64).clamp(1, MAX_TIMEOUT_MINUTES)
+}
+
+/// Kick message ids are UUIDs; anything else never reaches the URL.
+pub fn valid_message_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+}
+
+/// `POST/DELETE /moderation/bans` body: a timeout carries `duration` (minutes), a ban does not.
+pub fn ban_body(broadcaster: i64, user: i64, duration_minutes: Option<i64>) -> Value {
+    let mut b = json!({"broadcaster_user_id": broadcaster, "user_id": user});
+    if let Some(d) = duration_minutes {
+        b["duration"] = json!(d);
+    }
+    b
+}
+
+/// What to send to Kick for one action.
+#[derive(Debug, PartialEq)]
+pub struct ActionPlan {
+    pub method: &'static str,
+    pub url: String,
+    pub body: Option<Value>,
+    pub scope: &'static str,
+}
+
+/// Validates the request fields and builds the Kick call. Err is a 400 message.
+pub fn plan_action(action: &str, user_id: &str, message_id: &str, seconds: Option<f64>, broadcaster: i64) -> Result<ActionPlan, String> {
+    let user = || user_id.trim().parse::<i64>().map_err(|_| "Kick user id is missing or not a number".to_string());
+    let bans = format!("{API_BASE}/moderation/bans");
+    match action {
+        "timeout" => {
+            let s = seconds.filter(|s| s.is_finite() && *s > 0.0).ok_or("A timeout needs a duration")?;
+            Ok(ActionPlan { method: "POST", url: bans, body: Some(ban_body(broadcaster, user()?, Some(timeout_minutes(s)))), scope: SCOPE_BAN })
+        }
+        "ban" => Ok(ActionPlan { method: "POST", url: bans, body: Some(ban_body(broadcaster, user()?, None)), scope: SCOPE_BAN }),
+        "unban" => Ok(ActionPlan { method: "DELETE", url: bans, body: Some(ban_body(broadcaster, user()?, None)), scope: SCOPE_BAN }),
+        "delete" => {
+            if !valid_message_id(message_id) {
+                return Err("Kick message id is missing or invalid".into());
+            }
+            Ok(ActionPlan { method: "DELETE", url: format!("{API_BASE}/chat/{message_id}"), body: None, scope: SCOPE_DELETE })
+        }
+        _ => Err("unknown action".into()),
+    }
+}
+
+/// POST /api/kick/action {action: timeout|ban|unban|delete, userId, messageId, seconds}
+async fn route_action(req: RouteReq) -> Result<RouteRes, RouteError> {
+    if !auth::is_logged_in() {
+        return Ok(action_err(401, auth::LOGGED_OUT_REASON));
+    }
+    let action = js_str_or_empty(Some(&req.body["action"]));
+    let user_id = js_str_or_empty(Some(&req.body["userId"]));
+    let message_id = js_str_or_empty(Some(&req.body["messageId"]));
+    let slug = parse_kick_source(&req.source.channel).unwrap_or_else(|| req.source.channel.clone());
+    let broadcaster = match broadcaster_id(&slug, &req.ctx.user_agent).await {
+        Ok(id) => id,
+        Err(e) => return Ok(action_err(502, &e)),
+    };
+    let plan = match plan_action(&action, &user_id, &message_id, req.body["seconds"].as_f64(), broadcaster) {
+        Ok(p) => p,
+        Err(e) => return Ok(action_err(400, &e)),
+    };
+    if !auth::has_scope(plan.scope) {
+        return Ok(action_err(403, "Log in to Kick again to allow moderation"));
+    }
+    match auth::kick_api(plan.method, &plan.url, plan.body.as_ref()).await {
+        Ok((status, _)) if (200..300).contains(&status) => Ok(RouteRes { status: 200, body: json!({"ok": true}) }),
+        Ok((status, v)) => Ok(action_err(status, &auth::action_error_message(status, &v))),
+        Err(e) => Ok(action_err(e.status, &e.message)),
+    }
 }
 
 struct St {
@@ -458,6 +595,7 @@ impl KickSource {
         self.st.lock().unwrap().emotes = emotes;
         for raw in hist {
             let m = self.dress_badges(to_kick_chat_msg(&raw));
+            note_own_badges(&self.slug, &m);
             let id = js_str_or_empty(Some(&m["id"]));
             if id.is_empty() || !seen.insert(id) {
                 continue;
@@ -665,6 +803,7 @@ impl KickSource {
                 if js_str_or_empty(Some(&msg["id"])).is_empty() {
                     return;
                 }
+                note_own_badges(&self.slug, &msg);
                 self.push_backlog(msg.clone());
                 self.emit(json!({"type": "chat", "message": msg}));
             }
@@ -765,5 +904,71 @@ impl Source for KickSource {
     fn snapshot(&self) -> Vec<Frame> {
         let st = self.st.lock().unwrap();
         vec![chatlog_frame(&st), conn_frame(&st)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeouts_round_up_to_whole_minutes_within_kicks_limits() {
+        assert_eq!(timeout_minutes(1.0), 1);
+        assert_eq!(timeout_minutes(60.0), 1);
+        assert_eq!(timeout_minutes(61.0), 2);
+        assert_eq!(timeout_minutes(600.0), 10);
+        assert_eq!(timeout_minutes(1e9), 10_080);
+    }
+
+    #[test]
+    fn message_ids_are_uuid_like() {
+        assert!(valid_message_id("0b4e8a2c-1d3f-4a5b-9c6d-7e8f90a1b2c3"));
+        assert!(!valid_message_id(""));
+        assert!(!valid_message_id("../moderation/bans"));
+        assert!(!valid_message_id("a b"));
+        assert!(!valid_message_id("a?x=1"));
+    }
+
+    #[test]
+    fn ban_bodies_have_the_documented_shape() {
+        assert_eq!(ban_body(5, 9, Some(10)), json!({"broadcaster_user_id": 5, "user_id": 9, "duration": 10}));
+        assert_eq!(ban_body(5, 9, None), json!({"broadcaster_user_id": 5, "user_id": 9}));
+    }
+
+    #[test]
+    fn actions_become_kick_calls() {
+        let t = plan_action("timeout", "9", "m", Some(300.0), 5).unwrap();
+        assert_eq!((t.method, t.scope), ("POST", SCOPE_BAN));
+        assert!(t.url.ends_with("/public/v1/moderation/bans"));
+        assert_eq!(t.body, Some(json!({"broadcaster_user_id": 5, "user_id": 9, "duration": 5})));
+        let b = plan_action("ban", "9", "", None, 5).unwrap();
+        assert_eq!((b.method, b.body), ("POST", Some(json!({"broadcaster_user_id": 5, "user_id": 9}))));
+        let u = plan_action("unban", "9", "", None, 5).unwrap();
+        assert_eq!((u.method, u.scope), ("DELETE", SCOPE_BAN));
+        let d = plan_action("delete", "9", "ab-12", None, 5).unwrap();
+        assert_eq!((d.method, d.scope, d.body), ("DELETE", SCOPE_DELETE, None));
+        assert!(d.url.ends_with("/public/v1/chat/ab-12"));
+    }
+
+    #[test]
+    fn bad_input_is_refused() {
+        assert!(plan_action("timeout", "9", "", None, 5).is_err());
+        assert!(plan_action("timeout", "9", "", Some(0.0), 5).is_err());
+        assert!(plan_action("ban", "nine", "", None, 5).is_err());
+        assert!(plan_action("ban", "", "", None, 5).is_err());
+        assert!(plan_action("delete", "9", "x/../y", None, 5).is_err());
+        assert!(plan_action("delete", "9", "", None, 5).is_err());
+        assert!(plan_action("pin", "9", "m", None, 5).is_err());
+    }
+
+    #[test]
+    fn mod_status_reads_roles_and_badges() {
+        assert!(channel_user_is_mod(&json!({"is_moderator": true})));
+        assert!(channel_user_is_mod(&json!({"is_channel_owner": true})));
+        assert!(channel_user_is_mod(&json!({"badges": [{"type": "subscriber"}, {"type": "moderator"}]})));
+        assert!(!channel_user_is_mod(&json!({"is_moderator": false, "badges": [{"type": "vip"}]})));
+        assert!(!channel_user_is_mod(&json!({})));
+        assert!(badges_mark_mod(&json!([{"type": "broadcaster"}])));
+        assert!(!badges_mark_mod(&Value::Null));
     }
 }
