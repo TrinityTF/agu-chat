@@ -20,7 +20,7 @@ use crate::protocol::*;
 use crate::relay::{Api, SourceManager};
 use crate::sounds::Sounds;
 use crate::store::Store;
-use crate::updater::{GithubFeed, NoInstaller, Updater};
+use crate::updater::{GithubFeed, NativeInstaller, QuitHook, Updater};
 use crate::util::Listeners;
 
 /// `%APPDATA%\Agu Chat` (what Electron's `app.getPath("userData")` is for this app) unless `AGU_DATA_DIR`
@@ -47,7 +47,7 @@ pub struct AppMeta {
 impl Default for AppMeta {
     fn default() -> Self {
         AppMeta {
-            version: std::env::var("AGU_APP_VERSION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+            version: std::env::var("AGU_APP_VERSION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| option_env!("AGU_BUILD_VERSION").filter(|v| !v.is_empty()).unwrap_or(env!("CARGO_PKG_VERSION")).to_string()),
             packaged: std::env::var("AGU_PACKAGED").map(|v| v == "1").unwrap_or(!cfg!(debug_assertions)),
         }
     }
@@ -70,6 +70,7 @@ struct Inner {
 pub struct Backend {
     rt: Arc<tokio::runtime::Runtime>,
     inner: Arc<Inner>,
+    quit: QuitHook,
 }
 
 fn accounts_state(modules: &Modules) -> AccountsState {
@@ -112,7 +113,9 @@ impl Backend {
         let f2 = frames.clone();
         let relay = SourceManager::new(modules.clone(), ctx.clone(), Arc::new(move |sub_id, frame| f2.emit(&(sub_id.clone(), frame.clone()))));
         let api = Api::new(&modules, ctx.clone());
-        let updater = Updater::new(meta.version.clone(), meta.packaged, Arc::new(GithubFeed), Arc::new(NoInstaller), logger.clone());
+        let quit: QuitHook = Arc::new(std::sync::Mutex::new(None));
+        let installer = NativeInstaller::new(data_dir.join("updates"), quit.clone(), logger.clone());
+        let updater = Updater::new(meta.version.clone(), meta.packaged, Arc::new(GithubFeed), Arc::new(installer), logger.clone());
         let u2 = updater_cbs.clone();
         updater.events.on(Arc::new(move |s: &UpdaterState| u2.emit(s)));
 
@@ -137,7 +140,13 @@ impl Backend {
             }
             upd.init(&channel);
         });
-        Backend { rt, inner }
+        Backend { rt, inner, quit }
+    }
+
+    /// What `updater_install` does after it started the installer: the UI quits the app (flushing its files).
+    /// Without a hook the process exits at once.
+    pub fn set_quit_hook(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.quit.lock().unwrap() = Some(f);
     }
 
     pub fn data_dir(&self) -> &Path {
