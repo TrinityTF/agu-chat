@@ -65,7 +65,7 @@ Your password never goes through Agu Chat, and you can log out or revoke access 
 | Merge platforms | In the channel dialog, add several channels to one split |
 | Split a channel back out | Click its platform icon on the split's header → Split out to the right / below, or drag the icon onto any split's edge |
 | Mod mode | The sword button on a split's header |
-| Reply to someone | Ctrl+click a name to add `@name` to the message box |
+| Mention someone | Ctrl+click their name: the message box starts with `@name` |
 | User card | Click a name: it opens in its own small window you can move anywhere, and several can be open |
 | Always on top | Settings → Appearance and chat |
 | All tabs | The arrow at the left edge of the tab bar lists every tab; the bar shows the ones that fit, always with the current tab |
@@ -91,7 +91,8 @@ update**. Switching from Beta to Stable keeps your current version until a newer
 ## Privacy
 
 Your logins are stored only on your PC, encrypted with Windows' own protection, and are never sent anywhere except
-to the platform they belong to. Settings and logs are in `%APPDATA%\Agu Chat\`.
+to the platform they belong to. The one exception is Kick: its login and token refresh go through Agu Chat's
+sign-in service at api.agu.lol, which passes the tokens to your PC and keeps nothing. Settings and logs are in `%APPDATA%\Agu Chat\`.
 
 ## Building from source
 
