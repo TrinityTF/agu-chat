@@ -1109,7 +1109,7 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, rule: Option<&Highli
     let mut spec = frame(f.finish(), actions, ctx, row.ord);
     if let Some(p) = paid {
         // Super Chats carry YouTube's own tier colour; a rule only adds its bar.
-        spec.bg = (!p.bg.is_empty()).then(|| hex(&p.bg));
+        spec.bg = (!p.bg.is_empty()).then(|| css_color(&p.bg));
         spec.border = Some(token_a(theme::WHITE, 0.10));
         spec.margin_y = 2.0;
         if let Some(r) = rule {

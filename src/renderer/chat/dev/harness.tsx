@@ -203,6 +203,9 @@ async function main() {
   const merged = params.get("mode") === "merged";
   const mod = params.get("mod") === "1";
   if (params.get("cansend") === "0") canSend = false;
+  // `set=<json>`: a settings patch applied before the first render (visual-parity runs vary font size, emote size, ...)
+  const patch = params.get("set");
+  if (patch) Object.assign(settings, JSON.parse(patch));
   const root = document.getElementById("root")!;
   root.style.cssText = "height:100vh;display:flex;gap:1px;background:#26262f";
   const panes = merged

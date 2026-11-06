@@ -46,6 +46,27 @@ pub fn hex(color: &str) -> Hsla {
     Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }.into()
 }
 
+/// A CSS colour as the page would paint it: `rgb()` / `rgba()` (Super Chat tiers arrive as `rgba(230,81,0,.5)`),
+/// `#rrggbbaa`, else a plain hex colour.
+pub fn css_color(color: &str) -> Hsla {
+    let t = color.trim();
+    if let Some(inner) = t.strip_prefix("rgba(").or_else(|| t.strip_prefix("rgb(")).and_then(|r| r.strip_suffix(')')) {
+        let v: Vec<f32> = inner.split(|ch| ch == ',' || ch == '/' || ch == ' ').filter(|p| !p.is_empty()).filter_map(|p| p.trim_end_matches('%').parse().ok()).collect();
+        if v.len() >= 3 {
+            let alpha = v.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+            return Rgba { r: v[0] / 255.0, g: v[1] / 255.0, b: v[2] / 255.0, a: alpha }.into();
+        }
+    }
+    if let Some(h) = t.strip_prefix('#') {
+        if h.len() == 8 {
+            if let Ok(n) = u32::from_str_radix(h, 16) {
+                return Rgba { r: ((n >> 24) & 0xff) as f32 / 255.0, g: ((n >> 16) & 0xff) as f32 / 255.0, b: ((n >> 8) & 0xff) as f32 / 255.0, a: (n & 0xff) as f32 / 255.0 }.into();
+            }
+        }
+    }
+    hex(color)
+}
+
 pub fn token(hexv: u32) -> Hsla {
     theme::c(hexv).into()
 }
@@ -61,6 +82,14 @@ pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn css_colours_keep_their_alpha() {
+        let c = css_color("rgba(230,81,0,.5)");
+        assert!((c.a - 0.5).abs() < 1e-4);
+        assert!((css_color("#00ff0080").a - 128.0 / 255.0).abs() < 1e-3);
+        assert_eq!(css_color("#fff").a, 1.0);
+    }
 
     #[test]
     fn time_has_the_shape_of_the_locale() {

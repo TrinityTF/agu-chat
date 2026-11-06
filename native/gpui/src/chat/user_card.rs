@@ -129,6 +129,11 @@ pub struct UserCardView {
     rules: Vec<String>,
     selected_rules: BTreeSet<String>,
     custom_in: Entity<TextInput>,
+    /// The window height we last set (`fit_height`), and whether the user resized the window by hand since:
+    /// then the card fills the window (`PopoutFill`) instead of the window following the card.
+    fitted_h: f32,
+    user_sized: bool,
+    mismatches: u8,
     focus: gpui::FocusHandle,
     _subs: Vec<gpui::Subscription>,
 }
@@ -164,11 +169,18 @@ impl UserCardView {
             rules: vec![],
             selected_rules: BTreeSet::new(),
             custom_in,
+            fitted_h: 0.0,
+            user_sized: false,
+            mismatches: 0,
             focus,
             _subs: subs,
         };
         v.load(cx);
         v
+    }
+
+    fn fit_state(&self) -> (bool, f32, u8) {
+        (self.user_sized, self.fitted_h, self.mismatches)
     }
 
     fn pane_ctx(&self, cx: &gpui::App) -> Option<CardCtx> {
@@ -436,6 +448,7 @@ impl Render for UserCardView {
         let mut card = div()
             .id("user-card")
             .w_full()
+            .when(self.user_sized, |d| d.h_full())
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -708,7 +721,8 @@ impl Render for UserCardView {
         // ---- recent messages
         let mut recent = div()
             .id("card-recent")
-            .max_h(px(208.))
+            .when(!self.user_sized, |d| d.max_h(px(208.)))
+            .when(self.user_sized, |d| d.flex_1().min_h(px(0.)))
             .overflow_y_scroll()
             .p(px(10.))
             .child(Self::heading(&format!("Recent messages in {}", icons::platform_label(self.platform))));
@@ -774,13 +788,45 @@ impl Render for UserCardView {
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _w, _cx| {}))
-            .child(div().w_full().on_children_prepainted(|bounds, window, cx| {
-                // The window's height follows the card.
-                if let Some(b) = bounds.first() {
-                    let h = f32::from(b.size.height);
-                    window.defer(cx, move |w, cx| super::popout::fit_height(w, cx, h));
-                }
-            }).child(card))
+            .child(
+                div()
+                    .w_full()
+                    .when(self.user_sized, |d| d.h_full())
+                    .on_children_prepainted({
+                        let me = cx.entity();
+                        move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, window, cx| {
+                            let Some(b) = bounds.first() else { return };
+                            let h = f32::from(b.size.height);
+                            let me = me.clone();
+                            window.defer(cx, move |w, cx| {
+                                // The window's height follows the card, until the user drags the window's edge.
+                                let cur = f32::from(w.bounds().size.height);
+                                let (user_sized, fitted, mismatches) = me.read(cx).fit_state();
+                                if user_sized {
+                                    return;
+                                }
+                                // our own resize may take a frame or two to show; a window that stays at another
+                                // height than the one we set, with the card unchanged, was resized by hand
+                                if fitted > 0.0 && (cur - fitted).abs() >= 3.0 {
+                                    if mismatches >= 4 {
+                                        me.update(cx, |this, cx| {
+                                            this.user_sized = true;
+                                            cx.notify();
+                                        });
+                                        return;
+                                    }
+                                    me.update(cx, |this, _| this.mismatches += 1);
+                                } else {
+                                    me.update(cx, |this, _| this.mismatches = 0);
+                                }
+                                let max = w.display(cx).map(|d| f32::from(d.bounds().size.height) - 40.0).unwrap_or(1000.0);
+                                me.update(cx, |this, _| this.fitted_h = h.round().clamp(super::popout::POPOUT_MIN_H, max));
+                                super::popout::fit_height(w, cx, h);
+                            });
+                        }
+                    })
+                    .child(card),
+            )
             .into_any_element()
     }
 }

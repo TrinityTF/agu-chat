@@ -2,9 +2,8 @@
 //! draws into its own OS window, so it can be dragged anywhere on screen, outside the app.
 //!
 //! Frameless, no taskbar button (`WindowKind::PopUp`), opened beside the clicked name and clamped to the screen
-//! that holds it; its height follows its content (`fit_height`). Differences: GPUI's pop-up windows have no
-//! resize border, so the "user resized it by hand" mode of the Electron window (the card then fills it) does not
-//! exist; the window also is not owned by the main window, so the app closes the pop-outs itself when its main
+//! that holds it; its height follows its content (`fit_height`). The window is resizable; once the user drags an edge the card fills it (`UserCardView::user_sized`, Electron's
+//! `PopoutFill`). Difference: the window is not owned by the main window, so the app closes the pop-outs itself when its main
 //! window goes (`main.rs`) and the pane closes its own with it.
 use gpui::{point, px, size, AnyWindowHandle, App, Bounds, Entity, Render, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions};
 
@@ -35,7 +34,7 @@ pub fn open_popout<V: Render + 'static>(cx: &mut App, title: &str, x: f32, y: f3
         titlebar: Some(TitlebarOptions { title: Some(title.to_string().into()), appears_transparent: true, traffic_light_position: None }),
         kind: WindowKind::PopUp,
         display_id,
-        is_resizable: false,
+        is_resizable: true,
         is_minimizable: false,
         window_min_size: Some(size(px(240.), px(POPOUT_MIN_H))),
         ..Default::default()
