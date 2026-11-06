@@ -228,7 +228,7 @@ impl AguApp {
                     .font_weight(gpui::FontWeight::BOLD)
                     .line_height(px(14.))
                     .text_color(c(theme::WHITE))
-                    .child("LIVE"),
+                    .child(crate::chat::inline::tracked("LIVE")),
             );
         }
         header = if !title.is_empty() {

@@ -88,6 +88,29 @@ pub(super) struct PopReq {
     pub above: bool,
 }
 
+/// `UnpinAfter`'s state: "Customized time" (an amount in min / sec) or "Manually unpinned or end of stream".
+pub(super) struct UnpinAfter {
+    pub time_mode: bool,
+    pub unit_min: bool,
+    pub amount: Entity<TextInput>,
+    pub busy: bool,
+    pub _sub: Subscription,
+}
+
+/// Twitch takes 30 seconds to 30 minutes, or "until unpinned / stream ends".
+pub(super) const PIN_MIN_S: i64 = 30;
+pub(super) const PIN_MAX_S: i64 = 1800;
+
+/// The seconds a "Customized time" amount means, when it is a valid one.
+pub(super) fn unpin_secs(amount: &str, unit_min: bool) -> Option<i64> {
+    let n: f64 = amount.trim().parse().ok()?;
+    if !n.is_finite() {
+        return None;
+    }
+    let secs = (n * if unit_min { 60.0 } else { 1.0 }).round() as i64;
+    (PIN_MIN_S..=PIN_MAX_S).contains(&secs).then_some(secs)
+}
+
 pub(super) struct Toast {
     pub id: u64,
     pub text: String,
@@ -164,7 +187,9 @@ pub struct ChatPane {
     pub(super) inv_cache: RefCell<HashMap<String, (u64, Arc<super::input::inventory::Inventory>)>>,
     pub(super) hidden_pins: Vec<String>,
     pub(super) pin_open: HashSet<String>,
+    /// (card key, showing the "Unpin After" sub-panel)
     pub(super) pin_menu: Option<(String, bool)>,
+    pub(super) unpin_after: Option<UnpinAfter>,
     pub(super) confirm: Option<Confirm>,
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
     pub(super) styled_users: Rc<RefCell<Vec<String>>>,
@@ -367,6 +392,7 @@ impl ChatPane {
             hidden_pins,
             pin_open: HashSet::new(),
             pin_menu: None,
+            unpin_after: None,
             confirm: None,
             images_inbox,
             styled_users,
@@ -1141,7 +1167,17 @@ impl ChatPane {
                     self.pin_open.insert(id.clone());
                 }
                 if std::env::var("AGU_PIN_MENU").is_ok() {
-                    self.pin_menu = Some((format!("{sk}|{id}"), false));
+                    let after = std::env::var("AGU_PIN_AFTER").is_ok();
+                    self.pin_menu = Some((format!("{sk}|{id}"), after));
+                    if after {
+                        let input = cx.new(|cx| {
+                            let mut t = TextInput::new(window, cx, "", InputStyle::Chat);
+                            t.set_text("20", cx);
+                            t
+                        });
+                        let sub = cx.subscribe(&input, |_this, _i, _ev: &TextInputEvent, _cx| {});
+                        self.unpin_after = Some(UnpinAfter { time_mode: true, unit_min: true, amount: input, busy: false, _sub: sub });
+                    }
                 }
             }
         }
@@ -1621,5 +1657,22 @@ fn b_contents(b: &BuiltRow) -> Vec<Rc<super::inline::InlineContent>> {
         }
         BuiltRow::Automod(a) => vec![a.header.clone(), a.body.clone()],
         BuiltRow::Feed(_) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod unpin_tests {
+    use super::unpin_secs;
+
+    #[test]
+    fn unpin_after_takes_30_seconds_to_30_minutes() {
+        assert_eq!(unpin_secs("20", true), Some(1200));
+        assert_eq!(unpin_secs("30", false), Some(30));
+        assert_eq!(unpin_secs("29", false), None);
+        assert_eq!(unpin_secs("30", true), Some(1800));
+        assert_eq!(unpin_secs("31", true), None);
+        assert_eq!(unpin_secs("0.5", true), Some(30));
+        assert_eq!(unpin_secs("", true), None);
+        assert_eq!(unpin_secs("abc", false), None);
     }
 }

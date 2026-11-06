@@ -190,7 +190,7 @@ pub fn popup_menu(menu: &MenuState, cx: &mut Context<AguApp>) -> AnyElement {
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(c(theme::FAINT))
                         .truncate()
-                        .child(h.to_uppercase()),
+                        .child(crate::chat::inline::tracked(&h.to_uppercase())),
                 );
             }
             MenuEntry::Item(it) => {

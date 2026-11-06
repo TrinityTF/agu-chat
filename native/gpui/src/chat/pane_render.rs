@@ -18,6 +18,7 @@ use super::twitch::parts::build_parts;
 use super::types::*;
 use super::ui_util::*;
 use crate::icons::{self, icon};
+use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, c};
 
 fn eid(prefix: &str, key: &str) -> ElementId {
@@ -185,7 +186,7 @@ impl ChatPane {
         }
         d = d.child(self.flow(&spec.content, actions, cx));
         if let Some((text, col)) = &spec.label {
-            d = d.child(div().absolute().right(px(6.)).top(px(2.)).text_size(px(9.)).line_height(px(12.)).font_weight(FontWeight::BOLD).text_color(*col).child(SharedString::from(text.clone())));
+            d = d.child(div().absolute().right(px(6.)).top(px(2.)).text_size(px(9.)).line_height(px(12.)).font_weight(FontWeight::BOLD).text_color(*col).child(tracked(text)));
         }
         if hovered {
             let mut bar = div()
@@ -485,7 +486,7 @@ impl ChatPane {
             )
             .child(
                 icon_btn(format!("pin-open-{key}"))
-                    .child(div().when(open, |d| d.opacity(1.0)).child(icon(icons::CHEVRON, 16.0)))
+                    .child(icon(if open { icons::CHEVRON_UP } else { icons::CHEVRON }, 16.0))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         if !this.pin_open.remove(&pid) {
                             this.pin_open.insert(pid.clone());
@@ -525,10 +526,15 @@ impl ChatPane {
                     .hover(|s| s.bg(c(theme::RAISED_2)))
                     .child(div().text_color(c(theme::MUTED)).child(icon(ic, 16.0)))
                     .child(div().flex_1().child(label))
-                    .when(more, |d| d.child(div().text_color(c(theme::MUTED)).child(icon(icons::CHEVRON, 16.0))))
+                    .when(more, |d| d.child(div().text_color(c(theme::MUTED)).child(icon(icons::CHEVRON_RIGHT, 16.0))))
             };
             let mut menu = div().absolute().right(px(8.)).top(px(36.)).w(px(224.)).rounded(px(4.)).border_1().border_color(c(theme::LINE)).bg(c(theme::RAISED)).p(px(4.)).text_size(px(14.)).line_height(px(20.)).text_color(c(theme::TEXT)).shadow_xl();
             let src = env.source.clone();
+            if self.pin_menu.as_ref().map(|(_, a)| *a).unwrap_or(false) && self.unpin_after.is_some() {
+                // "Unpin After": from what is left on the pin now
+                menu = menu.child(self.unpin_after_el(&src, &pid2, cx));
+                return Some(card.child(deferred(menu).with_priority(3)).into_any_element());
+            }
             let (p_id, k1, k2) = (pid2.clone(), key.clone(), key.clone());
             if can_mod {
                 menu = menu.child(item(format!("unpin-{key}"), icons::MINUS_CIRCLE, "Unpin this Message", false).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
@@ -542,6 +548,34 @@ impl ChatPane {
                     cx.notify();
                 })));
             }
+            if can_mod {
+                let k3 = key.clone();
+                let left_s = left;
+                menu = menu.child(item(format!("after-{key}"), icons::CLOCK, "Unpin After", true).on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
+                    // starts from what's left on the pin now, in minutes when it's a minute or more
+                    let (time_mode, unit_min, amount) = match left_s {
+                        None => (false, true, "20".to_string()),
+                        Some(l) if l >= 60 => (true, true, ((l as f64) / 60.0).ceil().to_string()),
+                        Some(l) => (true, false, l.to_string()),
+                    };
+                    let input = cx.new(|cx| {
+                        let mut t = TextInput::new(w, cx, "", InputStyle::Chat);
+                        t.set_max_chars(Some(6));
+                        t.set_text(&amount, cx);
+                        t
+                    });
+                    let sub = cx.subscribe(&input, |this, _i, ev: &TextInputEvent, cx| {
+                        // `onFocus={() => setMode("time")}`: typing in the amount chooses it
+                        if let (TextInputEvent::Changed, Some(u)) = (ev, this.unpin_after.as_mut()) {
+                            u.time_mode = true;
+                            cx.notify();
+                        }
+                    });
+                    this.unpin_after = Some(UnpinAfter { time_mode, unit_min, amount: input, busy: false, _sub: sub });
+                    this.pin_menu = Some((k3.clone(), true));
+                    cx.notify();
+                })));
+            }
             let hide_id = pid2.clone();
             menu = menu.child(item(format!("hide-{key}"), icons::EYE_OFF, "Hide for Yourself", false).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                 this.pin_menu = None;
@@ -549,7 +583,7 @@ impl ChatPane {
                 let _ = (&k1, &k2);
                 cx.notify();
             })));
-            card = card.child(menu);
+            card = card.child(deferred(menu).with_priority(3));
         }
         Some(card.into_any_element())
     }
@@ -692,6 +726,138 @@ impl ChatPane {
             );
         }
         root.child(sb).into_any_element()
+    }
+
+    /// `UnpinAfter`: the menu's second page.
+    fn unpin_after_el(&mut self, src: &agu_chat_core::protocol::SourceRef, pin_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let Some(u) = self.unpin_after.as_ref() else { return div().into_any_element() };
+        let (time_mode, unit_min, busy) = (u.time_mode, u.unit_min, u.busy);
+        let amount = u.amount.read(cx).text();
+        let secs = unpin_secs(&amount, unit_min);
+        let valid = !time_mode || secs.is_some();
+        let radio = |id: &'static str, on: bool, label: &'static str, cx: &mut Context<Self>, set: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .py(px(4.))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(13.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if on { c(theme::ACCENT) } else { c(theme::FAINT) })
+                        .when(on, |d| d.child(div().size(px(7.)).rounded_full().bg(c(theme::ACCENT)))),
+                )
+                .child(div().min_w_0().flex_1().child(label))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    if let Some(u) = this.unpin_after.as_mut() {
+                        u.time_mode = set;
+                    }
+                    cx.notify();
+                }))
+        };
+        let (src, pid) = (src.clone(), pin_id.to_string());
+        let unit_btn = div()
+            .id("unit")
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(c(theme::LINE))
+            .px(px(8.))
+            .py(px(4.))
+            .child(if unit_min { "min" } else { "sec" })
+            .child(div().text_color(c(theme::MUTED)).child(icon(icons::CHEVRON, 12.0)))
+            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                if let Some(u) = this.unpin_after.as_mut() {
+                    u.unit_min = !u.unit_min;
+                    u.time_mode = true;
+                }
+                cx.notify();
+            }));
+        let mut col = div().p(px(6.)).child(
+            div()
+                .relative()
+                .mb(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("unpin-back")
+                        .absolute()
+                        .left_0()
+                        .size(px(24.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .hover(|s| s.bg(c(theme::RAISED_2)))
+                        .child(icon(icons::CHEVRON_LEFT, 16.0))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            if let Some((k, _)) = this.pin_menu.take() {
+                                this.pin_menu = Some((k, false));
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Unpin After")),
+        );
+        col = col.child(radio("r-time", time_mode, "Customized time", cx, true)).child(
+            div().flex().gap(px(8.)).pb(px(4.)).pl(px(24.)).child(div().w(px(64.)).child(u.amount.clone())).child(unit_btn),
+        );
+        if time_mode && !valid {
+            col = col.child(div().pl(px(24.)).text_size(px(11.)).line_height(px(16.)).text_color(c(theme::AMBER_400)).child("30 seconds to 30 minutes"));
+        }
+        col = col.child(radio("r-end", !time_mode, "Manually unpinned or end of stream", cx, false)).child(
+            div()
+                .id("unpin-save")
+                .mt(px(8.))
+                .w_full()
+                .flex()
+                .justify_center()
+                .rounded(px(4.))
+                .bg(c(theme::ACCENT))
+                .py(px(4.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(theme::WHITE))
+                .when(!valid || busy, |d| d.opacity(0.4))
+                .when(valid && !busy, |d| d.hover(|s| s.bg(c(theme::ACCENT_STRONG))))
+                .child("Save")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    let Some(u) = this.unpin_after.as_mut() else { return };
+                    let secs = if u.time_mode { unpin_secs(&u.amount.read(cx).text(), u.unit_min) } else { None };
+                    if (u.time_mode && secs.is_none()) || u.busy {
+                        return;
+                    }
+                    u.busy = true;
+                    let (bridge, src, pid) = (this.bridge_clone(), src.clone(), pid.clone());
+                    cx.spawn(async move |this, cx| {
+                        let (ok, t) = super::mod_actions::set_pin_duration(&bridge, &src, &pid, secs.map(|s| s as u32)).await;
+                        let _ = this.update(cx, |p, cx| {
+                            if let Some(u) = p.unpin_after.as_mut() {
+                                u.busy = false;
+                            }
+                            if ok {
+                                p.pin_menu = None;
+                                p.unpin_after = None;
+                            }
+                            p.show_toast(t, cx);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                    cx.notify();
+                })),
+        );
+        col.into_any_element()
     }
 
     /// The Ban / Warn popover, created here because building its inputs needs the window.

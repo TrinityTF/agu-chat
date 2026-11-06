@@ -683,7 +683,7 @@ impl SendBox {
                 continue;
             }
             visible.push(match r {
-                Row::Label(l) => div().h(px(19.)).pb(px(4.)).text_size(px(10.)).line_height(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::FAINT)).child(SharedString::from(crate::chat::inline::tracked(&l.to_uppercase()))).into_any_element(),
+                Row::Label(l) => div().h(px(19.)).pb(px(4.)).text_size(px(10.)).line_height(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::FAINT)).child(crate::chat::inline::tracked(&l.to_uppercase())).into_any_element(),
                 Row::Emotes(items) => {
                     let mut row = div().flex().gap(px(2.)).mb(px(2.)).h(px(32.));
                     for it in items.iter() {

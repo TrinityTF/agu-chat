@@ -155,7 +155,7 @@ impl ChannelDialog {
     }
 
     fn label(text: String) -> impl IntoElement {
-        div().mb(px(4.)).text_size(px(11.)).text_color(c(theme::FAINT)).child(text.to_uppercase())
+        div().mb(px(4.)).text_size(px(11.)).text_color(c(theme::FAINT)).child(crate::chat::inline::tracked(&text.to_uppercase()))
     }
 }
 

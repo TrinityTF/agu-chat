@@ -18,7 +18,26 @@ use gpui::{prelude::*, px, size, App, Application, Bounds, TitlebarOptions, Wind
 use crate::assets::Assets;
 use crate::layout::app::AguApp;
 
+/// `AGU_LOG=1`: the app is a windows-subsystem exe in every build, so stderr goes nowhere; with the switch on, what
+/// would be printed (the UI's `eprintln!`s, panics) is appended to `agu-chat.log` in the data dir, next to the
+/// backend's own lines.
+fn route_stderr_to_log() {
+    if !std::env::var("AGU_LOG").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
+        return;
+    }
+    use std::os::windows::io::IntoRawHandle;
+    let path = agu_chat_core::default_data_dir().join("agu-chat.log");
+    let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else { return };
+    let handle = windows::Win32::Foundation::HANDLE(file.into_raw_handle() as _);
+    unsafe {
+        let _ = windows::Win32::System::Console::SetStdHandle(windows::Win32::System::Console::STD_ERROR_HANDLE, handle);
+        let _ = windows::Win32::System::Console::SetStdHandle(windows::Win32::System::Console::STD_OUTPUT_HANDLE, handle);
+    }
+    eprintln!("[ui] agu-chat-gpui {} started, stderr routed here", env!("CARGO_PKG_VERSION"));
+}
+
 fn main() {
+    route_stderr_to_log();
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         text_input::bind_keys(cx);
 

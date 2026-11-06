@@ -420,7 +420,7 @@ impl ModesButton {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c(theme::FAINT))
                 .hover(|st| st.text_color(c(theme::TEXT)))
-                .child(SharedString::from(crate::chat::inline::tracked("BLOCKED TERMS")))
+                .child(crate::chat::inline::tracked("BLOCKED TERMS"))
                 .child(if open { "\u{25be}" } else { "\u{25b8}" })
                 .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                     this.terms.open = !this.terms.open;

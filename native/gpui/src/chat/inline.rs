@@ -887,7 +887,62 @@ fn atom_rect(content: &InlineContent, laid: &Laid, p: &Placed, origin: Point<Pix
 #[allow(dead_code)]
 fn _unused(_: AnyElement, _: Size<Pixels>) {}
 
-/// `tracking-wide` (letter-spacing 0.025em) is applied in the flow text shaping; plain strings pass through.
-pub fn tracked(s: &str) -> String {
-    s.to_string()
+/// `tracking-wide`: letter-spacing 0.025em. GPUI's text runs have no letter-spacing, so the glyphs are shaped one by
+/// one and each is moved over by the spacing so far (fractional pixels, like the browser's). Font, size, colour and
+/// line height come from the surrounding element's text style.
+pub fn tracked(s: &str) -> Tracked {
+    Tracked(s.to_string())
+}
+
+pub struct Tracked(String);
+
+pub struct TrackedLayout {
+    glyphs: Vec<(ShapedLine, f32)>,
+    line_h: Pixels,
+}
+
+pub const TRACKING_WIDE_EM: f32 = 0.025;
+
+impl IntoElement for Tracked {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Tracked {
+    type RequestLayoutState = TrackedLayout;
+    type PrepaintState = ();
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, TrackedLayout) {
+        let ts = window.text_style();
+        let fs = ts.font_size.to_pixels(window.rem_size());
+        let ls = f32::from(fs) * TRACKING_WIDE_EM;
+        let mut glyphs = Vec::new();
+        let mut x = 0.0f32;
+        for ch in self.0.chars() {
+            let t: SharedString = ch.to_string().into();
+            let run = TextRun { len: t.len(), font: ts.font(), color: ts.color, background_color: None, underline: None, strikethrough: None };
+            let line = window.text_system().shape_line(t, fs, &[run], None);
+            let w = f32::from(line.width);
+            glyphs.push((line, x));
+            x += w + ls;
+        }
+        let line_h = window.line_height();
+        let mut style = Style::default();
+        style.size = size(px(x).into(), line_h.into());
+        style.flex_shrink = 0.0;
+        (window.request_layout(style, [], cx), TrackedLayout { glyphs, line_h })
+    }
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut TrackedLayout, _: &mut Window, _: &mut App) {}
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, l: &mut TrackedLayout, _: &mut (), window: &mut Window, cx: &mut App) {
+        for (line, x) in &l.glyphs {
+            let _ = line.paint(point(bounds.origin.x + px(*x), bounds.origin.y), l.line_h, window, cx);
+        }
+    }
 }

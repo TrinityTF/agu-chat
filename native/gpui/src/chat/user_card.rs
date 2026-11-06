@@ -290,7 +290,7 @@ impl UserCardView {
     }
 
     fn heading(text: &str) -> gpui::Div {
-        div().mb(px(4.)).text_size(px(10.)).line_height(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::FAINT)).child(SharedString::from(crate::chat::inline::tracked(&text.to_uppercase())))
+        div().mb(px(4.)).text_size(px(10.)).line_height(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::FAINT)).child(crate::chat::inline::tracked(&text.to_uppercase()))
     }
 
     fn avatar(src: &str, name: &str) -> AnyElement {
