@@ -52,7 +52,7 @@ export type CoEnv = {
 export type RowCtx = {
   rs: Settings;
   h: Handlers;
-  /** More than one source in this split (or settings.showPlatformMarks): each row says where it came from. */
+  /** settings.showPlatformMarks: each row says where it came from. */
   showPlatform: boolean;
   /** Chatterino "mod mode": inline mod buttons at the start of every row. */
   modButtons: boolean;

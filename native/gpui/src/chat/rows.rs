@@ -85,7 +85,7 @@ pub struct CoEnv {
 
 pub struct RowCtx<'a> {
     pub rs: &'a Settings,
-    /// More than one source in this split (or settings.showPlatformMarks): each row says where it came from.
+    /// settings.showPlatformMarks: each row says where it came from.
     pub show_platform: bool,
     /// Chatterino "mod mode": inline mod buttons at the start of every row.
     pub mod_buttons: bool,

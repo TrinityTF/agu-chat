@@ -1619,7 +1619,8 @@ impl ChatPane {
         let mod_list = self.mod_list.clone();
         let rule = self.rule_of(row);
         let rs = self.settings.clone();
-        let show_platform = rs.show_platform_marks || self.sources.len() > 1;
+        // the setting alone decides (a merged co-chat used to force the marks on, so switching it off did nothing)
+        let show_platform = rs.show_platform_marks;
         let ctx = RowCtx { rs: &rs, show_platform, mod_buttons: self.mod_mode && rs.show_mod_buttons, mod_list: &mod_list };
         let st = self.store.source(&row.sk);
         match &row.body {

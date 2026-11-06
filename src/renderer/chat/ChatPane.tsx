@@ -360,7 +360,8 @@ export function ChatPane({ sources, modMode, focused, onStatus, onActivity }: Ch
     [store, toast, refOf],
   );
 
-  const showPlatform = rs.showPlatformMarks || sources.length > 1;
+  // the setting alone decides (a merged co-chat used to force the marks on, so switching it off did nothing)
+  const showPlatform = rs.showPlatformMarks;
   const inlineMod = modMode && rs.showModButtons;
   const modList = useMemo(() => normalizeModButtons(rs.modButtons), [rs.modButtons]);
   const ctx: RowCtx = useMemo(() => ({ rs, h, showPlatform, modButtons: inlineMod, modList }), [rs, h, showPlatform, inlineMod, modList]);
