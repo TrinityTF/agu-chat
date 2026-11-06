@@ -373,6 +373,49 @@ pub async fn fetch_seven_tv_personal(client: &reqwest::Client, twitch_user_id: &
     go(client, twitch_user_id).await.unwrap_or_default()
 }
 
+/// Picker / autocomplete ONLY - never merged into the message-rendering map; incoming messages already carry
+/// Twitch emote positions from the IRC tag.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TwitchPickerEmote {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
+/// `other` = emotes from the user's subscriptions to other channels (local relay only).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TwitchEmotesResp {
+    pub channel: Vec<TwitchPickerEmote>,
+    pub global: Vec<TwitchPickerEmote>,
+    pub other: Vec<TwitchPickerEmote>,
+}
+
+fn picker_list(v: Option<&Value>) -> Vec<TwitchPickerEmote> {
+    let sv = |e: &Value, k: &str| e.get(k).map(|x| x.as_str().map(|s| s.to_string()).unwrap_or_else(|| x.to_string())).unwrap_or_default();
+    v.and_then(|a| a.as_array()).map(|a| a.iter().map(|e| TwitchPickerEmote { id: sv(e, "id"), name: sv(e, "name"), url: sv(e, "url") }).collect()).unwrap_or_default()
+}
+
+fn picker_json(r: &TwitchEmotesResp) -> Value {
+    let l = |v: &Vec<TwitchPickerEmote>| Value::Array(v.iter().map(|e| json!({"id": e.id, "name": e.name, "url": e.url})).collect());
+    json!({"channel": l(&r.channel), "global": l(&r.global), "other": l(&r.other)})
+}
+
+/// fetchTwitchPickerEmotes: the relay's `/api/chat/twitch-emotes` (cached like the site, 6 h).
+pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol::AguBridge>, source: &agu_chat_core::protocol::SourceRef, channel_id: &str) -> TwitchEmotesResp {
+    let key = format!("emotes:twitch:channel:{channel_id}");
+    if let Some(c) = read_cache(&key, EMOTE_GLOBAL_TTL_MS) {
+        return TwitchEmotesResp { channel: picker_list(c.get("channel")), global: picker_list(c.get("global")), other: picker_list(c.get("other")) };
+    }
+    let r = crate::chat::mod_caps::relay_api(bridge, source, "/api/chat/twitch-emotes", None, None).await;
+    if !r.ok {
+        return TwitchEmotesResp::default();
+    }
+    let resp = TwitchEmotesResp { channel: picker_list(r.body.get("channel")), global: picker_list(r.body.get("global")), other: picker_list(r.body.get("other")) };
+    write_cache(&key, &picker_json(&resp));
+    resp
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

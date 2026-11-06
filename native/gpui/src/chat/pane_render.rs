@@ -53,9 +53,9 @@ fn bits_icon(amount: f64) -> (&'static str, u32) {
 }
 
 /// An image drawn from the shared cache into a fixed square with `object-fit: contain`.
-struct ImageBox {
-    url: SharedString,
-    side: f32,
+pub struct ImageBox {
+    pub url: SharedString,
+    pub side: f32,
 }
 
 impl IntoElement for ImageBox {

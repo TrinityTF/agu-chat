@@ -96,7 +96,7 @@ impl AguApp {
                 window.focus(&this.focus);
                 cx.notify();
             }
-            TextInputEvent::Changed => {}
+            TextInputEvent::Changed | TextInputEvent::Tab => {}
         });
         self.tabs.editing = Some(id.to_string());
         self.tabs.input = Some((input, sub));

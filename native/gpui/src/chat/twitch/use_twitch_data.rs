@@ -3,8 +3,8 @@
 //! 7TV / BTTV / FFZ channel + global emotes, and the account's mod capabilities. The React effects become plain
 //! async functions; `ChatPane` starts them and applies the answers.
 //!
-//! Left out: Twitch's own picker emotes and the account's 7TV personal set, which only the input box (next
-//! round) uses.
+//! Also loaded here (round 3): Twitch's own picker emotes and the account's 7TV personal set, which only the
+//! input box uses.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use agu_chat_core::protocol::{AguBridge, SourceRef};
 use serde_json::Value;
 
 use super::badges::{build_badge_map, BadgeMap};
-use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, flush_cache, ProviderScopedMap};
+use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, flush_cache, ProviderScopedMap, TwitchEmotesResp};
 use crate::chat::mod_caps::{relay_api, ModCaps};
 
 #[derive(Clone, Default)]
@@ -28,6 +28,7 @@ pub struct ProviderSets {
 pub struct TwitchData {
     pub badge_map: Arc<BadgeMap>,
     pub provider_sets: Option<Arc<ProviderSets>>,
+    pub twitch_emotes: TwitchEmotesResp,
     pub caps: ModCaps,
 }
 

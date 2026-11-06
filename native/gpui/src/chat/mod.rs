@@ -4,6 +4,7 @@ pub mod chat_list;
 pub mod chat_pane;
 pub mod chat_text;
 pub mod highlights;
+pub mod input;
 pub mod ignores;
 pub mod images;
 pub mod inline;
