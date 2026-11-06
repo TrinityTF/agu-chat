@@ -177,7 +177,9 @@ fn harness_log(platform: Platform) -> Value {
                 msg(4, &m, "@a_g_u__ you are mentioned, check https://example.com/page.", json!({ "badges": "moderator/1" })),
                 msg(5, &b, "replying to you", json!({ "reply": { "user": "a_g_u__", "text": "hello chat Kappa 7TV test" } })),
                 msg(6, &c, "this one will be deleted", json!({ "deleted": true })),
-                msg(7, &b, "cheer100 take my bits", json!({ "bits": 100 })),
+                msg(7, &b, "Cheer100 told you, ogre mound", json!({ "bits": 100 })),
+                msg(12, &c, "cheer1 bibleTHUMP5000 Cheer100x plus Kappa1000 gg", json!({ "bits": 6101 })),
+                msg(13, &a, "Cheer100 without bits stays text", json!({})),
                 msg(8, &c, "redeem text", json!({ "rewardId": "r1", "reward": { "title": "Hydrate", "cost": 500 } })),
                 msg(9, &a, "waves", json!({ "action": true })),
                 json!({ "notice": true, "id": "n1", "ts": now - 30000, "system": "cooldude subscribed with Prime. They've subscribed for 12 months!", "msgId": "resub", "user": b, "text": "love the stream", "emotes": "" }),
@@ -340,6 +342,14 @@ impl AguBridge for MockBridge {
                     { "set_id": "moderator", "versions": [{ "id": "1", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/2", "title": "Moderator" }] },
                     { "set_id": "broadcaster", "versions": [{ "id": "1", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/5527c58c-fb7d-422d-b71b-f309dcb85cc1/2", "title": "Broadcaster" }] },
                     { "set_id": "subscriber", "versions": [{ "id": "12", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/2", "title": "Sub 12" }] }], "channel": [] })),
+                "/api/chat/cheermotes" if std::env::var("AGU_HARNESS").is_ok() => {
+                    let tier = |bits: u64, color: &str, name: &str| {
+                        let u = |kind: &str, ext: &str| json!({ "1": format!("https://d3aqoihi2n8ty8.cloudfront.net/actions/{name}/dark/{kind}/{bits}/1.{ext}"), "2": format!("https://d3aqoihi2n8ty8.cloudfront.net/actions/{name}/dark/{kind}/{bits}/2.{ext}") });
+                        json!({ "min_bits": bits, "color": color, "images": { "dark": { "animated": u("animated", "gif"), "static": u("static", "png") } } })
+                    };
+                    let tiers = |n: &str| json!([tier(1, "#979797", n), tier(100, "#9c3ee8", n), tier(1000, "#1db2a5", n), tier(5000, "#0099fe", n), tier(10000, "#f43021", n)]);
+                    ok(json!({ "data": [{ "prefix": "Cheer", "tiers": tiers("cheer") }, { "prefix": "BibleThump", "tiers": tiers("biblethump") }] }))
+                }
                 "/api/chat/settings" => {
                     let mut m = inner.modes.lock().unwrap();
                     if method == "POST" {

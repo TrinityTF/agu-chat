@@ -43,6 +43,7 @@ fn mod_action_scope(action: &str) -> Option<&'static str> {
 type Cache = LazyLock<Mutex<HashMap<String, (Value, i64)>>>;
 static SETTINGS_CACHE: Cache = LazyLock::new(|| Mutex::new(HashMap::new())); // channelId -> {data, at}
 static BADGES_CACHE: Cache = LazyLock::new(|| Mutex::new(HashMap::new())); // login -> {data, at}
+static CHEER_CACHE: Cache = LazyLock::new(|| Mutex::new(HashMap::new())); // login -> {data, at}
 static EMOTES_CACHE: Cache = LazyLock::new(|| Mutex::new(HashMap::new())); // `${userId}:${channelId}` -> {data, at}
 static GLOBAL_BADGES: Mutex<Option<(Value, i64)>> = Mutex::new(None); // {data, at}
 
@@ -629,6 +630,25 @@ async fn badges(req: RouteReq) -> R {
     ok(data)
 }
 
+// Cheermotes (global + the channel's own prefix) for the chat renderer. Read-only, needs no scope but a token;
+// logged out there is no keyless source, so the answer is empty and Bits messages stay plain text.
+async fn cheermotes(req: RouteReq) -> R {
+    let login = login_of(&req)?;
+    if let Some(d) = cache_get(&CHEER_CACHE, &login, BADGES_CACHE_MS) {
+        return ok(d);
+    }
+    if auth::current().is_none() {
+        return ok(json!({"data": []}));
+    }
+    let Ok(cid) = channel_id_of(&login).await else { return ok(json!({"data": []})) };
+    let Ok(resp) = helix_get("/bits/cheermotes", q! {"broadcaster_id" => cid}).await else { return ok(json!({"data": []})) };
+    let data = json!({"data": if resp["data"].is_array() { resp["data"].clone() } else { json!([]) }});
+    if data["data"].as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+        cache_put(&CHEER_CACHE, &login, data.clone());
+    }
+    ok(data)
+}
+
 // The emote picker: what THIS user can send here. {channel, global} as the site's picker expects, plus
 // `other` for emotes from channels the user is subscribed to.
 async fn twitch_emotes(req: RouteReq) -> R {
@@ -700,6 +720,7 @@ async fn chatters(req: RouteReq) -> R {
 pub fn clear_caches() {
     SETTINGS_CACHE.lock().unwrap().clear();
     BADGES_CACHE.lock().unwrap().clear();
+    CHEER_CACHE.lock().unwrap().clear();
     EMOTES_CACHE.lock().unwrap().clear();
     *GLOBAL_BADGES.lock().unwrap() = None;
 }
@@ -724,6 +745,7 @@ pub fn routes() -> Vec<(String, Handler)> {
         ("DELETE /api/chat/terms".into(), route(terms)),
         ("GET /api/chat/rules".into(), route(rules)),
         ("GET /api/chat/badges".into(), route(badges)),
+        ("GET /api/chat/cheermotes".into(), route(cheermotes)),
         ("GET /api/chat/twitch-emotes".into(), route(twitch_emotes)),
         ("GET /api/chatters".into(), route(chatters)),
     ]

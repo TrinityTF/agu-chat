@@ -500,6 +500,18 @@ impl ChatPane {
                         })
                         .detach();
                     }
+                    if self.requested.insert(format!("cheermotes:{sk}:{acct}")) {
+                        let (bridge, s2, sk2) = (self.bridge.clone(), source.clone(), sk.clone());
+                        cx.spawn(async move |this, cx| {
+                            if let Some(cm) = super::twitch::cheermotes::load_cheermotes(&bridge, &s2, &sk2).await {
+                                let _ = this.update(cx, |p, cx| {
+                                    p.twitch.entry(sk2).or_default().cheermotes = Some(Arc::new(cm));
+                                    p.data_changed(cx);
+                                });
+                            }
+                        })
+                        .detach();
+                    }
                     if self.requested.insert(format!("caps:{sk}:{acct}")) {
                         let (bridge, s2, sk2) = (self.bridge.clone(), source.clone(), sk.clone());
                         cx.spawn(async move |this, cx| {
@@ -696,6 +708,7 @@ impl ChatPane {
                 Rc::new(TwitchEnv {
                     source: st.source.clone(),
                     badge_map: d.badge_map.clone(),
+                    cheermotes: d.cheermotes.clone(),
                     emotes,
                     seven_defs: defs.clone(),
                     caps: d.caps.clone(),

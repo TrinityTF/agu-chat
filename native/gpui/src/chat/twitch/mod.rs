@@ -1,5 +1,6 @@
 //! Port of src/renderer/chat/twitch/*.
 pub mod badges;
+pub mod cheermotes;
 pub mod colors;
 pub mod emotes;
 pub mod events;

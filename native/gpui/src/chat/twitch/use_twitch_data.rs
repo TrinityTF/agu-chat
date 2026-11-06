@@ -27,6 +27,8 @@ pub struct ProviderSets {
 #[derive(Clone, Default)]
 pub struct TwitchData {
     pub badge_map: Arc<BadgeMap>,
+    /// Bits cheermotes; None logged out (Bits messages stay plain text).
+    pub cheermotes: Option<Arc<super::cheermotes::Cheermotes>>,
     pub provider_sets: Option<Arc<ProviderSets>>,
     pub twitch_emotes: TwitchEmotesResp,
     pub caps: ModCaps,

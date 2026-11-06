@@ -66,6 +66,7 @@ pub fn twitch_emote_url(id: &str, size: SizeOpt) -> String {
 pub struct TwitchEnv {
     pub source: SourceRef,
     pub badge_map: Arc<BadgeMap>,
+    pub cheermotes: Option<Arc<super::twitch::cheermotes::Cheermotes>>,
     pub emotes: Option<Arc<EmoteSets>>,
     pub seven_defs: Option<Arc<super::twitch::cosmetics::SevenTvDefs>>,
     pub caps: ModCaps,
@@ -300,6 +301,13 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                 f.push(Item::Text(t));
             }
             MsgPart::Gif { url, .. } => f.push(Item::Gif(GifItem { url: url.clone().into() })),
+            MsgPart::Cheer { name, prefix, amount, color, url } => {
+                // twitch.tv: the tier image at emote height, then the amount, bold, in the tier's colour
+                let tip = Rc::new(Tip { img: url.clone().into(), name: name.clone().into(), label: format!("{prefix} cheermote").into() });
+                f.push(emote_item(url.clone(), tip, vec![], base, size));
+                let c = if color.is_empty() { text_color } else { hex(color) };
+                f.push(Item::Text(TextItem::new(format!("{amount}"), base, c).weight(FontWeight::BOLD).strike(strike)));
+            }
             MsgPart::Link { href, text } => f.push(link_item(href, text, base)),
             MsgPart::Emote { source, id, name, overlays } => {
                 let entry = match source {
@@ -561,6 +569,11 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     let parts = match &msg.reply {
         Some(r) => drop_reply_mention(built, &r.user),
         None => built,
+    };
+    // cheermotes only on a message that carries bits
+    let parts = match (&env.cheermotes, msg.bits.filter(|b| *b != 0.0)) {
+        (Some(cm), Some(_)) => super::twitch::cheermotes::apply(parts, cm, rs.animated_emotes, emote_box(rs.font_size, size).0),
+        _ => parts,
     };
     let reach = mod_reach(&env.viewer, &msg.user.id, &msg.badges);
     let caps = &env.caps;

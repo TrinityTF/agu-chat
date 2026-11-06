@@ -118,6 +118,8 @@ pub enum MsgPart {
     Mention { login: String, name: String, color: String, user_id: String },
     Link { href: String, text: String },
     Gif { id: String, url: String, alt: String },
+    /// A cheermote word of a bits message (`cheermotes::apply`): tier image plus the amount in the tier colour.
+    Cheer { name: String, prefix: String, amount: u64, color: String, url: String },
 }
 
 enum Raw {
