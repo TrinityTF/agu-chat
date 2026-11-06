@@ -46,7 +46,7 @@ function rowHighlight(msg: ChatMsg, mentionsMe: boolean, susp: SuspiciousUser["s
   }
   if (rule) return { style: ruleRowStyle(rule.color) };
   if (msg.firstMsg) {
-    return { style: { borderLeft: "3px solid #9147ff", background: "rgba(145,71,255,.08)", paddingLeft: 6 }, label: { text: "FIRST MESSAGE", className: "text-purple-300" } };
+    return { style: { borderLeft: "3px solid #9147ff", background: "rgba(145,71,255,.18)", paddingLeft: 6 }, label: { text: "FIRST MESSAGE", className: "text-purple-300" } };
   }
   if (msg.returning) {
     return { style: { borderLeft: "3px solid #2b8fef", background: "rgba(43,143,239,.08)", paddingLeft: 6 }, label: { text: "RETURNING CHATTER", className: "text-sky-300" } };

@@ -520,7 +520,8 @@ fn row_highlight(msg: &ChatMsg, mentions_me: bool, susp: Option<&str>, rule: Opt
         return Highlight { bar: Some(bar), bg: Some(bg), label: None };
     }
     if msg.first_msg {
-        return h((0x91, 0x47, 0xff), (145, 71, 255, 0.08), "FIRST MESSAGE", theme::PURPLE_300);
+        // tint closer to twitch.tv's first-message row (was .08, which read too dark)
+        return h((0x91, 0x47, 0xff), (145, 71, 255, 0.18), "FIRST MESSAGE", theme::PURPLE_300);
     }
     if msg.returning {
         return h((0x2b, 0x8f, 0xef), (43, 143, 239, 0.08), "RETURNING CHATTER", theme::SKY_300);
