@@ -259,6 +259,7 @@ pub fn btn(id: impl Into<ElementId>, label: impl Into<SharedString>, o: BtnOpts)
         .border_1()
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_size(px(if o.small { 11. } else { 12. }))
+        .line_height(px(if o.small { 16.5 } else { 18. }))
         .when(o.small, |d| d.px(px(8.)).py(px(2.)))
         .when(!o.small, |d| d.px(px(12.)).py(px(4.)));
     b = if o.primary {

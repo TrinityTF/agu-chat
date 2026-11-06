@@ -82,6 +82,8 @@ pub enum InputStyle {
     Field,
     /// the tab rename box: w-32 rounded-sm border border-accent bg-app px-1 text-[12px]
     Rename,
+    /// settings: `px-1.5 py-0.5 text-[11px]` (a small field beside other controls)
+    Small,
     /// chat search box: min-w-0 flex-1 bg-transparent text-xs, no border or outline
     Bare,
     /// `inputCls` of chat/ui.ts: rounded border border-line bg-panel px-2 py-1 text-xs focus:border-accent/60
@@ -216,6 +218,12 @@ pub struct TextInput {
     want_x: Option<f32>,
     disabled: bool,
     max_chars: Option<usize>,
+    /// password field: the text shows as bullets
+    masked: bool,
+    /// red border (a value the field's owner would reject)
+    invalid: bool,
+    /// `font-mono`
+    mono: bool,
     _blur: gpui::Subscription,
 }
 
@@ -239,6 +247,9 @@ impl TextInput {
             want_x: None,
             disabled: false,
             max_chars: None,
+            masked: false,
+            invalid: false,
+            mono: false,
             _blur: blur,
         }
     }
@@ -273,6 +284,21 @@ impl TextInput {
     /// `maxLength`
     pub fn set_max_chars(&mut self, n: Option<usize>) {
         self.max_chars = n;
+    }
+
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid != invalid {
+            self.invalid = invalid;
+            cx.notify();
+        }
+    }
+
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    pub fn set_mono(&mut self, mono: bool) {
+        self.mono = mono;
     }
 
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
@@ -611,7 +637,11 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        let i = line.closest_index_for_x(position.x - bounds.left());
+        if self.masked {
+            return self.content.char_indices().nth(i / 3).map(|(b, _)| b).unwrap_or(self.content.len());
+        }
+        i
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -898,13 +928,23 @@ impl gpui::Element for TextElement {
         let style = window.text_style();
         let disabled = input.disabled;
 
-        let (display_text, text_color) = if content.is_empty() { (input.placeholder.clone(), c(theme::FAINT).into()) } else { (content.clone(), style.color) };
+        // a masked (password) field shows one bullet (3 UTF-8 bytes) per char, so byte offsets are remapped
+        let masked = input.masked && !content.is_empty();
+        let map = |i: usize| if masked { content[..i.min(content.len())].chars().count() * 3 } else { i };
+        let (display_text, text_color) = if content.is_empty() {
+            (input.placeholder.clone(), c(theme::FAINT).into())
+        } else if masked {
+            (SharedString::from("\u{2022}".repeat(content.chars().count())), style.color)
+        } else {
+            (content.clone(), style.color)
+        };
         let font = style.font();
+        let marked = if content.is_empty() || masked { None } else { input.marked_range.as_ref() };
         let font_size = style.font_size.to_pixels(window.rem_size());
 
         if input.is_area() {
             let line_h = f32::from(window.line_height());
-            let runs = make_runs(display_text.len(), if content.is_empty() { None } else { input.marked_range.as_ref() }, &font, text_color);
+            let runs = make_runs(display_text.len(), marked, &font, text_color);
             let lines = window.text_system().shape_text(display_text, font_size, &runs, Some(bounds.size.width), None).unwrap_or_default();
             let area = AreaLayout::build(lines, line_h);
             let (cx_, cy, ..) = area.caret_at(if content.is_empty() { 0 } else { cursor });
@@ -953,10 +993,10 @@ impl gpui::Element for TextElement {
             return PrepaintState { line: None, area: Some(area), scroll_y: scroll, cursor: caret, selection };
         }
 
-        let runs = make_runs(display_text.len(), if content.is_empty() { None } else { input.marked_range.as_ref() }, &font, text_color);
-        let line = window.text_system().shape_line(display_text, font_size, &runs, None);
+        let runs = make_runs(display_text.len(), marked, &font, text_color);
+        let line =window.text_system().shape_line(display_text, font_size, &runs, None);
 
-        let cursor_pos = line.x_for_index(cursor);
+        let cursor_pos = line.x_for_index(map(cursor));
         let (selection, cursor) = if selected_range.is_empty() {
             // The caret is the text colour, 1px wide, like Chromium's.
             (vec![], Some(fill(Bounds::new(point(bounds.left() + cursor_pos, bounds.top()), size(px(1.), bounds.bottom() - bounds.top())), c(theme::TEXT))))
@@ -964,8 +1004,8 @@ impl gpui::Element for TextElement {
             (
                 vec![fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(bounds.left() + line.x_for_index(map(selected_range.start)), bounds.top()),
+                        point(bounds.left() + line.x_for_index(map(selected_range.end)), bounds.bottom()),
                     ),
                     a(theme::ACCENT, 0.45),
                 )],
@@ -1066,10 +1106,12 @@ impl Render for TextInput {
             .text_color(c(theme::TEXT))
             .text_size(px(12.))
             .line_height(px(18.))
-            .overflow_hidden();
+            .overflow_hidden()
+            .when(self.mono, |d| d.font_family("Consolas"));
         let child = div().w_full().min_w_0().child(TextElement { input: cx.entity() });
         match self.style {
-            InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(c(if focused { theme::ACCENT } else { theme::LINE })).child(child),
+            InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(if self.invalid { a(theme::RED_500, 0.7) } else { c(if focused { theme::ACCENT } else { theme::LINE }) }).child(child),
+            InputStyle::Small => base.w_full().rounded(px(4.)).px(px(6.)).py(px(2.)).text_size(px(11.)).line_height(px(16.)).border_color(if self.invalid { a(theme::RED_500, 0.7) } else { c(if focused { theme::ACCENT } else { theme::LINE }) }).child(child),
             InputStyle::Chat => base.w_full().bg(c(theme::PANEL)).rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(if focused { a(theme::ACCENT, 0.6) } else { c(theme::LINE).into() }).child(child),
             InputStyle::Bare => base.flex_1().min_w_0().bg(gpui::transparent_black()).border_0().line_height(px(16.)).child(child),
             InputStyle::Rename => base.w(px(128.)).rounded(px(2.)).px(px(4.)).border_color(c(theme::ACCENT)).child(child),

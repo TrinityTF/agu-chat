@@ -370,7 +370,7 @@ fn text_run_items(f: &mut Flow, text: &str, color: Hsla) {
 
 // ---- RowFrame pieces --------------------------------------------------------------------------------
 
-fn icon_for_mod(icon: &str) -> &'static str {
+pub(crate) fn icon_for_mod(icon: &str) -> &'static str {
     match icon {
         "ban" => icons::MINUS_CIRCLE,
         "clock" => icons::CLOCK,

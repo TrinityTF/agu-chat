@@ -6,10 +6,16 @@
 //! electron-updater did three things for the JS: pick the release for the channel, download it, install it on
 //! quit. This port keeps the first as pure code (`pick_update`, `Version`) and the state machine around it as
 //! `Updater`; the download and install step sits behind the `Installer` trait.
-//! TODO(round 3): the installer format of the native app is decided later. Until a real `Installer` is given
-//! (`NoInstaller` says it is unsupported) a found update stays in status "available" with its version and
-//! notes, and nothing is downloaded.
+//!
+//! Native release scheme (so this app and the Electron app can share one GitHub repo without seeing each other):
+//!   tag      `native-v<version>`                      (Electron: `v<version>`, which this file never reads)
+//!   assets   `Agu-Chat-Native-Setup-<version>-x64.exe` and `<same>.sha256`   (Electron: `Agu-Chat-Setup-*`,
+//!            `latest.yml`, `.blockmap`, which electron-updater reads and this file never touches)
+//!   native releases are never marked "latest" and their tags are not semver, so electron-updater skips them.
+//! `NativeInstaller` downloads the installer asset, checks its size and sha256, and `install` runs it silently
+//! (`/S /R`) and quits the app. `NoInstaller` (a found update stays "available") is for builds without one.
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +29,12 @@ use crate::util::{Listeners, Timer};
 const FIRST_CHECK_MS: u64 = 5_000; // shortly after start
 const CHECK_EVERY_MS: u64 = 4 * 60 * 60_000; // then every 4 hours
 const RETRY_AFTER_ERROR_MS: u64 = 15 * 60_000; // a failed background check is retried sooner than 4h
-const RELEASES_URL: &str = "https://api.github.com/repos/TrinityTF/agu-chat/releases?per_page=30";
+const RELEASES_URL: &str = "https://api.github.com/repos/TrinityTF/agu-chat/releases";
+/// Native releases are mixed in with the Electron app's (a beta release per push to main), so the feed pages
+/// through up to this many pages of 100 looking for them.
+const FEED_PAGES: u32 = 3;
+/// Tag prefix of native releases.
+pub const NATIVE_TAG_PREFIX: &str = "native-v";
 
 // ---------------------------------------------------------------------------------------------------------
 // versions and the channel rule
@@ -127,16 +138,79 @@ pub fn allowed_on_channel(channel: &str, version: &str) -> bool {
     channel == "beta" || !is_prerelease(version)
 }
 
+/// `Agu-Chat-Native-Setup-<version>-x64.exe`: the one installer asset the native updater downloads.
+pub fn installer_asset_name(version: &str) -> String {
+    format!("Agu-Chat-Native-Setup-{version}-x64.exe")
+}
+
+/// A file attached to a release.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    /// GitHub's `sha256:<hex>` digest of the file, when it reports one
+    pub digest: Option<String>,
+}
+
 /// One GitHub release.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Release {
-    /// without a leading "v"
+    /// the tag without `native-v`
     pub version: String,
     pub prerelease: bool,
     pub draft: bool,
     /// the release notes (GitHub markdown)
     pub notes: String,
     pub url: String,
+    pub assets: Vec<Asset>,
+}
+
+impl Release {
+    pub fn installer(&self) -> Option<&Asset> {
+        let want = installer_asset_name(&self.version);
+        self.assets.iter().find(|a| a.name == want)
+    }
+}
+
+/// GitHub's releases list -> the native releases in it. Electron releases (`v0.0.1-beta.9`), releases of other
+/// tags and native releases that do not (yet) carry their installer are dropped: a half-uploaded release is
+/// never offered.
+pub fn parse_releases(list: &Value) -> Vec<Release> {
+    list.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| {
+                    let version = r["tag_name"].as_str()?.strip_prefix(NATIVE_TAG_PREFIX)?.to_string();
+                    Version::parse(&version)?;
+                    let assets = r["assets"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| {
+                                    Some(Asset {
+                                        name: x["name"].as_str()?.to_string(),
+                                        url: x["browser_download_url"].as_str()?.to_string(),
+                                        size: x["size"].as_u64().unwrap_or(0),
+                                        digest: x["digest"].as_str().map(String::from),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let rel = Release {
+                        version,
+                        prerelease: r["prerelease"].as_bool().unwrap_or(false),
+                        draft: r["draft"].as_bool().unwrap_or(false),
+                        notes: r["body"].as_str().unwrap_or("").to_string(),
+                        url: r["html_url"].as_str().unwrap_or("").to_string(),
+                        assets,
+                    };
+                    rel.installer().is_some().then_some(rel)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The release to move to, or None. beta: the newest of all releases; stable: the newest full release. Never
@@ -224,39 +298,41 @@ pub trait ReleaseFeed: Send + Sync {
 
 pub struct GithubFeed;
 
+/// The releases endpoint. `AGU_RELEASES_URL` points it at a local fake for tests, and only when it is a
+/// loopback address (an environment variable must not be able to redirect real updates).
+fn releases_url() -> String {
+    match std::env::var("AGU_RELEASES_URL") {
+        Ok(u) if u.starts_with("http://127.0.0.1") || u.starts_with("http://localhost") => u,
+        _ => RELEASES_URL.to_string(),
+    }
+}
+
 impl ReleaseFeed for GithubFeed {
     fn releases(&self) -> BoxFuture<'static, Result<Vec<Release>, FeedError>> {
         Box::pin(async {
             let client = reqwest::Client::new();
-            let res = client
-                .get(RELEASES_URL)
-                .header("User-Agent", "AguChat-updater (+https://github.com/TrinityTF/agu-chat)")
-                .header("Accept", "application/vnd.github+json")
-                .timeout(Duration::from_secs(20))
-                .send()
-                .await
-                .map_err(|e| FeedError { status: 0, message: e.to_string() })?;
-            let status = res.status().as_u16();
-            if !res.status().is_success() {
-                return Err(FeedError { status, message: format!("HTTP {status}") });
+            let mut out: Vec<Release> = Vec::new();
+            for page in 1..=FEED_PAGES {
+                let res = client
+                    .get(format!("{}?per_page=100&page={page}", releases_url()))
+                    .header("User-Agent", "AguChat-updater (+https://github.com/TrinityTF/agu-chat)")
+                    .header("Accept", "application/vnd.github+json")
+                    .timeout(Duration::from_secs(20))
+                    .send()
+                    .await
+                    .map_err(|e| FeedError { status: 0, message: e.to_string() })?;
+                let status = res.status().as_u16();
+                if !res.status().is_success() {
+                    return Err(FeedError { status, message: format!("HTTP {status}") });
+                }
+                let list: Value = res.json().await.map_err(|e| FeedError { status: 0, message: e.to_string() })?;
+                let n = list.as_array().map(|a| a.len()).unwrap_or(0);
+                out.extend(parse_releases(&list));
+                if n < 100 {
+                    break;
+                }
             }
-            let list: Value = res.json().await.map_err(|e| FeedError { status: 0, message: e.to_string() })?;
-            Ok(list
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|r| {
-                            Some(Release {
-                                version: r["tag_name"].as_str()?.trim_start_matches('v').to_string(),
-                                prerelease: r["prerelease"].as_bool().unwrap_or(false),
-                                draft: r["draft"].as_bool().unwrap_or(false),
-                                notes: r["body"].as_str().unwrap_or("").to_string(),
-                                url: r["html_url"].as_str().unwrap_or("").to_string(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default())
+            Ok(out)
         })
     }
 }
@@ -267,7 +343,7 @@ pub enum InstallError {
     Failed(String),
 }
 
-/// Downloading a release and installing it. TODO: the native installer format is decided later.
+/// Downloading a release and installing it.
 pub trait Installer: Send + Sync {
     fn supported(&self) -> bool;
     /// `progress` takes 0..=1
@@ -287,6 +363,143 @@ impl Installer for NoInstaller {
     }
     fn install(&self) -> BoxFuture<'static, Result<(), String>> {
         Box::pin(async { Err("Installing updates is not available in this build yet.".to_string()) })
+    }
+}
+
+/// Called by `NativeInstaller::install` once the installer runs: the UI quits the app (flushing its files first).
+pub type QuitHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
+/// The installer of the native app: `Agu-Chat-Native-Setup-<version>-x64.exe` from the release's assets (see the
+/// module docs and docs/GPUI-PORT.md). The download is size- and sha256-checked before it counts as ready.
+pub struct NativeInstaller {
+    dir: PathBuf,
+    client: reqwest::Client,
+    /// the verified installer of the last finished download
+    ready: Arc<Mutex<Option<PathBuf>>>,
+    quit: QuitHook,
+    log: Arc<Logger>,
+}
+
+impl NativeInstaller {
+    pub fn new(dir: PathBuf, quit: QuitHook, log: Arc<Logger>) -> Self {
+        NativeInstaller { dir, client: reqwest::Client::new(), ready: Arc::new(Mutex::new(None)), quit, log }
+    }
+}
+
+/// `sha256:<hex>` -> hex
+fn digest_hex(d: &str) -> Option<String> {
+    let h = d.strip_prefix("sha256:")?.trim().to_lowercase();
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then_some(h)
+}
+
+/// First word of a `<hex>  <name>` sidecar file (what `sha256sum` and build-installer.ps1 write).
+fn sidecar_hex(text: &str) -> Option<String> {
+    let h = text.split_whitespace().next()?.to_lowercase();
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then_some(h)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl Installer for NativeInstaller {
+    fn supported(&self) -> bool {
+        cfg!(windows)
+    }
+
+    fn download(&self, release: &Release, progress: Arc<dyn Fn(f32) + Send + Sync>) -> BoxFuture<'static, Result<(), InstallError>> {
+        let (dir, client, ready, log, release) = (self.dir.clone(), self.client.clone(), self.ready.clone(), self.log.clone(), release.clone());
+        Box::pin(async move {
+            use futures_util::StreamExt;
+            use sha2::{Digest, Sha256};
+            use std::io::Write;
+            let fail = |m: String| InstallError::Failed(m);
+            let asset = release.installer().ok_or_else(|| fail("This release has no installer for this app.".into()))?.clone();
+            // The name goes into a path: only the exact asset name we build ourselves is accepted.
+            if asset.name != installer_asset_name(&release.version) || asset.name.contains(['/', '\\']) {
+                return Err(fail("Unexpected installer name.".into()));
+            }
+            *ready.lock().unwrap() = None;
+            std::fs::create_dir_all(&dir).map_err(|e| fail(e.to_string()))?;
+            // older downloads are leftovers
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+
+            // the expected hash: GitHub's own digest, else the .sha256 file next to the installer
+            let mut expected = asset.digest.as_deref().and_then(digest_hex);
+            if expected.is_none() {
+                if let Some(side) = release.assets.iter().find(|a| a.name == format!("{}.sha256", asset.name)) {
+                    if let Ok(r) = client.get(&side.url).header("User-Agent", "AguChat-updater").timeout(Duration::from_secs(30)).send().await {
+                        if let Ok(t) = r.text().await {
+                            expected = sidecar_hex(&t);
+                        }
+                    }
+                }
+            }
+            if expected.is_none() {
+                log.log("[updater] no sha256 published for the installer; checking the size only");
+            }
+
+            let part = dir.join(format!("{}.part", asset.name));
+            let res = client.get(&asset.url).header("User-Agent", "AguChat-updater").send().await.and_then(|r| r.error_for_status()).map_err(|e| fail(e.to_string()))?;
+            let total = res.content_length().unwrap_or(asset.size).max(1);
+            let mut file = std::fs::File::create(&part).map_err(|e| fail(e.to_string()))?;
+            let mut hasher = Sha256::new();
+            let mut got: u64 = 0;
+            let mut stream = res.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| fail(e.to_string()))?;
+                hasher.update(&chunk);
+                file.write_all(&chunk).map_err(|e| fail(e.to_string()))?;
+                got += chunk.len() as u64;
+                progress((got as f32 / total as f32).min(1.0));
+            }
+            drop(file);
+            if (asset.size != 0 && got != asset.size) || got == 0 {
+                let _ = std::fs::remove_file(&part);
+                return Err(fail("The download is incomplete. Try again.".into()));
+            }
+            if let Some(want) = expected {
+                if hex(&hasher.finalize()) != want {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(fail("The downloaded update did not match its checksum. Try again later.".into()));
+                }
+            }
+            let done = dir.join(&asset.name);
+            std::fs::rename(&part, &done).map_err(|e| fail(e.to_string()))?;
+            *ready.lock().unwrap() = Some(done);
+            Ok(())
+        })
+    }
+
+    fn install(&self) -> BoxFuture<'static, Result<(), String>> {
+        let (ready, quit, log) = (self.ready.clone(), self.quit.clone(), self.log.clone());
+        Box::pin(async move {
+            let path = ready.lock().unwrap().clone().ok_or_else(|| "No update is ready to install.".to_string())?;
+            if !path.is_file() {
+                return Err("The downloaded update is gone. Check for updates again.".into());
+            }
+            // Silent install, then the new copy starts (/R). The installer waits for this process to let go of
+            // "Agu Chat.exe", so we only have to quit right after starting it.
+            let mut cmd = std::process::Command::new(&path);
+            cmd.args(["/S", "/R"]);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            }
+            cmd.spawn().map_err(|e| format!("Could not start the installer: {e}"))?;
+            log.log("[updater] installer started, quitting");
+            let hook = quit.lock().unwrap().clone();
+            match hook {
+                Some(h) => h(),
+                None => std::process::exit(0),
+            }
+            Ok(())
+        })
     }
 }
 
@@ -587,7 +800,26 @@ mod tests {
     use super::*;
 
     fn rel(v: &str, pre: bool) -> Release {
-        Release { version: v.into(), prerelease: pre, draft: false, notes: String::new(), url: String::new() }
+        Release { version: v.into(), prerelease: pre, ..Default::default() }
+    }
+
+    /// A GitHub releases list: native releases (with and without their installer) among Electron ones.
+    fn github_list() -> Value {
+        let asset = |name: &str, size: u64| serde_json::json!({ "name": name, "browser_download_url": format!("https://example.invalid/{name}"), "size": size });
+        serde_json::json!([
+            { "tag_name": "v0.0.1-beta.40", "prerelease": true, "draft": false, "body": "electron", "html_url": "u1",
+              "assets": [asset("Agu-Chat-Setup-0.0.1-beta.40.exe", 5), asset("latest.yml", 1)] },
+            { "tag_name": "native-v0.1.0-beta.2", "prerelease": true, "draft": false, "body": "- native beta", "html_url": "u2",
+              "assets": [asset("Agu-Chat-Native-Setup-0.1.0-beta.2-x64.exe", 9), asset("Agu-Chat-Native-Setup-0.1.0-beta.2-x64.exe.sha256", 80)] },
+            { "tag_name": "native-v0.1.0", "prerelease": false, "draft": false, "body": "", "html_url": "u3",
+              "assets": [asset("Agu-Chat-Native-Setup-0.1.0-x64.exe", 9)] },
+            // no installer attached (yet): never offered
+            { "tag_name": "native-v0.2.0", "prerelease": false, "draft": false, "body": "", "html_url": "u4", "assets": [asset("notes.txt", 1)] },
+            // the Electron installer under a native tag: not ours
+            { "tag_name": "native-v0.3.0", "prerelease": false, "draft": false, "body": "", "html_url": "u5", "assets": [asset("Agu-Chat-Setup-0.3.0.exe", 1)] },
+            { "tag_name": "native-vnope", "prerelease": false, "draft": false, "body": "", "html_url": "u6", "assets": [asset("Agu-Chat-Native-Setup-nope-x64.exe", 1)] },
+            { "tag_name": "v0.0.1", "prerelease": false, "draft": false, "body": "electron stable", "html_url": "u7", "assets": [] }
+        ])
     }
 
     #[test]
@@ -618,6 +850,104 @@ mod tests {
         assert!(allowed_on_channel("beta", "0.0.1-beta.1"));
         assert!(!allowed_on_channel("stable", "0.0.1-beta.1"));
         assert!(allowed_on_channel("stable", "0.0.1"));
+    }
+
+    #[test]
+    fn only_native_releases_with_their_installer_are_read() {
+        let rels = parse_releases(&github_list());
+        let versions: Vec<_> = rels.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["0.1.0-beta.2", "0.1.0"]);
+        assert_eq!(rels[0].installer().unwrap().name, "Agu-Chat-Native-Setup-0.1.0-beta.2-x64.exe");
+        assert!(rels[0].prerelease && !rels[1].prerelease);
+        // the Electron updater's files are never ours
+        assert!(rels.iter().all(|r| r.assets.iter().all(|a| a.name != "latest.yml")));
+        assert_eq!(installer_asset_name("1.2.3"), "Agu-Chat-Native-Setup-1.2.3-x64.exe");
+    }
+
+    #[test]
+    fn channels_over_a_mixed_feed() {
+        let rels = parse_releases(&github_list());
+        // beta takes the newest of both kinds, stable only the full release
+        assert_eq!(pick_update(&rels, "0.0.9", "beta").unwrap().version, "0.1.0");
+        assert_eq!(pick_update(&rels, "0.0.9", "stable").unwrap().version, "0.1.0");
+        assert_eq!(pick_update(&rels[..1], "0.0.9", "beta").unwrap().version, "0.1.0-beta.2");
+        assert!(pick_update(&rels[..1], "0.0.9", "stable").is_none());
+        // a beta user on the beta that is already the newest, a stable user past it
+        assert!(pick_update(&rels[..1], "0.1.0-beta.2", "beta").is_none());
+        assert!(pick_update(&rels, "0.1.0", "beta").is_none());
+    }
+
+    #[test]
+    fn checksums_are_read_from_either_place() {
+        let h = "a".repeat(64);
+        assert_eq!(digest_hex(&format!("sha256:{h}")), Some(h.clone()));
+        assert_eq!(digest_hex("sha1:abc"), None);
+        assert_eq!(sidecar_hex(&format!("{}  Agu-Chat-Native-Setup-1-x64.exe
+", h.to_uppercase())), Some(h));
+        assert_eq!(sidecar_hex("not a hash"), None);
+    }
+
+    #[test]
+    fn friendly_errors() {
+        assert!(friendly_error("error sending request", Some(0)).contains("internet"));
+        assert!(friendly_error("HTTP 403", Some(403)).contains("limiting"));
+        assert_eq!(friendly_error("boom
+second line", None), "boom");
+    }
+
+    /// One-shot HTTP server for the download test: answers every GET with `body`.
+    fn serve(body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = write!(s, "HTTP/1.1 200 OK{0}Content-Length: {1}{0}Connection: close{0}{0}", "
+", body.len());
+                let _ = s.write_all(&body);
+            }
+        });
+        format!("http://{addr}/x")
+    }
+
+    #[tokio::test]
+    async fn the_installer_is_downloaded_and_verified() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("agu-upd-{}", crate::util::uuid_v4()));
+        let log = Arc::new(Logger::new(&dir, true));
+        let body = b"MZ pretend installer bytes".to_vec();
+        let url = serve(body.clone());
+        let good: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+        let mk = |digest: Option<String>, size: u64| Release {
+            version: "0.1.0".into(),
+            assets: vec![Asset { name: installer_asset_name("0.1.0"), url: url.clone(), size, digest }],
+            ..Default::default()
+        };
+        let inst = NativeInstaller::new(dir.join("updates"), Arc::new(Mutex::new(None)), log);
+        let seen = Arc::new(Mutex::new(0.0f32));
+        let s2 = seen.clone();
+        let progress: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |p| *s2.lock().unwrap() = p);
+
+        // right size and hash: ready, and the file is there under its final name
+        assert!(inst.download(&mk(Some(format!("sha256:{good}")), body.len() as u64), progress.clone()).await.is_ok());
+        assert_eq!(*seen.lock().unwrap(), 1.0);
+        let done = dir.join("updates").join(installer_asset_name("0.1.0"));
+        assert_eq!(std::fs::read(&done).unwrap(), body);
+        // wrong hash: refused, nothing left behind
+        let bad = format!("sha256:{}", "0".repeat(64));
+        assert!(matches!(inst.download(&mk(Some(bad), body.len() as u64), progress.clone()).await, Err(InstallError::Failed(m)) if m.contains("checksum")));
+        assert!(!done.exists());
+        assert!(inst.ready.lock().unwrap().is_none());
+        // wrong size: refused
+        assert!(matches!(inst.download(&mk(None, 3), progress.clone()).await, Err(InstallError::Failed(m)) if m.contains("incomplete")));
+        // no installer asset at all
+        assert!(inst.download(&Release { version: "0.1.0".into(), ..Default::default() }, progress).await.is_err());
+        // nothing verified is ready: install refuses
+        assert!(inst.install().await.is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

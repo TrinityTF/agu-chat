@@ -51,7 +51,28 @@ fn main() {
             }
             let dir = agu_chat_core::default_data_dir();
             window_state::use_real_backend();
-            (std::sync::Arc::new(agu_chat_core::Backend::start(dir.clone())), dir)
+            let backend = std::sync::Arc::new(agu_chat_core::Backend::start(dir.clone()));
+            // "Restart and update": once the installer is running the backend asks the UI to quit (after the
+            // layout is flushed), see updater.rs `NativeInstaller::install`.
+            let (qtx, mut qrx) = futures::channel::mpsc::unbounded::<()>();
+            backend.set_quit_hook(std::sync::Arc::new(move || {
+                let _ = qtx.unbounded_send(());
+            }));
+            cx.spawn(async move |cx| {
+                use futures::StreamExt;
+                if qrx.next().await.is_some() {
+                    let _ = cx.update(|cx| {
+                        for w in cx.windows() {
+                            if let Some(h) = w.downcast::<AguApp>() {
+                                let _ = h.update(cx, |app, _, _| app.flush_layout());
+                            }
+                        }
+                        cx.quit();
+                    });
+                }
+            })
+            .detach();
+            (backend, dir)
         };
         chat::services::init(cx, bridge.clone(), data_dir);
 
