@@ -131,6 +131,8 @@ pub struct AguApp {
     pub hotkey_table: HotkeyTable,
     pub keymap: HashMap<String, HotkeyAction>,
     pub panes: HashMap<String, PaneSlot>,
+    /// the Modes button of each split's header, rebuilt when its channels change
+    pub modes: HashMap<String, (String, Entity<crate::layout::channel_modes::ModesButton>)>,
     pub tabs: TabsState,
     pub sv: SplitViewState,
     pub menu: Option<MenuState>,
@@ -181,6 +183,7 @@ impl AguApp {
             hotkey_table,
             keymap,
             panes: HashMap::new(),
+            modes: HashMap::new(),
             tabs: TabsState::default(),
             sv: SplitViewState::default(),
             menu: None,

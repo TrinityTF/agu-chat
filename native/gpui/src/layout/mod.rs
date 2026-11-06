@@ -1,6 +1,7 @@
 //! Port of src/renderer/layout/ (the notebook shell). One Rust file per TSX/TS file.
 pub mod app;
 pub mod channel_dialog;
+pub mod channel_modes;
 
 pub mod dev_mock;
 pub mod hotkeys;

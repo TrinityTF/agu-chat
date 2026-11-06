@@ -4,7 +4,7 @@
 //! A merged split shows one chip per platform (icon, "2x" when it holds several channels of it, a status dot);
 //! names appear when there is room. Clicking a chip splits its channels out; dragging one drops it on any split edge.
 //!
-//! Not ported yet: `ModesButton` (ChannelModes.tsx, round 3; it only shows to someone who can moderate).
+//! The Modes button (layout/channel_modes.rs) sits before the mod toggle; it only shows to someone who can moderate.
 use std::time::Duration;
 
 use agu_chat_core::protocol::{ConnFrame, Platform};
@@ -236,6 +236,18 @@ impl AguApp {
         } else {
             header.child(div().flex_1())
         };
+
+        // Modes button (ChannelModes.tsx): its own entity per split, nothing to show unless the account can moderate
+        let sig = leaf.sources.iter().map(source_key).collect::<Vec<_>>().join("|");
+        let modes_view = match self.modes.get(&leaf_id) {
+            Some((s, v)) if *s == sig => v.clone(),
+            _ => {
+                let v = cx.new(|cx| crate::layout::channel_modes::ModesButton::new(&leaf.sources, cx));
+                self.modes.insert(leaf_id.clone(), (sig, v.clone()));
+                v
+            }
+        };
+        header = header.child(modes_view);
 
         // Mod mode toggle
         let mod_on = leaf.mod_mode;
