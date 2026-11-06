@@ -115,6 +115,12 @@ impl ChatPane {
             }
             Act::Tag(t) => {
                 if let Some(a) = actions.get(t as usize).cloned() {
+                    // Ctrl+click on a name: @name at the start of the message box instead of the user card.
+                    if let (RowAction::Card { user, .. }, true) = (&a, w.modifiers().control) {
+                        let user = user.clone();
+                        let _ = weak.update(cx, |p, cx| p.mention_user(&user, w, cx));
+                        return;
+                    }
                     let _ = weak.update(cx, |p, cx| p.run_action(a, cx));
                 }
             }
