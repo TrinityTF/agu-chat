@@ -260,6 +260,8 @@ impl Render for ChannelDialog {
             )
             .child(
                 div()
+                    // `space-y-3` also counts the hidden submit button that follows: the last section keeps its 12px
+                    .mb(px(12.))
                     .child(Self::label(format!("In this split{}", if self.sources.len() > 1 { " (merged co-chat)" } else { "" })))
                     .child(in_split),
             );
