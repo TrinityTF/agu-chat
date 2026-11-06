@@ -20,16 +20,17 @@ Remove-Item $logFile -ErrorAction SilentlyContinue
 if ($env:AGU_BENCH_LOG) { $env:AGU_LOG = $logFile } else { Remove-Item Env:AGU_LOG -ErrorAction SilentlyContinue }
 if ($NoAnim) { $env:AGU_NO_ANIM = "1" } else { Remove-Item Env:AGU_NO_ANIM -ErrorAction SilentlyContinue }
 
-# The Electron app gets a throwaway profile with the same two splits the native apps open.
+# Electron and GPUI get a throwaway data folder with the same two splits (the native apps ignore command-line channels).
 $profileDir = Join-Path $env:TEMP "agu-chat-bench-profile"
-if ($App -eq "electron") {
-  New-Item -ItemType Directory -Force $profileDir | Out-Null
+$cfgDir = if ($App -eq "gpui") { $dataDir } else { $profileDir }
+if ($App -eq "electron" -or $App -eq "gpui") {
+  New-Item -ItemType Directory -Force $cfgDir | Out-Null
   # JSON.parse rejects a BOM, and Windows PowerShell's utf8 encoding writes one.
-  $write = { param($file, $obj) [IO.File]::WriteAllText("$profileDir\$file", ($obj | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false)) }
+  $write = { param($file, $obj) [IO.File]::WriteAllText((Join-Path $cfgDir $file), ($obj | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false)) }
   $leaf = { param($id, $ch) @{ kind = "leaf"; id = $id; sources = @(@{ platform = "twitch"; channel = $ch }); modMode = $false } }
   & $write "layout.json" @{ tabs = @(@{ id = "bench"; title = ""; root = @{ kind = "row"; id = "row"; children = @((& $leaf "a" "a_g_u__"), (& $leaf "b" "benchtwo")); sizes = @(0.5, 0.5) } }); active = "bench" }
   & $write "settings.json" @{ v = 3; timestamps = $true; fontSize = 13; animatedEmotes = -not $NoAnim }
-  & $write "window.json" @{ x = -1070; y = -460; width = 1116; height = 739; maximized = $false }
+  if ($App -eq "electron") { & $write "window.json" @{ x = -1070; y = -460; width = 1116; height = 739; maximized = $false } }
 }
 
 switch ($App) {
