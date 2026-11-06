@@ -1,12 +1,15 @@
 //! Kick account: log in through the Agu Chat broker (api.agu.lol), keep the tokens, refresh them and send chat.
 //!
 //! WHY A BROKER. Kick's OAuth token exchange needs a client secret, which must never ship in a desktop app. The
-//! broker holds it. This side only does PKCE (so nobody else can claim the tokens of a login we started):
+//! broker holds it. This side does PKCE plus a one-time claim code (so nobody else can claim the tokens of a login
+//! we started, and a login someone else started for us cannot be claimed by them):
 //!   1. verifier = random, challenge = base64url(sha256(verifier))
 //!   2. listen on 127.0.0.1:<random port>, open the browser at  <broker>/kick/app/start?challenge=..&port=..
-//!   3. after consent Kick sends the browser to the broker, which sends it on to http://127.0.0.1:<port>/kick/done
-//!      (or /kick/done?error=<message>); we answer with a "close this tab" page and stop listening (5 min limit)
-//!   4. POST <broker>/kick/app/claim {verifier} -> tokens + user; later POST <broker>/kick/app/refresh {refresh_token}
+//!   3. after consent Kick sends the browser to the broker, which sends it on to
+//!      http://127.0.0.1:<port>/kick/done?code=<one-time claim code> (or /kick/done?error=<message>); we answer with
+//!      a "close this tab" page and stop listening (5 min limit). The code only ever travels to THIS machine's
+//!      loopback, so a phishing link built with someone else's verifier cannot be claimed by its author.
+//!   4. POST <broker>/kick/app/claim {verifier, code} -> tokens + user; later POST <broker>/kick/app/refresh {refresh_token}
 //! Sending is Kick's public API with the user's own token: POST https://api.kick.com/public/v1/chat.
 //!
 //! The tokens live in the encrypted secrets store (key `kick`, like Twitch's `twitch`) and are never logged.
@@ -186,16 +189,19 @@ pub fn request_target(head: &str) -> Option<String> {
     it.next().map(String::from)
 }
 
-/// `/kick/done` -> Some(Ok), `/kick/done?error=x` -> Some(Err(x)), any other path -> None.
-pub fn parse_done(target: &str) -> Option<Result<(), String>> {
+/// `/kick/done?code=c` -> Some(Ok(c)), `/kick/done?error=x` -> Some(Err(x)), `/kick/done` with neither -> Some(Err("Kick login
+/// failed")), any other path -> None.
+pub fn parse_done(target: &str) -> Option<Result<String, String>> {
     let u = url::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
     if u.path() != "/kick/done" {
         return None;
     }
     let err = u.query_pairs().find(|(k, _)| k == "error").map(|(_, v)| v.into_owned());
-    Some(match err {
-        Some(e) => Err(if e.trim().is_empty() { "Kick login was cancelled".into() } else { e }),
-        None => Ok(()),
+    let code = u.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()).filter(|c| !c.trim().is_empty());
+    Some(match (err, code) {
+        (Some(e), _) => Err(if e.trim().is_empty() { "Kick login was cancelled".into() } else { e }),
+        (None, Some(c)) => Ok(c),
+        (None, None) => Err("Kick login failed".into()),
     })
 }
 
@@ -205,8 +211,9 @@ async fn respond(s: &mut tokio::net::TcpStream, status: &str, body: &str) {
     let _ = s.shutdown().await;
 }
 
-/// Waits for the browser to land on /kick/done. Other requests (a favicon, a probe) get a 404 and are ignored.
-pub async fn wait_for_callback(listener: &TcpListener, limit: Duration) -> Result<(), String> {
+/// Waits for the browser to land on /kick/done and returns the claim code. Other requests (a favicon, a probe) get a 404
+/// and are ignored.
+pub async fn wait_for_callback(listener: &TcpListener, limit: Duration) -> Result<String, String> {
     let run = async {
         loop {
             let Ok((mut s, _)) = listener.accept().await else { continue };
@@ -267,8 +274,8 @@ fn unreachable(e: &net::FetchError, what: &str) -> String {
     }
 }
 
-pub async fn claim(base: &str, verifier: &str) -> Result<Claim, String> {
-    let (s, v) = json_post(&format!("{base}/kick/app/claim"), &[], &json!({"verifier": verifier})).await.map_err(|e| unreachable(&e, "the Kick login service"))?;
+pub async fn claim(base: &str, verifier: &str, code: &str) -> Result<Claim, String> {
+    let (s, v) = json_post(&format!("{base}/kick/app/claim"), &[], &json!({"verifier": verifier, "code": code})).await.map_err(|e| unreachable(&e, "the Kick login service"))?;
     parse_claim(s, &v)
 }
 
@@ -294,10 +301,10 @@ pub async fn prepare(base: &str) -> Result<Prepared, String> {
 
 /// Wait for the browser, then claim the tokens.
 pub async fn complete(p: Prepared, base: &str, limit: Duration) -> Result<Claim, String> {
-    wait_for_callback(&p.listener, limit).await.map_err(|e| if e.starts_with("Kick login") { e } else { format!("Kick login failed: {e}") })?;
+    let code = wait_for_callback(&p.listener, limit).await.map_err(|e| if e.starts_with("Kick login") { e } else { format!("Kick login failed: {e}") })?;
     let Prepared { listener, verifier, .. } = p;
     drop(listener);
-    claim(base, &verifier).await
+    claim(base, &verifier, &code).await
 }
 
 /// The whole login with an injectable "open the browser" step (tests drive the loopback by hand).
@@ -711,7 +718,10 @@ mod tests {
     fn callback_urls_are_recognised() {
         assert_eq!(request_target("GET /kick/done HTTP/1.1\r\nHost: x\r\n\r\n").as_deref(), Some("/kick/done"));
         assert_eq!(request_target("POST /kick/done HTTP/1.1\r\n\r\n"), None);
-        assert_eq!(parse_done("/kick/done"), Some(Ok(())));
+        assert_eq!(parse_done("/kick/done?code=abc-_123"), Some(Ok("abc-_123".into())));
+        assert_eq!(parse_done("/kick/done"), Some(Err("Kick login failed".into())));
+        assert_eq!(parse_done("/kick/done?code="), Some(Err("Kick login failed".into())));
+        assert_eq!(parse_done("/kick/done?code=abc&error=nope"), Some(Err("nope".into())));
         assert_eq!(parse_done("/kick/done?error=access_denied"), Some(Err("access_denied".into())));
         assert_eq!(parse_done("/kick/done?error=User%20said%20no"), Some(Err("User said no".into())));
         assert_eq!(parse_done("/favicon.ico"), None);
@@ -801,12 +811,14 @@ mod tests {
         let url = wait_for_url(&url_slot).await;
         assert!(url.starts_with(&format!("{base}/kick/app/start?challenge=")));
         browser_hits(&url, "/favicon.ico").await;
-        browser_hits(&url, "/kick/done").await;
+        browser_hits(&url, "/kick/done?code=one-time-code_42").await;
         let claim = handle.await.unwrap().unwrap();
         assert_eq!(claim.user.slug, "u");
         let req = seen.lock().unwrap()[0].clone();
         assert!(req.starts_with("POST /kick/app/claim"), "{req}");
-        let verifier = serde_json::from_str::<Value>(&req[req.find('{').unwrap()..]).unwrap()["verifier"].as_str().unwrap().to_string();
+        let sent = serde_json::from_str::<Value>(&req[req.find('{').unwrap()..]).unwrap();
+        assert_eq!(sent["code"], "one-time-code_42", "the claim carries the code the mock broker redirected with");
+        let verifier = sent["verifier"].as_str().unwrap().to_string();
         let challenge = url.split("challenge=").nth(1).unwrap().split('&').next().unwrap();
         assert_eq!(challenge_for(&verifier), challenge);
     }
@@ -822,6 +834,35 @@ mod tests {
         browser_hits(&url, "/kick/done?error=access_denied").await;
         let e = handle.await.unwrap().unwrap_err();
         assert!(e.contains("access_denied"), "{e}");
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_claim_with_a_wrong_code_fails() {
+        // the broker answers 404 {"error":"not found"} for a wrong code (and has deleted the entry)
+        let (bport, seen) = mock_server(vec![(404, json!({"error": "not found"}).to_string())]).await;
+        let base = format!("http://127.0.0.1:{bport}");
+        let url_slot: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let u2 = url_slot.clone();
+        let handle = tokio::spawn(async move { authorize_with(&base, move |u| *u2.lock().unwrap() = u.to_string(), Duration::from_secs(20)).await });
+        let url = wait_for_url(&url_slot).await;
+        browser_hits(&url, "/kick/done?code=wrong").await;
+        let e = handle.await.unwrap().unwrap_err();
+        assert!(e.contains("not found"), "{e}");
+        assert!(seen.lock().unwrap()[0].contains("\"code\":\"wrong\""));
+    }
+
+    #[tokio::test]
+    async fn a_done_without_code_or_error_is_an_error_and_never_claims() {
+        let (bport, seen) = mock_server(vec![(200, "{}".into())]).await;
+        let base = format!("http://127.0.0.1:{bport}");
+        let url_slot: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let u2 = url_slot.clone();
+        let handle = tokio::spawn(async move { authorize_with(&base, move |u| *u2.lock().unwrap() = u.to_string(), Duration::from_secs(20)).await });
+        let url = wait_for_url(&url_slot).await;
+        browser_hits(&url, "/kick/done").await;
+        let e = handle.await.unwrap().unwrap_err();
+        assert_eq!(e, "Kick login failed");
         assert!(seen.lock().unwrap().is_empty());
     }
 
