@@ -129,17 +129,32 @@ pub async fn fetch_seven_tv_defs(client: &reqwest::Client) -> Option<Value> {
     Some(data)
 }
 
-async fn fetch_chatter_style(client: &reqwest::Client, user_id: &str) -> Option<ChatterStyle> {
+/// `None`: the lookup failed (network, 5xx, rate limit) and is worth retrying; `Some(None)`: 7TV answered,
+/// and the chatter has no style (or no 7TV account).
+async fn fetch_chatter_style(client: &reqwest::Client, user_id: &str) -> Option<Option<ChatterStyle>> {
     let r = client.get(format!("https://7tv.io/v3/users/twitch/{user_id}")).send().await.ok()?;
+    if r.status() == reqwest::StatusCode::NOT_FOUND {
+        return Some(None);
+    }
     if !r.status().is_success() {
         return None;
     }
     let d: Value = r.json().await.ok()?;
-    let st = d.pointer("/user/style").filter(|s| !s.is_null())?;
-    Some(ChatterStyle {
+    let Some(st) = d.pointer("/user/style").filter(|s| !s.is_null()) else { return Some(None) };
+    Some(Some(ChatterStyle {
         color: st.get("color").and_then(|c| c.as_i64()),
         paint_id: st.get("paint_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
         badge_id: st.get("badge_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+    }))
+}
+
+/// Wait before retrying a failed lookup: 5 s, 15 s, 60 s, then every 5 minutes.
+fn retry_delay(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(match failures {
+        0 | 1 => 5,
+        2 => 15,
+        3 => 60,
+        _ => 300,
     })
 }
 
@@ -193,6 +208,9 @@ pub struct CosmeticsState {
     active: usize,
     listeners: Vec<StyleListener>,
     defs_requested: bool,
+    /// failed lookups so far, per chatter (cleared on an answer); `defs_failures` for the definitions
+    failures: HashMap<String, u32>,
+    defs_failures: u32,
 }
 
 #[derive(Clone)]
@@ -223,6 +241,8 @@ impl Cosmetics {
             active: 0,
             listeners: Vec::new(),
             defs_requested: false,
+            failures: HashMap::new(),
+            defs_failures: 0,
         })))
     }
 
@@ -254,21 +274,46 @@ impl Cosmetics {
         StyleLookup::Unknown
     }
 
-    /// Start the one-off fetch of the paint / badge definitions.
+    /// The listeners hear this id when the definitions arrive: every painted row has to be redrawn.
+    pub const DEFS_ARRIVED: &'static str = "";
+
+    /// Start the fetch of the paint / badge definitions; a failed fetch is retried (`retry_delay`).
     pub fn ensure_defs(&self, net: &Arc<Net>, cx: &mut gpui::App) {
         if std::mem::replace(&mut self.0.borrow_mut().defs_requested, true) || self.0.borrow().defs.is_some() {
             return;
         }
         let this = self.clone();
+        let netc = net.clone();
         let client = net.client.clone();
         let task = net.run(async move { fetch_seven_tv_defs(&client).await.map(|d| defs_from_raw(&d)) });
         cx.spawn(async move |cx| {
             if let Some(Some(defs)) = task.await {
-                let _ = cx.update(|_| this.0.borrow_mut().defs = Some(Arc::new(defs)));
-                let _ = cx.update(|cx| cx.refresh_windows());
+                let _ = cx.update(|cx| {
+                    this.0.borrow_mut().defs = Some(Arc::new(defs));
+                    this.notify(Self::DEFS_ARRIVED);
+                    cx.refresh_windows();
+                });
+                return;
             }
+            let wait = {
+                let mut s = this.0.borrow_mut();
+                s.defs_failures += 1;
+                retry_delay(s.defs_failures)
+            };
+            cx.background_executor().timer(wait).await;
+            let _ = cx.update(|cx| {
+                this.0.borrow_mut().defs_requested = false;
+                this.ensure_defs(&netc, cx);
+            });
         })
         .detach();
+    }
+
+    fn notify(&self, uid: &str) {
+        let st = self.0.borrow();
+        for l in st.listeners.iter() {
+            l(uid);
+        }
     }
 
     fn pump(&self, net: &Arc<Net>, cx: &mut gpui::App) {
@@ -281,23 +326,40 @@ impl Cosmetics {
             let id = uid.clone();
             let task = net.run(async move { fetch_chatter_style(&client, &id).await });
             cx.spawn(async move |cx| {
-                // `None` = no style / 404 / failure; negatives are cached so repeat lookups don't refire.
-                let style = task.await.flatten();
-                let _ = cx.update(|cx| {
-                    {
-                        let mut s = this.0.borrow_mut();
-                        s.active -= 1;
-                        s.pending.remove(&uid);
-                        s.styles.insert(uid.clone(), style);
+                // An answer (a style, or none: those are cached so repeat lookups don't refire) is kept; a
+                // failed lookup stays pending and is queued again after a wait, so a network blip doesn't
+                // take a chatter's paint and badge away for the whole session.
+                match task.await.flatten() {
+                    Some(style) => {
+                        let _ = cx.update(|cx| {
+                            {
+                                let mut s = this.0.borrow_mut();
+                                s.active -= 1;
+                                s.pending.remove(&uid);
+                                s.failures.remove(&uid);
+                                s.styles.insert(uid.clone(), style);
+                            }
+                            this.notify(&uid);
+                            this.pump(&netc, cx);
+                            cx.refresh_windows();
+                        });
                     }
-                    let st = this.0.borrow();
-                    for l in st.listeners.iter() {
-                        l(&uid);
+                    None => {
+                        let wait = {
+                            let mut s = this.0.borrow_mut();
+                            s.active -= 1;
+                            let n = s.failures.entry(uid.clone()).or_insert(0);
+                            *n += 1;
+                            retry_delay(*n)
+                        };
+                        let _ = cx.update(|cx| this.pump(&netc, cx));
+                        cx.background_executor().timer(wait).await;
+                        let _ = cx.update(|cx| {
+                            this.0.borrow_mut().queue.push_back(uid.clone());
+                            this.pump(&netc, cx);
+                        });
                     }
-                    drop(st);
-                    this.pump(&netc, cx);
-                    cx.refresh_windows();
-                });
+                }
             })
             .detach();
         }

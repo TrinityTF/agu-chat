@@ -1540,7 +1540,14 @@ impl ChatPane {
         let styled: Vec<String> = std::mem::take(&mut *self.styled_users.borrow_mut());
         if !styled.is_empty() {
             let set: HashSet<String> = styled.into_iter().collect();
-            self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(m) if set.contains(&m.user.id)));
+            if set.contains(super::twitch::cosmetics::Cosmetics::DEFS_ARRIVED) {
+                // the paint / badge definitions came after the rows were built: every row reads them anew
+                self.rebuild_envs();
+                self.gen += 1;
+                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(_)));
+            } else {
+                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(m) if set.contains(&m.user.id)));
+            }
         }
         if self.needs_refresh {
             self.needs_refresh = false;
@@ -1560,7 +1567,7 @@ impl ChatPane {
         let frame_h = |f: &FrameSpec, w: f32, window: &mut Window, cx: &mut gpui::App| -> f32 {
             let side = if f.bar.is_some() { 3.0 + 6.0 + 8.0 } else { 16.0 } + if f.border.is_some() { 2.0 } else { 0.0 };
             let flow = f.content.height_at(w - side, window, cx);
-            let before = if f.before.is_some() { fl(base * 0.85 * LINE_HEIGHT) } else { 0.0 };
+            let before = if f.before.is_some() { fl(base * 0.85 * LINE_HEIGHT) } else { 0.0 } + if f.label.is_some() { super::pane_render::LABEL_LINE } else { 0.0 };
             2.0 + before + flow + if f.border.is_some() { 2.0 } else { 0.0 }
         };
         match &*b {

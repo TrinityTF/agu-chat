@@ -20,6 +20,10 @@ use super::types::*;
 use super::ui_util::*;
 use crate::icons::{self, icon};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
+
+/// Height of a row's corner tag line (FIRST MESSAGE, ...): the tag sits at top 2px with a 12px line, so the
+/// message starts below it (the row's own 1px top padding + this).
+pub(super) const LABEL_LINE: f32 = 13.0;
 use crate::theme::{self, c};
 
 fn eid(prefix: &str, key: &str) -> ElementId {
@@ -172,6 +176,11 @@ impl ChatPane {
             }
             cx.notify();
         }));
+        // A corner tag (FIRST MESSAGE, MENTIONS YOU, ...) gets its own line above the message instead of sitting
+        // over the end of the first line (a change from the Electron app, where it overlapped the text).
+        if spec.label.is_some() {
+            d = d.child(div().w_full().h(px(LABEL_LINE)));
+        }
         if let Some(text) = &spec.before {
             d = d.child(
                 div()
