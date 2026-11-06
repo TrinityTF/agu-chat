@@ -218,14 +218,13 @@ impl ChatPane {
             if let Some(t) = h.copy.clone() {
                 bar = bar.child(self.toolbar_button(format!("copy-{key}"), icons::COPY, "Copy", false, cx, move |p, cx| p.run_action(RowAction::Copy(t.clone()), cx)));
             }
-            if let Some(r) = h.reply.clone() {
-                bar = bar.child(self.toolbar_button(format!("reply-{key}"), icons::REPLY, "Reply", false, cx, move |p, cx| p.run_action(RowAction::Reply(r.clone()), cx)));
-            }
+            // The user's order: copy, pin, reply. No delete here (deleting stays on the mod buttons and the
+            // user card), so a stray click on the hover bar can't remove a message.
             if let Some((sk, id)) = h.pin.clone() {
                 bar = bar.child(self.toolbar_button(format!("pin-{key}"), icons::PIN, "Pin", false, cx, move |p, cx| p.run_action(RowAction::Pin { sk: sk.clone(), id: id.clone() }, cx)));
             }
-            if let Some(a) = h.delete.clone() {
-                bar = bar.child(self.toolbar_button(format!("del-{key}"), icons::TRASH, "Delete message", true, cx, move |p, cx| p.run_action(a.clone(), cx)));
+            if let Some(r) = h.reply.clone() {
+                bar = bar.child(self.toolbar_button(format!("reply-{key}"), icons::REPLY, "Reply", false, cx, move |p, cx| p.run_action(RowAction::Reply(r.clone()), cx)));
             }
             d = d.child(bar);
         }
