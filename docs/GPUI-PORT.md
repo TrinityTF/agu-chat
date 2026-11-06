@@ -92,3 +92,26 @@ install removes its runtime files (`locales`, `resources`, `*.pak`, `*.dll`, ...
 (settings, layout, logins). Flags: `/S` silent, `/D=dir`, `/R` start the app afterwards, `/NOWAIT`.
 `build-installer.ps1 -Test` builds a variant with its own uninstall key and shortcut name that defaults to a folder
 in `%TEMP%`: that is what to try, never the real one, on a machine that has an install.
+
+## Settings dialog, sounds, memory (round 3B)
+
+- `layout/settings_dialog.rs` + `layout/highlights_section.rs` + `layout/settings_widgets.rs` port
+  `SettingsDialog.tsx` / `HighlightsSection.tsx`. Every control calls `settings_set(patch)` with the same camelCase
+  keys as Electron (optimistic local merge, then the bridge's answer), so `settings.json` stays compatible both ways.
+  The DOM controls GPUI lacks are drawn by `settings_widgets.rs` (`<select>` as a button plus a list, a range slider
+  with drag, checkboxes); text fields are `TextInput`s kept by key and re-synced from the saved value.
+  Two deliberate differences: the update progress bar shows the real percentage (the backend reports 0..1, the JS
+  printed `round(0..1)`), and the highlight colour is a palette + hex field instead of the OS colour picker.
+- Screenshot aid: `AGU_SHOT=settings:<accounts|appearance|highlights|ignores|hotkeys|modButtons|updates|about>`.
+  The Electron reference is `src/renderer/layout/dev/settings.html?s=<section>` on a vite dev server (dev mock
+  bridge, same data as `layout/dev_mock.rs`).
+- Sounds: "Choose file..." is GPUI's `prompt_for_paths`, then `sounds_import` copies the file into `<data dir>/sounds`;
+  the speaker button plays the file (or the built-in ping) through the same `Alerts::play` the chat view uses.
+- Image memory: decoded emotes/badges (all frames, CPU BGRA buffers in `RenderImage`) used to stay forever. The core
+  image cache now has a budget (`BUDGET_BYTES` = 160 MB of decoded frames, `AGU_IMAGE_BUDGET_MB` overrides it): past
+  it the least recently used images that were not asked for in the last 3 s are dropped, the GPUI side frees their
+  atlas tiles (`Window::drop_image`), and they are fetched again if they come back. An animation over 8 MB decoded
+  keeps only its first frame. Layout reads an image's natural size from a separate map that survives eviction, and
+  layouts are keyed by the monotonic load count, so an eviction never changes a row's height or relayouts the list.
+  (64 MB was tried and rejected: the busy fake chat's working set is above it, so images were re-fetched all the time
+  and CPU doubled.) The chat store already caps rows (1000, 1600 while scrolled up).

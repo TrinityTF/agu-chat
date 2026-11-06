@@ -54,6 +54,7 @@ AutoCloseWindow true
 
 VIProductVersion "0.0.0.0"
 VIAddVersionKey "ProductName" "${PRODUCT}"
+VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${PRODUCT} setup"
 VIAddVersionKey "FileVersion" "${VERSION}"

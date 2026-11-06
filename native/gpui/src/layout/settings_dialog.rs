@@ -1004,7 +1004,7 @@ impl SettingsDialog {
     }
 
     /// `PhraseEditor`
-    fn phrase_editor(&mut self, idx: Option<usize>, value: &IgnoredPhrase, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn phrase_editor(&mut self, idx: Option<usize>, last: bool, value: &IgnoredPhrase, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let adding = idx.is_none();
         let k = idx.map(|i| i.to_string()).unwrap_or_else(|| "new".into());
         let (pat_key, repl_key) = (format!("ph.{k}.pat"), format!("ph.{k}.repl"));
@@ -1051,7 +1051,7 @@ impl SettingsDialog {
         };
         div()
             .py(px(6.))
-            .when(!adding, |d| d.border_b_1().border_color(a(theme::LINE, 0.6)))
+            .when(!adding && !last, |d| d.border_b_1().border_color(a(theme::LINE, 0.6)))
             .child(
                 div()
                     .flex()
@@ -1104,8 +1104,8 @@ impl SettingsDialog {
             })
             .collect();
         let new_phrase = self.new_phrase.clone();
-        let adder = self.phrase_editor(None, &new_phrase, window, cx);
-        let phrase_rows: Vec<AnyElement> = phrases.iter().enumerate().map(|(i, p)| self.phrase_editor(Some(i), p, window, cx)).collect();
+        let adder = self.phrase_editor(None, true, &new_phrase, window, cx);
+        let phrase_rows: Vec<AnyElement> = phrases.iter().enumerate().map(|(i, p)| self.phrase_editor(Some(i), i + 1 == phrases.len(), p, window, cx)).collect();
         div()
             .child(Self::h("Ignored users"))
             .child(txt(11.).mb(px(8.)).text_color(c(theme::FAINT)).child("Messages from these users are hidden in every split. You can also use \"Ignore user\" on a user card."))

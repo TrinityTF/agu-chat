@@ -346,8 +346,8 @@ fn image_dims(i: &ImageItem, imgs: &ImagesHandle) -> (f32, f32) {
     if i.fixed {
         return (i.max_w, i.max_h);
     }
-    match imgs.0.get(&i.url) {
-        Some(img) => fit_down(img.w as f32, img.h as f32, i.max_w, i.max_h),
+    match imgs.0.dims(&i.url) {
+        Some((w, h)) => fit_down(w as f32, h as f32, i.max_w, i.max_h),
         // size unknown until it loads: a square box of the emote height
         None => (i.max_h, i.max_h),
     }

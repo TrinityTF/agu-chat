@@ -80,6 +80,18 @@ impl Images {
         }
     }
 
+    /// The natural size for layout: known from the first decode on, also while the pixels are evicted (so an
+    /// eviction never changes a row's height). Starts the fetch on first sight.
+    pub fn dims(&self, url: &str) -> Option<(u32, u32)> {
+        if url.is_empty() {
+            return None;
+        }
+        if let Some(d) = self.cache.borrow().size_of(url) {
+            return Some(d);
+        }
+        self.get(url).map(|i| (i.w, i.h))
+    }
+
     pub fn failed(&self, url: &str) -> bool {
         matches!(self.cache.borrow().peek(url), Some(State::Failed))
     }
@@ -142,7 +154,7 @@ impl Images {
 
     pub fn stats(&self) -> (usize, usize, u64) {
         let c = self.cache.borrow();
-        (c.loaded, c.failed, c.decoded_bytes)
+        (c.loads_total as usize, c.failed, c.decoded_bytes)
     }
 }
 

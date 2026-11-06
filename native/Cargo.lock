@@ -74,6 +74,7 @@ dependencies = [
  "agu-chat-core",
  "chrono",
  "crossbeam-channel",
+ "embed-resource",
  "fancy-regex",
  "futures",
  "gpui",
