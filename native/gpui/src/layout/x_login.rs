@@ -106,6 +106,21 @@ fn close_window() {
     }
 }
 
+/// x.com's "Continue with Google / Apple" buttons open the provider's sign-in in a popup (window.open). Without
+/// a handler wry blocks every popup, so those buttons did nothing. Sign-in providers and X itself open in
+/// WebView2's own popup window (same profile, so the login lands in this WebView); anything else stays blocked.
+fn sign_in_popup(url: String, _features: wry::NewWindowFeatures) -> wry::NewWindowResponse {
+    let host = url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").rsplit('@').next().unwrap_or("").split(':').next().unwrap_or("").to_ascii_lowercase();
+    let ok = ["accounts.google.com", "appleid.apple.com", "x.com", "twitter.com", "api.x.com", "api.twitter.com"]
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")));
+    if url.starts_with("https://") && ok {
+        wry::NewWindowResponse::Allow
+    } else {
+        wry::NewWindowResponse::Deny
+    }
+}
+
 /// A window handle for wry to build its child WebView in.
 struct HostWindow(isize);
 
@@ -198,7 +213,7 @@ fn open(reply: Reply) {
     let _ = std::fs::create_dir_all(&dir);
     let mut web_ctx = WebContext::new(Some(dir));
     let (cw, ch) = client_rect(hwnd);
-    let built = WebViewBuilder::new_with_web_context(&mut web_ctx).with_url(LOGIN_URL).with_bounds(rect_px(cw, ch)).with_focused(true).build_as_child(&HostWindow(hwnd.0 as isize));
+    let built = WebViewBuilder::new_with_web_context(&mut web_ctx).with_url(LOGIN_URL).with_bounds(rect_px(cw, ch)).with_focused(true).with_new_window_req_handler(sign_in_popup).build_as_child(&HostWindow(hwnd.0 as isize));
     let webview = match built {
         Ok(wv) => wv,
         Err(_) => {
