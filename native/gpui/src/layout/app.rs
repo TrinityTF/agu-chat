@@ -81,6 +81,8 @@ impl Render for DragGhost {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     Add { tab_id: String },
+    /// a whisper conversation in this tab (the empty tab's Whisper button)
+    Whisper { tab_id: String },
     Change { tab_id: String, leaf_id: String },
     Split { tab_id: String, leaf_id: String, below: bool },
     Settings,
@@ -692,6 +694,7 @@ impl AguApp {
         }
         let (title, initial, label) = match &dialog {
             Dialog::Add { .. } => ("Select channel".to_string(), vec![], "Add channel"),
+            Dialog::Whisper { .. } => ("Whisper someone".to_string(), vec![], "Open"),
             Dialog::Change { tab_id, leaf_id } => {
                 let tab = self.layout.tabs.iter().find(|t| &t.id == tab_id);
                 match tab.and_then(|t| find_leaf(t.root.as_ref(), leaf_id)) {
@@ -712,7 +715,8 @@ impl AguApp {
                 return;
             }
         };
-        let view = cx.new(|cx| ChannelDialog::new(window, cx, &title, initial, label));
+        let whisper = matches!(dialog, Dialog::Whisper { .. });
+        let view = cx.new(|cx| ChannelDialog::new(window, cx, &title, initial, label, whisper));
         let sub = cx.subscribe_in(&view, window, |this, _v, ev: &DialogEvent, window, cx| match ev {
             DialogEvent::Close => {
                 this.close_dialog(cx);
@@ -736,7 +740,7 @@ impl AguApp {
         let leaf_id = leaf.id.clone();
         match d {
             Dialog::Settings | Dialog::CloseTab { .. } => {}
-            Dialog::Add { tab_id } => {
+            Dialog::Add { tab_id } | Dialog::Whisper { tab_id } => {
                 self.update_root(cx, &tab_id, |r| match r {
                     Some(root) => {
                         let first = leaves(Some(root))[0].id.clone();
@@ -949,7 +953,7 @@ impl AguApp {
                 let body = div().px(px(12.)).py(px(12.)).text_size(px(12.)).text_color(c(theme::MUTED)).child(styled);
                 Some(modal(&format!("{label}?"), 360., self.close_fn(cx), body, Some(footer)))
             }
-            Dialog::Add { .. } | Dialog::Change { .. } | Dialog::Split { .. } => self.dialog_view.as_ref().map(|(v, _)| v.clone().into_any_element()),
+            Dialog::Add { .. } | Dialog::Whisper { .. } | Dialog::Change { .. } | Dialog::Split { .. } => self.dialog_view.as_ref().map(|(v, _)| v.clone().into_any_element()),
         }
     }
 

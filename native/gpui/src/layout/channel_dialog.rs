@@ -96,7 +96,8 @@ pub struct ChannelDialog {
     title: String,
     submit_label: String,
     platform: Platform,
-    /// Twitch whispers instead of a channel's chat (the Whisper option next to the platforms)
+    /// Twitch whispers instead of a channel's chat (the empty tab's Whisper button, or editing a whisper split):
+    /// no platform choice then
     whisper: bool,
     input: Entity<TextInput>,
     sources: Vec<SourceRef>,
@@ -105,9 +106,9 @@ pub struct ChannelDialog {
 }
 
 impl ChannelDialog {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, title: &str, initial: Vec<SourceRef>, submit_label: &str) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, title: &str, initial: Vec<SourceRef>, submit_label: &str, whisper: bool) -> Self {
         let platform = initial.first().map(|s| s.platform).unwrap_or(Platform::Twitch);
-        let whisper = initial.first().map(is_whisper).unwrap_or(false);
+        let whisper = whisper || initial.first().map(is_whisper).unwrap_or(false);
         let input = cx.new(|cx| TextInput::new(window, cx, if whisper { WHISPER_PLACEHOLDER } else { placeholder(platform) }, InputStyle::Field));
         let sub = cx.subscribe(&input, |this, _input, ev: &TextInputEvent, cx| match ev {
             TextInputEvent::Changed => {
@@ -208,33 +209,6 @@ impl Render for ChannelDialog {
                 .child(icons::platform_icon(p, 14., true))
                 .child(icons::platform_label(p))
         }));
-        let platforms = platforms.child(
-            div()
-                .id("platform-whisper")
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .rounded(px(4.))
-                .border_1()
-                .px(px(8.))
-                .py(px(4.))
-                .text_size(px(12.))
-                .when(self.whisper, |d| d.border_color(c(theme::ACCENT)).bg(theme::mention()).text_color(c(theme::TEXT)))
-                .when(!self.whisper, |d| d.border_color(c(theme::LINE)).text_color(c(theme::MUTED)).hover(|s| s.bg(c(theme::RAISED_2))))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.platform = Platform::Twitch;
-                    this.whisper = true;
-                    this.error.clear();
-                    this.input.update(cx, |i, cx| {
-                        i.set_placeholder(WHISPER_PLACEHOLDER, cx);
-                        i.focus(window);
-                    });
-                    cx.notify();
-                }))
-                .child(icons::icon(icons::MAIL, 14.).color(c(theme::platform_color(Platform::Twitch))))
-                .child("Whisper"),
-        );
-
         let in_split = if self.sources.is_empty() {
             div().text_size(px(12.)).text_color(c(theme::FAINT)).child("Nothing yet. Add several channels to merge their chats into one split.").into_any_element()
         } else {
@@ -281,7 +255,7 @@ impl Render for ChannelDialog {
             .flex_col()
             .gap(px(12.))
             .p(px(12.))
-            .child(div().child(Self::label("Platform".into())).child(platforms))
+            .when(!self.whisper, |d| d.child(div().child(Self::label("Platform".into())).child(platforms)))
             .child(
                 div()
                     .child(Self::label(if self.whisper { "Username" } else { "Channel" }.into()))
@@ -297,13 +271,13 @@ impl Render for ChannelDialog {
                     .child(div().mt(px(4.)).text_size(px(11.)).text_color(c(theme::FAINT)).child(if self.whisper { WHISPER_HINT } else { hint(self.platform) }))
                     .when(!self.error.is_empty(), |d| d.child(div().mt(px(4.)).text_size(px(11.)).text_color(c(theme::RED_400)).child(self.error.clone()))),
             )
-            .child(
+            .when(!self.whisper || !self.sources.is_empty(), |d| d.child(
                 div()
                     // `space-y-3` also counts the hidden submit button that follows: the last section keeps its 12px
                     .mb(px(12.))
                     .child(Self::label(format!("In this split{}", if self.sources.len() > 1 { " (merged co-chat)" } else { "" })))
                     .child(in_split),
-            );
+            ));
 
         let close = cx.listener(|_, _: &(), _w, cx| cx.emit(DialogEvent::Close));
         let close2 = cx.listener(|_, _: &ClickEvent, _w, cx| cx.emit(DialogEvent::Close));

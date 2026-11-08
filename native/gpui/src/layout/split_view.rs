@@ -206,6 +206,10 @@ impl AguApp {
                     let tab_id = tab_id.clone();
                     cx.listener(move |this, _: &ClickEvent, w, cx| this.open_dialog(crate::layout::app::Dialog::Add { tab_id: tab_id.clone() }, w, cx))
                 }))
+                .child(btn("add-whisper", "Whisper", BtnOpts::default()).on_click({
+                    let tab_id = tab_id.clone();
+                    cx.listener(move |this, _: &ClickEvent, w, cx| this.open_dialog(crate::layout::app::Dialog::Whisper { tab_id: tab_id.clone() }, w, cx))
+                }))
                 .child(btn("empty-settings", "Settings", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.open_dialog(crate::layout::app::Dialog::Settings, w, cx))))
                 .when(tab_drag.is_some() || drag_id.is_some(), |d| {
                     d.child(div().absolute().top(px(8.)).left(px(8.)).right(px(8.)).bottom(px(8.)).rounded(px(2.)).border_2().border_dashed().border_color(c(theme::ACCENT)))
