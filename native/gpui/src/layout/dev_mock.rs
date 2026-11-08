@@ -174,7 +174,7 @@ fn harness_log(platform: Platform) -> Value {
             let (a, b, c, m) = (user("1", "a_g_u__", "#9147ff"), user("2", "cooldude", "#ff4500"), user("3", "dimguy", "#1a1a8a"), user("4", "modperson", "#00ff7f"));
             let mut messages = vec![
                 msg(1, &a, "hello chat Kappa 7TV test", json!({ "badges": "broadcaster/1", "emotes": "25:11-15" })),
-                msg(2, &b, "this is a fairly long message that is going to wrap onto a second line so we can see how the dense layout and the line height behave when text wraps in a narrow split", json!({ "badges": "subscriber/12,moderator/1" })),
+                msg(2, &b, "this is a fairly long message that is going to wrap onto a second line so we can see how the dense layout and the line height behave when text wraps in a narrow split", json!({ "badges": "subscriber/12,moderator/1", "badgeInfo": "subscriber/70" })),
                 msg(3, &c, "first time here!", json!({ "firstMsg": true })),
                 msg(4, &m, "@a_g_u__ you are mentioned, check https://example.com/page.", json!({ "badges": "moderator/1" })),
                 msg(5, &b, "replying to you", json!({ "reply": { "user": "a_g_u__", "text": "hello chat Kappa 7TV test" } })),
@@ -200,12 +200,15 @@ fn harness_log(platform: Platform) -> Value {
                 if std::env::var_os("AGU_PAINT_FIXTURE").is_some() {
                     break;
                 }
-                messages.push(msg(i, if i % 2 == 1 { &b } else { &c }, &format!("filler message number {i}"), json!({})));
+                messages.push(msg(i, if i % 2 == 1 { &b } else { &c }, &format!("filler message number {i}"), if i % 2 == 1 { json!({ "badges": "subscriber/12,moderator/1", "badgeInfo": "subscriber/70" }) } else { json!({}) }));
             }
             json!({
                 "type": "chatlog", "channelId": "12826", "messages": messages,
                 "pinned": msg(100, &m, "Pinned: be nice to each other", json!({ "badges": "moderator/1", "pin": { "by": { "id": "4", "login": "modperson", "name": "Modperson" }, "startsAt": null, "endsAt": null } })),
-                "modfeed": [{ "ts": now - 20000, "kind": "timeout", "text": "A moderator timed out someone for 10m" }],
+                "modfeed": [{ "ts": now - 20000, "kind": "timeout", "text": "A moderator timed out someone for 10m" },
+                    { "ts": now - 3_000_000, "kind": "warn", "text": "Modperson warned Cooldude: spam", "mod": { "action": "warn", "by": "Modperson", "userId": "2", "login": "cooldude", "secs": null, "reason": "spam" } },
+                    { "ts": now - 2_000_000, "kind": "timeout", "text": "x", "mod": { "action": "timeout", "by": "Modperson", "userId": "2", "login": "cooldude", "secs": 600, "reason": "caps" } },
+                    { "ts": now - 1_000_000, "kind": "timeout", "text": "x", "mod": { "action": "timeout", "by": "Modperson", "userId": "2", "login": "cooldude", "secs": 3600, "reason": "" } }],
                 "automod": [{ "id": "h1", "ts": now - 15000, "user": { "id": "9", "login": "sketchy", "name": "Sketchy" }, "text": "some borderline message", "reason": "automod", "category": "swearing", "level": 2, "status": "held", "resolvedBy": null }],
                 "suspicious": [{ "id": "3", "login": "dimguy", "name": "Dimguy", "status": "active_monitoring", "types": ["manually_added"], "evaluation": null, "sharedBanChannels": 0 }],
                 "esub": { "active": true, "reason": null }
@@ -338,6 +341,7 @@ impl AguBridge for MockBridge {
             let body = init.body.clone().unwrap_or_else(|| json!({}));
             let ok = |b: Value| ApiResult { status: 200, body: b };
             match p.as_str() {
+                "/api/mod/user" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "user": { "id": "2", "login": "cooldude", "displayName": "Cooldude", "avatar": "", "createdAt": "2016-04-30T12:00:00Z" }, "followedAt": "2019-07-09T12:00:00Z" })),
                 "/api/mod/caps" => ok(json!({ "pin": true, "modes": true, "shield": true, "terms": true, "ban": true, "warn": true, "delete": true, "automod": true, "loggedIn": true, "isMod": true })),
                 "/api/rumble/caps" | "/api/kick/caps" => ok(json!({ "connected": true, "canModerate": true, "canDelete": true })),
                 "/api/chat/badges" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "channelId": "12826", "global": [

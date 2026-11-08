@@ -860,7 +860,7 @@ fn json_str<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
     v.pointer(path).and_then(|x| x.as_str())
 }
 
-fn rumble_badge_icon(def: &Value) -> Option<String> {
+pub(super) fn rumble_badge_icon(def: &Value) -> Option<String> {
     let icons = def.get("icons")?.as_object()?;
     let path = icons.get("96").or_else(|| icons.get("48")).or_else(|| icons.values().next())?.as_str()?;
     Some(if path.starts_with("http") { path.to_string() } else { format!("https://rumble.com{path}") })
@@ -1041,7 +1041,7 @@ fn split_kick(text: &str) -> Vec<(bool, String, String)> {
     out
 }
 
-fn kick_badge_style(t: &str) -> (&'static str, u32) {
+pub(super) fn kick_badge_style(t: &str) -> (&'static str, u32) {
     match t {
         "broadcaster" => ("◉", 0xfb2c36),
         "moderator" => ("⚔", 0x00bcff),

@@ -138,6 +138,8 @@ pub fn build_chat_msg(m: &IrcLine, display_user: &str) -> Value {
         "ts": js_int_or(m.tag("tmi-sent-ts"), now_ms()),
         "user": { "id": m.tag("user-id"), "login": m.user, "name": name, "color": m.tag("color") },
         "badges": m.tag("badges"),
+        // months behind a subscriber / founder badge ("subscriber/14"): the user card's tier line
+        "badgeInfo": m.tag("badge-info"),
         "text": action.clone().unwrap_or_else(|| m.text.clone()),
         "emotes": m.tag("emotes"),
         // Twitch's GIF keyboard (tier 2/3 subs): `<start>-<end>|<gifID>|<gifURL>`, comma separated. The URL is

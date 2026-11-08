@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use agu_chat_core::protocol::{Platform, SourceRef};
 use gpui::{
-    div, prelude::*, px, AnyElement, ClickEvent, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, SharedString, WeakEntity, Window,
+    div, point, prelude::*, px, AnyElement, ClickEvent, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, ScrollHandle, SharedString, WeakEntity, Window,
     WindowControlArea,
 };
 use serde_json::{json, Value};
@@ -19,6 +19,7 @@ use super::chat_pane::ChatPane;
 use super::inline::{inline_flow, InlineContent};
 use super::mod_actions::{self, ToastMsg};
 use super::mod_caps::{relay_api, ModCaps, ModReach, TIMEOUT_LADDER};
+use super::mod_history::{self, ban_state, BanState, Entry, Kind};
 use super::pane_render::{ImageBox, InlineContentBuilder};
 use super::rows::{CardUser, RowAction};
 use super::services::Services;
@@ -43,9 +44,181 @@ pub struct CardCtx {
     /// the person has a name to ignore by
     pub can_ignore: bool,
     pub emotes: Option<Arc<EmoteSets>>,
-    /// newest first, at most 15
+    /// newest first, at most `RECENT_MAX`
     pub recent: Vec<RowRef>,
+    /// every line of the person the pane holds (the Messages count)
+    pub recent_total: usize,
     pub readable_colors: bool,
+    /// from the person's newest line in this chat
+    pub badges: Vec<CardBadge>,
+    pub sub: Option<SubInfo>,
+    /// who comments are written as: the signed-in Twitch login
+    pub me: String,
+}
+
+pub const RECENT_MAX: usize = 30;
+
+/// One badge for the card's grid: a picture when the platform gives one, else a glyph chip.
+#[derive(Clone, Debug)]
+pub struct CardBadge {
+    pub url: Option<String>,
+    pub title: String,
+    pub glyph: String,
+    pub color: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubInfo {
+    pub tier: u8,
+    pub months: Option<u32>,
+}
+
+/// Twitch's `subscriber/<version>` badge: versions from 3000 are tier 3, from 2000 tier 2, the rest tier 1.
+/// The months come from `badge-info`, which names the same set ("subscriber/14"; founders: "founder/14").
+pub fn sub_info(badges: &str, badge_info: &str) -> Option<SubInfo> {
+    let version = |set: &str| badges.split(',').find_map(|b| b.strip_prefix(set).and_then(|r| r.strip_prefix('/')).map(|v| v.to_string()));
+    let sub = version("subscriber");
+    if sub.is_none() && version("founder").is_none() {
+        return None;
+    }
+    let tier = match sub.and_then(|v| v.parse::<u32>().ok()) {
+        Some(v) if v >= 3000 => 3,
+        Some(v) if v >= 2000 => 2,
+        _ => 1,
+    };
+    let months = badge_info.split(',').find_map(|b| {
+        let (set, n) = b.split_once('/')?;
+        if set == "subscriber" || set == "founder" { n.parse::<u32>().ok() } else { None }
+    });
+    Some(SubInfo { tier, months })
+}
+
+/// The badges and subscription of a person's line, whichever platform it is from.
+pub fn badges_of(row: &Row, twitch: Option<&super::twitch::badges::BadgeMap>, rumble: &RumbleBadgeDefs) -> (Vec<CardBadge>, Option<SubInfo>) {
+    let mut out = Vec::new();
+    let mut sub = None;
+    match &row.body {
+        RowBody::Msg(m) => {
+            if let Some(map) = twitch {
+                for b in super::twitch::badges::parse_badge_list(&m.badges, map) {
+                    out.push(CardBadge { url: Some(b.url), title: b.title, glyph: String::new(), color: 0 });
+                }
+            }
+            sub = sub_info(&m.badges, &m.badge_info);
+        }
+        RowBody::Kick(m) => {
+            for b in &m.badges {
+                let name = if b.text.is_empty() { &b.r#type } else { &b.text };
+                let title = if b.count > 0.0 { format!("{name} ({})", b.count as i64) } else { name.clone() };
+                let (glyph, color) = super::rows::kick_badge_style(&b.r#type);
+                let glyph = if glyph.is_empty() { b.text.chars().chain(b.r#type.chars()).take(3).collect() } else { glyph.to_string() };
+                out.push(CardBadge { url: b.url.clone().filter(|u| !u.is_empty()), title, glyph, color });
+            }
+        }
+        RowBody::Rumble(m) => {
+            for id in &m.badges {
+                if let Some(def) = rumble.get(id) {
+                    if let Some(url) = super::rows::rumble_badge_icon(def) {
+                        let title = def.pointer("/label/en").and_then(|x| x.as_str()).unwrap_or(id).to_string();
+                        out.push(CardBadge { url: Some(url), title, glyph: String::new(), color: 0 });
+                    }
+                }
+            }
+        }
+        RowBody::YouTube(m) => {
+            for b in &m.badges {
+                let url = Some(b.url.clone()).filter(|u| !u.is_empty());
+                out.push(CardBadge { url, title: b.label.clone(), glyph: b.label.chars().take(3).collect(), color: 0xd4d4d8 });
+            }
+        }
+        _ => {}
+    }
+    (out, sub)
+}
+
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 100, n % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// "April 30th, 2016" from an ISO timestamp, in the local time zone.
+fn long_date(iso: &str) -> String {
+    use chrono::Datelike;
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .map(|d| {
+            let d = d.with_timezone(&chrono::Local);
+            format!("{} {}, {}", MONTHS[d.month0() as usize], ordinal(d.day()), d.year())
+        })
+        .unwrap_or_else(|_| "an unknown date".into())
+}
+
+/// 90 -> "1m 30s", 600 -> "10m", 86400 -> "1d": the largest unit plus the next one down.
+pub fn fmt_secs(total: u64) -> String {
+    const UNITS: [(&str, u64); 5] = [("w", 604_800), ("d", 86_400), ("h", 3600), ("m", 60), ("s", 1)];
+    for (i, (label, size)) in UNITS.iter().enumerate() {
+        if total < *size {
+            continue;
+        }
+        let rest = total % size;
+        return match UNITS.get(i + 1) {
+            Some((nl, ns)) if rest >= *ns => format!("{}{label} {}{nl}", total / size, rest / ns),
+            _ => format!("{}{label}", total / size),
+        };
+    }
+    "0s".into()
+}
+
+fn fmt_stamp(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(ms).single().map(|d| d.format("%b %-d, %-I:%M %p").to_string()).unwrap_or_default()
+}
+
+const BADGE_SIDE: f32 = 20.0;
+
+/// One line of the Warnings / Timeouts / Bans tabs: what happened and when, then the reason and moderator.
+fn history_row(e: &Entry) -> gpui::Div {
+    let (title, color) = match e.kind {
+        Kind::Timeout => (format!("Timed out{}", e.secs.map(|s| format!(" for {}", fmt_secs(s))).unwrap_or_default()), theme::AMBER_400),
+        Kind::Ban => ("Banned".to_string(), theme::RED_300),
+        Kind::Unban => ("Unbanned".to_string(), theme::MUTED),
+        Kind::Untimeout => ("Timeout removed".to_string(), theme::MUTED),
+        Kind::Warn => ("Warned".to_string(), theme::ORANGE_300),
+    };
+    let detail = match (e.reason.is_empty(), e.by.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => e.reason.clone(),
+        (true, false) => format!("by {}", e.by),
+        (false, false) => format!("{} - by {}", e.reason, e.by),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(8.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(color)).child(SharedString::from(title)))
+                .child(div().flex_none().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(fmt_stamp(e.ts)))),
+        )
+        .when(!detail.is_empty(), |d| d.child(div().text_color(c(theme::MUTED)).child(SharedString::from(detail))))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    Messages,
+    Warnings,
+    Timeouts,
+    Bans,
+    Comments,
 }
 
 /// `suspiciousDetails`: spell out why Twitch flagged this user, for the display-only info line.
@@ -96,6 +269,8 @@ struct ModUser {
     followed_at: Option<String>,
     follow_error: bool,
     ban: Option<(bool, Option<String>, String)>,
+    /// the answer carried a ban verdict (null = not banned); without one the card goes by its own history
+    ban_known: bool,
     ban_error: Option<String>,
 }
 
@@ -109,6 +284,7 @@ fn parse_mod_user(v: &Value) -> ModUser {
         followed_at: v.get("followedAt").and_then(|x| x.as_str()).map(|x| x.to_string()),
         follow_error: v.get("followError").map(|x| !x.is_null() && x != &Value::Bool(false) && x != &Value::from("")).unwrap_or(false),
         ban: v.get("ban").filter(|b| b.is_object()).map(|b| (b.get("permanent").and_then(|x| x.as_bool()).unwrap_or(false), b.get("expiresAt").and_then(|x| x.as_str()).map(|x| x.to_string()), b.get("reason").and_then(|x| x.as_str()).unwrap_or("").to_string())),
+        ban_known: v.get("ban").is_some(),
         ban_error: v.get("banError").and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(|x| x.to_string()),
     }
 }
@@ -138,6 +314,9 @@ pub struct UserCardView {
     rules: Vec<String>,
     selected_rules: BTreeSet<String>,
     custom_in: Entity<TextInput>,
+    tab: Tab,
+    tab_scroll: ScrollHandle,
+    comment_in: Entity<TextInput>,
     /// The window size we last fitted (`fit_height`), and whether the user resized the window by hand since:
     /// then the card fills the window (`PopoutFill`) instead of the window following the card, and its size
     /// is remembered for the next card (`window_state::card_size`).
@@ -161,7 +340,17 @@ impl UserCardView {
             t.set_max_chars(Some(500));
             t
         });
+        let comment_in = cx.new(|cx| {
+            let mut t = TextInput::new(window, cx, "Add a comment", InputStyle::Chat);
+            t.set_max_chars(Some(mod_history::COMMENT_MAX_CHARS));
+            t
+        });
         let mut subs = vec![cx.observe(&reason_in, |_, _, cx| cx.notify()), cx.observe(&custom_in, |_, _, cx| cx.notify())];
+        subs.push(cx.subscribe(&comment_in, |this, _, ev: &TextInputEvent, cx| {
+            if matches!(ev, TextInputEvent::Enter) {
+                this.add_comment(cx);
+            }
+        }));
         // A size we didn't set is the user's hand: from then on the window keeps it (no more fitting, which
         // used to snap the edge back mid-drag) and the next card opens at it.
         subs.push(cx.observe_window_bounds(window, |this, window, cx| {
@@ -195,6 +384,9 @@ impl UserCardView {
             rules: vec![],
             selected_rules: BTreeSet::new(),
             custom_in,
+            tab: Tab::Messages,
+            tab_scroll: ScrollHandle::new(),
+            comment_in,
             fitted_h: 0.0,
             fitted_w: 0.0,
             user_sized,
@@ -202,7 +394,40 @@ impl UserCardView {
             _subs: subs,
         };
         v.load(cx);
+        // the history tabs follow bans and warnings that arrive while the card is open
+        cx.spawn(async move |this, cx| {
+            let mut seen = mod_history::version();
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(1000)).await;
+                let now = mod_history::version();
+                let changed = now != seen;
+                seen = now;
+                if this.update(cx, |_, cx| if changed { cx.notify() }).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
         v
+    }
+
+    /// The key this person's history is filed under.
+    fn ukey(&self) -> String {
+        mod_history::user_key(&self.user.id, if self.user.login.is_empty() { &self.user.name } else { &self.user.login })
+    }
+
+    fn history_login(&self) -> String {
+        if self.user.login.is_empty() { self.user.name.to_lowercase() } else { self.user.login.clone() }
+    }
+
+    fn add_comment(&mut self, cx: &mut Context<Self>) {
+        let text = self.comment_in.read(cx).text();
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        let by = if ctx.me.is_empty() { "me".to_string() } else { ctx.me.clone() };
+        if mod_history::add_comment(&self.sk, &self.ukey(), &self.history_login(), &by, &text) {
+            self.comment_in.update(cx, |i, cx| i.set_text("", cx));
+        }
+        cx.notify();
     }
 
     fn fit_state(&self) -> bool {
@@ -457,7 +682,17 @@ impl Render for UserCardView {
             avatar_src = kick_default_avatar(&self.user.id);
         }
         let profile = if !login.is_empty() { profile_url(self.platform, &login) } else { None };
-        let banned = self.data.as_ref().and_then(|d| d.ban.clone());
+        let hist = mod_history::snapshot(&self.sk, &self.ukey());
+        // Helix only answers the ban list for the broadcaster; everyone else's card goes by what this app saw
+        let banned = self.data.as_ref().and_then(|d| d.ban.clone()).or_else(|| {
+            if !is_twitch || self.data.as_ref().map(|d| d.ban_known).unwrap_or(false) {
+                return None;
+            }
+            match ban_state(&hist.entries, chrono::Utc::now().timestamp_millis())? {
+                BanState::Banned { reason, .. } => Some((true, None, reason)),
+                BanState::TimedOut { until, reason, .. } => Some((false, chrono::DateTime::from_timestamp_millis(until).map(|d| d.to_rfc3339()), reason)),
+            }
+        });
         let caps = &ctx.caps;
         let reach = &ctx.reach;
         let show_twitch_mod = is_twitch && (reach.ban || reach.timeout || reach.warn || banned.is_some()) && (caps.ban || caps.warn);
@@ -543,45 +778,98 @@ impl Render for UserCardView {
             .font_family(theme::FONT)
             .child(header);
 
-        // ---- account info (Twitch: /api/mod/user, Kick: kick.com's channel-user lookup)
-        if is_twitch || self.platform == Platform::Kick {
-            let mut info = div().flex().flex_col().gap(px(4.)).border_b_1().border_color(c(theme::LINE)).p(px(10.)).text_color(c(theme::MUTED));
-            if self.relogin {
-                info = info.child(div().text_color(c(theme::AMBER_300)).child("Log in again to enable mod tools."));
-            } else if self.loading {
-                info = info.child(div().h(px(12.)).w(px(160.)).rounded(px(4.)).bg(a(theme::WHITE, 0.1))).child(div().h(px(12.)).w(px(128.)).rounded(px(4.)).bg(a(theme::WHITE, 0.1)));
-            } else if let Some(d) = &self.data {
-                info = info.child(div().child(SharedString::from(format!("Account created {}", local_date(&d.created_at)))));
+        // ---- badges, from the person's newest line here
+        if !ctx.badges.is_empty() {
+            let mut grid = div().flex().flex_wrap().gap(px(6.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
+            for (i, b) in ctx.badges.iter().enumerate() {
+                let face: AnyElement = match &b.url {
+                    Some(u) => ImageBox { url: u.clone().into(), side: BADGE_SIDE, radius: 3.0 }.into_any_element(),
+                    None => div()
+                        .h(px(BADGE_SIDE))
+                        .min_w(px(BADGE_SIDE))
+                        .px(px(3.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .bg(a(b.color, 0.2))
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(token(b.color))
+                        .child(SharedString::from(b.glyph.clone()))
+                        .into_any_element(),
+                };
+                grid = grid.child(div().id(("badge", i)).flex_none().child(face).tooltip(crate::layout::ui::tip(b.title.clone())));
+            }
+            card = card.child(grid);
+        }
+
+        // ---- account info (Twitch: /api/mod/user, Kick: kick.com's channel-user lookup) and what the chat shows
+        let info_line = |ic: &'static str, text: String| div().flex().items_center().gap(px(6.)).child(div().flex_none().text_color(c(theme::FAINT)).child(icon(ic, 13.))).child(div().min_w_0().child(SharedString::from(text)));
+        let chip = |label: String, fg: u32, border: u32| div().flex().child(div().rounded_full().border_1().border_color(a(border, 0.3)).bg(a(border, 0.1)).px(px(8.)).text_size(px(11.)).line_height(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(c(fg)).child(SharedString::from(label)));
+        let has_account = is_twitch || self.platform == Platform::Kick;
+        let mut info = div().flex().flex_col().gap(px(4.)).border_b_1().border_color(c(theme::LINE)).p(px(10.)).text_color(c(theme::MUTED));
+        let mut info_rows = 0;
+        if has_account && self.relogin {
+            info = info.child(div().text_color(c(theme::AMBER_300)).child("Log in again to enable mod tools."));
+            info_rows += 1;
+        } else if has_account && self.loading {
+            info = info.child(div().h(px(12.)).w(px(160.)).rounded(px(4.)).bg(a(theme::WHITE, 0.1))).child(div().h(px(12.)).w(px(128.)).rounded(px(4.)).bg(a(theme::WHITE, 0.1)));
+            info_rows += 1;
+        } else if has_account {
+            if let Some(d) = &self.data {
+                if !d.created_at.is_empty() {
+                    info = info.child(info_line(icons::CLOCK, format!("Account created on {}", long_date(&d.created_at))));
+                    info_rows += 1;
+                }
                 // "Not following" only when we actually confirmed it: a failed lookup omits the line.
                 if d.followed_at.is_some() || !d.follow_error {
-                    info = info.child(div().child(SharedString::from(match &d.followed_at {
-                        Some(f) => format!("Following since {}", local_date(f)),
+                    info = info.child(info_line(icons::STAR, match &d.followed_at {
+                        Some(f) => format!("Following since {}", long_date(f)),
                         None => "Not following".to_string(),
-                    })));
+                    }));
+                    info_rows += 1;
                 }
-                if let Some((permanent, expires, reason)) = &d.ban {
-                    let chip = if *permanent {
-                        div().rounded_full().border_1().border_color(a(theme::RED_500, 0.3)).bg(a(theme::RED_500, 0.1)).px(px(8.)).text_size(px(11.)).line_height(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::RED_300)).child(SharedString::from(format!("Banned{}", if reason.is_empty() { String::new() } else { format!(": {reason}") })))
-                    } else {
-                        div().rounded_full().border_1().border_color(a(theme::AMBER_500, 0.3)).bg(a(theme::AMBER_500, 0.1)).px(px(8.)).text_size(px(11.)).line_height(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::AMBER_400)).child(SharedString::from(format!("Timed out until {}", expires.as_deref().map(local_time).unwrap_or_else(|| "?".into()))))
-                    };
-                    info = info.child(div().flex().child(chip));
-                } else if let Some(e) = &d.ban_error {
-                    info = info.child(div().text_color(c(theme::FAINT)).child(SharedString::from(format!("Ban status unknown: {e}"))));
-                }
-                if let Some(s) = &ctx.suspicious {
-                    let det = suspicious_details(s);
-                    info = info.child(
-                        div().rounded(px(4.)).border_1().border_color(a(theme::ORANGE_500, 0.3)).bg(a(theme::ORANGE_500, 0.1)).px(px(8.)).py(px(4.)).text_color(c(theme::ORANGE_300)).child(SharedString::from(format!(
-                            "Twitch flags this user: {}{}",
-                            if s.status == "restricted" { "restricted" } else { "monitored" },
-                            if det.is_empty() { String::new() } else { format!(" - {det}") }
-                        ))),
-                    );
-                }
-            } else {
-                info = info.child(div().text_color(c(theme::FAINT)).child("No account info."));
             }
+        }
+        if let Some(sb) = &ctx.sub {
+            let months = match sb.months {
+                Some(1) => " for 1 month".to_string(),
+                Some(n) if n > 1 => format!(" for {n} months"),
+                _ => String::new(),
+            };
+            info = info.child(info_line(icons::TAG, format!("Tier {} - Subscribed{months}", sb.tier)));
+            info_rows += 1;
+        }
+        if let Some((permanent, expires, reason)) = &banned {
+            info = info.child(if *permanent {
+                chip(format!("Banned{}", if reason.is_empty() { String::new() } else { format!(": {reason}") }), theme::RED_300, theme::RED_500)
+            } else {
+                chip(format!("Timed out until {}", expires.as_deref().map(local_time).unwrap_or_else(|| "?".into())), theme::AMBER_400, theme::AMBER_500)
+            });
+            info_rows += 1;
+        } else if let Some(e) = self.data.as_ref().and_then(|d| d.ban_error.as_ref()) {
+            info = info.child(div().text_color(c(theme::FAINT)).child(SharedString::from(format!("Ban status unknown: {e}"))));
+            info_rows += 1;
+        }
+        if has_account && !self.loading {
+            if let Some(s) = &ctx.suspicious {
+                let det = suspicious_details(s);
+                info = info.child(
+                    div().rounded(px(4.)).border_1().border_color(a(theme::ORANGE_500, 0.3)).bg(a(theme::ORANGE_500, 0.1)).px(px(8.)).py(px(4.)).text_color(c(theme::ORANGE_300)).child(SharedString::from(format!(
+                        "Twitch flags this user: {}{}",
+                        if s.status == "restricted" { "restricted" } else { "monitored" },
+                        if det.is_empty() { String::new() } else { format!(" - {det}") }
+                    ))),
+                );
+                info_rows += 1;
+            }
+        }
+        if has_account && !self.loading && !self.relogin && self.data.is_none() && info_rows == 0 {
+            info = info.child(div().text_color(c(theme::FAINT)).child("No account info."));
+            info_rows += 1;
+        }
+        if info_rows > 0 {
             card = card.child(info);
         }
 
@@ -812,63 +1100,182 @@ impl Render for UserCardView {
             );
         }
 
-        // ---- recent messages
-        let mut recent = div()
+        // ---- tabs: messages, then what this app saw done to the person, then comments
+        let kind_count = |k: Kind| hist.entries.iter().filter(|e| e.kind == k).count();
+        let counts = [
+            (Tab::Messages, "Messages", ctx.recent_total),
+            (Tab::Warnings, "Warnings", kind_count(Kind::Warn)),
+            (Tab::Timeouts, "Timeouts", kind_count(Kind::Timeout)),
+            (Tab::Bans, "Bans", kind_count(Kind::Ban)),
+            (Tab::Comments, "Comments", hist.comments.len()),
+        ];
+        let mut strip = div().flex().flex_wrap().border_b_1().border_color(c(theme::LINE)).px(px(4.));
+        for (i, (tab, label, n)) in counts.into_iter().enumerate() {
+            let on = self.tab == tab;
+            strip = strip.child(
+                div()
+                    .id(("card-tab", i))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(6.))
+                    .py(px(6.))
+                    .border_b_2()
+                    .border_color(if on { c(theme::ACCENT) } else { a(theme::WHITE, 0.0) })
+                    .text_size(px(11.))
+                    .line_height(px(16.))
+                    .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                    .text_color(if on { c(theme::TEXT) } else { c(theme::MUTED) })
+                    .when(!on, |d| d.hover(|s| s.text_color(c(theme::TEXT))))
+                    .cursor_pointer()
+                    .child(label)
+                    .child(div().text_color(c(theme::FAINT)).child(SharedString::from(n.to_string())))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.tab = tab;
+                        this.tab_scroll.set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    })),
+            );
+        }
+        card = card.child(strip);
+
+        if self.tab == Tab::Comments {
+            let can_add = !self.comment_in.read(cx).text().trim().is_empty();
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(10.))
+                    .pt(px(10.))
+                    .child(div().min_w_0().flex_1().child(self.comment_in.clone()))
+                    .child(btn("comment-add", "Add", BtnOpts { primary: true, disabled: !can_add, ..Default::default() }).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.add_comment(cx)))),
+            );
+        }
+
+        let mut body = div()
             .id("card-recent")
             .when(!self.user_sized, |d| d.max_h(px(208.)))
             .when(self.user_sized, |d| d.flex_1().min_h(px(0.)))
             .overflow_y_scroll()
-            .p(px(10.))
-            .child(Self::heading(&format!("Recent messages in {}", icons::platform_label(self.platform))));
-        if ctx.recent.is_empty() {
-            recent = recent.child(div().text_color(c(theme::FAINT)).child("No recent messages."));
-        } else {
-            let mut list = div().flex().flex_col().gap(px(4.)).text_color(c(theme::MUTED));
-            for (i, r) in ctx.recent.iter().enumerate() {
-                let deleted = match &r.body {
-                    RowBody::Msg(m) => m.deleted,
-                    RowBody::Rumble(m) => m.deleted,
-                    RowBody::Kick(m) => m.deleted,
-                    _ => false,
+            .track_scroll(&self.tab_scroll)
+            .p(px(10.));
+        let empty = |t: &str| div().text_color(c(theme::FAINT)).child(SharedString::from(t.to_string()));
+        match self.tab {
+            Tab::Messages => {
+                if ctx.recent.is_empty() {
+                    body = body.child(empty("No recent messages."));
+                } else {
+                    let mut list = div().flex().flex_col().gap(px(4.)).text_color(c(theme::MUTED));
+                    for (i, r) in ctx.recent.iter().enumerate() {
+                        let deleted = match &r.body {
+                            RowBody::Msg(m) => m.deleted,
+                            RowBody::Rumble(m) => m.deleted,
+                            RowBody::Kick(m) => m.deleted,
+                            _ => false,
+                        };
+                        let can_del = matches!(&r.body, RowBody::Msg(_)) && ctx.caps.delete && ctx.reach.delete && !deleted;
+                        let mut line = div()
+                            .id(("recent", i))
+                            .group("recent-row")
+                            .relative()
+                            .flex()
+                            .items_start()
+                            .gap(px(6.))
+                            .when(deleted, |d| d.opacity(0.5))
+                            .child(div().flex_none().text_color(c(theme::FAINT)).child(SharedString::from(fmt_time(r.ts, false))))
+                            .child(div().min_w_0().flex_1().child(self.recent_text(r, &ctx)));
+                        if can_del {
+                            if let RowBody::Msg(m) = &r.body {
+                                let (sk, mid) = (self.sk.clone(), m.id.clone());
+                                line = line.child(
+                                    div()
+                                        .id(("recent-del", i))
+                                        .flex_none()
+                                        .rounded(px(2.))
+                                        .p(px(2.))
+                                        .text_color(c(theme::FAINT))
+                                        .opacity(0.)
+                                        .group_hover("recent-row", |s| s.opacity(1.))
+                                        .hover(|s| s.text_color(c(theme::RED_400)))
+                                        .child(icon(icons::TRASH, 14.))
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                            let (sk, mid) = (sk.clone(), mid.clone());
+                                            let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::Delete { sk, id: mid }, cx));
+                                            cx.notify();
+                                        })),
+                                );
+                            }
+                        }
+                        list = list.child(line);
+                    }
+                    body = body.child(list);
+                }
+            }
+            Tab::Warnings | Tab::Timeouts | Tab::Bans => {
+                let (kinds, none): (&[Kind], &str) = match self.tab {
+                    Tab::Warnings => (&[Kind::Warn], "No warnings seen."),
+                    Tab::Timeouts => (&[Kind::Timeout, Kind::Untimeout], "No timeouts seen."),
+                    _ => (&[Kind::Ban, Kind::Unban], "No bans seen."),
                 };
-                let can_del = matches!(&r.body, RowBody::Msg(_)) && ctx.caps.delete && ctx.reach.delete && !deleted;
-                let mut line = div()
-                    .id(("recent", i))
-                    .group("recent-row")
-                    .relative()
-                    .flex()
-                    .items_start()
-                    .gap(px(6.))
-                    .when(deleted, |d| d.opacity(0.5))
-                    .child(div().flex_none().text_color(c(theme::FAINT)).child(SharedString::from(fmt_time(r.ts, false))))
-                    .child(div().min_w_0().flex_1().child(self.recent_text(r, &ctx)));
-                if can_del {
-                    if let RowBody::Msg(m) = &r.body {
-                        let (sk, mid) = (self.sk.clone(), m.id.clone());
-                        line = line.child(
+                let rows: Vec<&Entry> = hist.entries.iter().rev().filter(|e| kinds.contains(&e.kind)).collect();
+                if rows.is_empty() {
+                    body = body.child(empty(none));
+                } else {
+                    body = body.child(div().flex().flex_col().gap(px(8.)).children(rows.into_iter().map(history_row)));
+                }
+            }
+            Tab::Comments => {
+                if hist.comments.is_empty() {
+                    body = body.child(empty("No comments yet."));
+                } else {
+                    let me = if ctx.me.is_empty() { "me".to_string() } else { ctx.me.clone() };
+                    let mut list = div().flex().flex_col().gap(px(8.));
+                    for (i, cm) in hist.comments.iter().rev().enumerate() {
+                        let mine = cm.by.eq_ignore_ascii_case(&me);
+                        let (id, by) = (cm.ts, cm.by.clone());
+                        let (sk, uk) = (self.sk.clone(), self.ukey());
+                        list = list.child(
                             div()
-                                .id(("recent-del", i))
-                                .flex_none()
-                                .rounded(px(2.))
-                                .p(px(2.))
-                                .text_color(c(theme::FAINT))
-                                .opacity(0.)
-                                .group_hover("recent-row", |s| s.opacity(1.))
-                                .hover(|s| s.text_color(c(theme::RED_400)))
-                                .child(icon(icons::TRASH, 14.))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                                    let (sk, mid) = (sk.clone(), mid.clone());
-                                    let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::Delete { sk, id: mid }, cx));
-                                    cx.notify();
-                                })),
+                                .flex()
+                                .items_start()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(div().text_color(c(theme::TEXT)).child(SharedString::from(cm.text.clone())))
+                                        .child(div().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(format!("{} - {}", cm.by, fmt_stamp(cm.ts))))),
+                                )
+                                .when(mine, |d| {
+                                    d.child(
+                                        div()
+                                            .id(("comment-del", i))
+                                            .flex_none()
+                                            .rounded(px(2.))
+                                            .p(px(2.))
+                                            .text_color(c(theme::FAINT))
+                                            .hover(|s| s.text_color(c(theme::RED_400)))
+                                            .cursor_pointer()
+                                            .child(icon(icons::TRASH, 14.))
+                                            .on_click(cx.listener(move |_, _: &ClickEvent, _w, cx| {
+                                                mod_history::delete_comment(&sk, &uk, id, &by);
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
                         );
                     }
+                    body = body.child(list);
                 }
-                list = list.child(line);
+                body = body.child(div().mt(px(10.)).text_size(px(11.)).text_color(c(theme::FAINT)).child("Only visible in Agu Chat on this PC."));
             }
-            recent = recent.child(list);
         }
-        card = card.child(recent);
+        if matches!(self.tab, Tab::Warnings | Tab::Timeouts | Tab::Bans) {
+            body = body.child(div().mt(px(10.)).text_size(px(11.)).text_color(c(theme::FAINT)).child("Recorded by Agu Chat from what it has seen on this PC."));
+        }
+        card = card.child(body);
 
         let _ = (MouseButton::Left, entity);
         div()
@@ -912,5 +1319,28 @@ impl Render for UserCardView {
                     .child(card),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_tier_and_months_come_from_the_badges() {
+        assert_eq!(sub_info("subscriber/3012,premium/1", "subscriber/14"), Some(SubInfo { tier: 3, months: Some(14) }));
+        assert_eq!(sub_info("subscriber/0", "subscriber/70"), Some(SubInfo { tier: 1, months: Some(70) }));
+        assert_eq!(sub_info("subscriber/2000", ""), Some(SubInfo { tier: 2, months: None }));
+        assert_eq!(sub_info("founder/0", "founder/9"), Some(SubInfo { tier: 1, months: Some(9) }));
+        assert_eq!(sub_info("moderator/1,subscribers-club/1", ""), None);
+    }
+
+    #[test]
+    fn dates_and_durations_read_naturally() {
+        assert_eq!([ordinal(1), ordinal(2), ordinal(3), ordinal(4), ordinal(11), ordinal(12), ordinal(21), ordinal(30)], ["1st", "2nd", "3rd", "4th", "11th", "12th", "21st", "30th"]);
+        assert_eq!(fmt_secs(600), "10m");
+        assert_eq!(fmt_secs(90), "1m 30s");
+        assert_eq!(fmt_secs(604_800), "1w");
+        assert_eq!(fmt_secs(0), "0s");
     }
 }
