@@ -392,6 +392,10 @@ impl AguApp {
     /// A whisper arrived from `login`. Without a tab for the conversation, one opens in the background, marked
     /// like any tab with news: it never takes the selection or the focus.
     fn on_whisper(&mut self, login: &str, cx: &mut Context<Self>) {
+        // an ignored user's whispers are kept out of sight like their chat: no tab pops up for them
+        if crate::chat::ignores::is_user_ignored(&self.settings.ignored_users, Platform::Twitch, login) {
+            return;
+        }
         let channel = whisper::channel_for(login);
         let open = self.layout.tabs.iter().any(|t| leaves(t.root.as_ref()).iter().any(|l| l.sources.iter().any(|s| s.platform == Platform::Twitch && s.channel == channel)));
         if open {

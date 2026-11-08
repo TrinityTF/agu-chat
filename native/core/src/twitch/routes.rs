@@ -368,7 +368,10 @@ async fn caps(req: RouteReq) -> R {
 }
 
 async fn mod_user(req: RouteReq) -> R {
-    let n = need(&req, None).await?;
+    let whisper = super::whisper::parse(&req.source.channel).is_some();
+    if whisper && auth::current().is_none() {
+        return Err(login_required().into());
+    }
     let Some(id) = req.query_get("id").filter(|s| !s.is_empty()).map(String::from) else { return Err(local(400, "missing id")) };
     let page = helix_get("/users", q! {"id" => id.clone()}).await?;
     let u = page["data"].get(0).filter(|u| !u.is_null());
@@ -376,6 +379,11 @@ async fn mod_user(req: RouteReq) -> R {
         Some(u) => json!({"id": u["id"], "login": u["login"], "displayName": u["display_name"], "avatar": u["profile_image_url"].as_str().unwrap_or(""), "createdAt": u["created_at"]}),
         None => Value::Null,
     };
+    // a whisper conversation has no channel: the account itself, no follow or ban status
+    if whisper {
+        return ok(json!({"user": user, "followedAt": Value::Null}));
+    }
+    let n = need(&req, None).await?;
 
     // followedAt / ban only answer for a broadcaster or moderator, and need their scopes. A refusal is
     // reported as followError / banError so the card can tell "not following" apart from "could not check".
