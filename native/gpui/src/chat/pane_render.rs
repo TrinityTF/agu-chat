@@ -91,8 +91,10 @@ impl Element for ImageBox {
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
         let imgs = cx.global::<ImagesHandle>().clone();
         if let Some(img) = imgs.0.get(&self.url, self.side, self.side, window.scale_factor()) {
-            let s = (self.side / img.w as f32).min(self.side / img.h as f32);
-            let (w, h) = (img.w as f32 * s, img.h as f32 * s);
+            // a `#square` URL holds the middle square of the picture (images.rs), whatever its natural size
+            let (nw, nh) = if self.url.ends_with(super::images::SQUARE) { (1.0, 1.0) } else { (img.w as f32, img.h as f32) };
+            let s = (self.side / nw).min(self.side / nh);
+            let (w, h) = (nw * s, nh * s);
             let r = Bounds::new(point(bounds.origin.x + px((self.side - w) / 2.0), bounds.origin.y + px((self.side - h) / 2.0)), size(px(w), px(h)));
             let idx = imgs.0.frame(&img, window, cx);
             let _ = window.paint_image(r, gpui::Corners::all(px(self.radius)), img.gpu.clone(), idx, false);

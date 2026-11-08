@@ -32,17 +32,24 @@ pub struct Images {
 pub struct ImagesHandle(pub Rc<Images>);
 impl Global for ImagesHandle {}
 
-fn upload(_url: &str, d: &Decoded) -> (Arc<RenderImage>, u64) {
+/// A URL ending in this fragment is drawn center-cropped to a square (`object-fit: cover` in a square box, e.g. a
+/// user card avatar). The fragment never reaches the server, and the cropped copy is cached on its own.
+pub const SQUARE: &str = "#square";
+
+fn upload(url: &str, d: &Decoded) -> (Arc<RenderImage>, u64) {
     let mut frames = Vec::with_capacity(d.frames.len());
     let mut bytes = 0u64;
+    let side = d.fw.min(d.fh);
+    let crop = url.ends_with(SQUARE) && d.fw != d.fh && side > 0;
     for (rgba, ms) in &d.frames {
         // RGBA -> BGRA (what the renderer samples)
         let mut buf = rgba.clone();
         for px in buf.chunks_exact_mut(4) {
             px.swap(0, 2);
         }
-        bytes += buf.len() as u64;
         let img = RgbaImage::from_raw(d.fw, d.fh, buf).expect("frame size");
+        let img = if crop { image::imageops::crop_imm(&img, (d.fw - side) / 2, (d.fh - side) / 2, side, side).to_image() } else { img };
+        bytes += img.as_raw().len() as u64;
         frames.push(Frame::from_parts(img, 0, 0, Delay::from_numer_denom_ms(*ms, 1)));
     }
     (Arc::new(RenderImage::new(frames)), bytes)

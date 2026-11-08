@@ -373,7 +373,10 @@ impl UserCardView {
 
     fn avatar(src: &str, name: &str) -> AnyElement {
         if !src.is_empty() {
-            return ImageBox { url: src.to_string().into(), side: 36.0, radius: 18.0 }.into_any_element();
+            // a square with softly rounded corners on every platform; a non-square picture (common on Kick) is
+            // cropped to its middle instead of shrunk into the box
+            let url = if src.ends_with(super::images::SQUARE) { src.to_string() } else { format!("{src}{}", super::images::SQUARE) };
+            return ImageBox { url: url.into(), side: 36.0, radius: 6.0 }.into_any_element();
         }
         div()
             .size(px(36.))
@@ -381,7 +384,7 @@ impl UserCardView {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_full()
+            .rounded(px(6.))
             .bg(c(theme::RAISED_2))
             .text_size(px(14.))
             .line_height(px(20.))
