@@ -18,7 +18,6 @@ the same look and every feature and fix from the Electron version, and a lot lig
 - **Memory:** about 120 MB with two busy chats open, where the Electron version used 580 MB or more.
 - **CPU:** a fraction of what Electron needed, so it stays quiet next to a game or a stream.
 - **Download:** a 7 MB installer instead of 122 MB.
-- **Starts** almost instantly.
 
 Install it over the Electron version: your settings and logins carry over.
 
