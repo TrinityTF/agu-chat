@@ -1,6 +1,6 @@
 [package]
 name = "agu-chat-gpui"
-version = "0.1.0-beta"
+version = "0.1.1"
 edition = "2021"
 
 [[bin]]

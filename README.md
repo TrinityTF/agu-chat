@@ -8,7 +8,7 @@ chats side by side, or merge several platforms into one chat.
 **Download:** grab `Agu-Chat-Setup-<version>-x64.exe` from [Releases](https://github.com/TrinityTF/agu-chat/releases)
 and run it. Windows 10 or 11, 64-bit. Agu Chat keeps itself up to date after that.
 
-> This is a beta (version 0.1.0-beta). Expect rough edges, and please report bugs in [Issues](https://github.com/TrinityTF/agu-chat/issues).
+> This is a beta. Expect rough edges, and please report bugs in [Issues](https://github.com/TrinityTF/agu-chat/issues).
 
 ## Features
 
