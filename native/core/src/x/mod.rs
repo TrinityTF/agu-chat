@@ -14,7 +14,7 @@
 //!    events wait (250 ms batches) while their authors' names are looked up (names.rs), and a message whose
 //!    author's username X does not give is dropped, never shown under a made-up name. Logged out, no stream is
 //!    read and the column says to log in (the broadcast itself is still found, so sending works as soon as the
-//!    login is there). A refused session (401/403) is an expired login (auth.rs).
+//!    login is there). A refused session (401) is an expired login (auth.rs).
 //!  * Sending: `POST /api/x/send`, x.com's own `sendLiveChatMutation` with the session, to the broadcast this
 //!    source reads. X's error text is passed on as is.
 //!

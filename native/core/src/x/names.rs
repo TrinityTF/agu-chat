@@ -152,14 +152,16 @@ pub async fn lookup_with(auth_token: &str, ct0: &str, ids: &[String]) -> Result<
 }
 
 /// Look up and cache the names of `ids` with the logged-in session (in calls of at most 100). A refused session
-/// is reported to the account (`mark_expired`) as well as returned.
+/// (401) is reported to the account (`mark_expired`) as well as returned.
 pub async fn fetch_names(ids: &[String]) -> Result<(), ApiError> {
     let Some(rec) = auth::session() else { return Err(ApiError { status: 401, message: auth::LOGGED_OUT_REASON.into() }) };
     for chunk in ids.chunks(MAX_IDS_PER_CALL) {
         match lookup_with(&rec.auth_token, &rec.ct0, chunk).await {
             Ok(found) => CACHE.lock().unwrap().record(chunk, found, now_ms()),
             Err(e) => {
-                if e.is_auth() {
+                // Only 401 means the session is gone: x.com also answers 403 to requests its anti-bot checks
+                // dislike, which must not log the user out.
+                if e.status == 401 {
                     auth::mark_expired();
                 }
                 return Err(e);
