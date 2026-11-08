@@ -113,6 +113,13 @@ fn parse_mod_user(v: &Value) -> ModUser {
     }
 }
 
+/// Kick's own stand-in picture for an account without one (kick.com serves default-avatar-1..6). Which of the six
+/// kick.com picks is not public; the user id keeps it stable per user here.
+fn kick_default_avatar(user_id: &str) -> String {
+    let n = user_id.parse::<u64>().map(|id| id % 6 + 1).unwrap_or(1);
+    format!("https://kick.com/img/default-profile-pictures/default-avatar-{n}.webp")
+}
+
 pub struct UserCardView {
     pane: WeakEntity<ChatPane>,
     pub id: String,
@@ -123,6 +130,8 @@ pub struct UserCardView {
     relogin: bool,
     loading: bool,
     reason_mode: bool,
+    /// Kick: the Ban button was clicked once and now asks to confirm in the card.
+    kick_ban_ask: bool,
     reason_in: Entity<TextInput>,
     busy: bool,
     warn_open: bool,
@@ -179,6 +188,7 @@ impl UserCardView {
             data: None,
             relogin: false,
             reason_mode: false,
+            kick_ban_ask: false,
             reason_in,
             busy: false,
             warn_open: false,
@@ -242,11 +252,26 @@ impl UserCardView {
         cx.notify();
     }
 
-/// Kick: avatar, account age, follow date and ban from kick.com (core `GET /api/kick/user`). A failure just
+    /// After a Kick mod action: read the user's state again once Kick has applied it, so Ban / Unban / Untimeout
+    /// follows.
+    fn reload_soon(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for wait in [1500u64, 3500] {
+                cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                if this.update(cx, |v, cx| v.load_kick(cx)).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Kick: avatar, account age, follow date and ban from kick.com (core `GET /api/kick/user`). A failure just
     /// leaves the card without them.
     fn load_kick(&mut self, cx: &mut Context<Self>) {
         let Some(ctx) = self.pane_ctx(cx) else { return };
-        self.loading = true;
+        // a reload after a mod action keeps the card as it is until the new state arrives
+        self.loading = self.data.is_none();
         let bridge = cx.global::<Services>().bridge.clone();
         let name: String = self.user.name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
         cx.spawn(async move |this, cx| {
@@ -424,7 +449,10 @@ impl Render for UserCardView {
         let is_twitch = self.platform == Platform::Twitch;
         let login = self.data.as_ref().map(|d| d.login.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| self.user.login.clone());
         let display = self.data.as_ref().map(|d| d.display_name.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| self.user.name.clone());
-        let avatar_src = self.data.as_ref().map(|d| d.avatar.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| self.user.avatar.clone());
+        let mut avatar_src = self.data.as_ref().map(|d| d.avatar.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| self.user.avatar.clone());
+        if avatar_src.is_empty() && self.platform == Platform::Kick && !self.loading {
+            avatar_src = kick_default_avatar(&self.user.id);
+        }
         let profile = if !login.is_empty() { profile_url(self.platform, &login) } else { None };
         let banned = self.data.as_ref().and_then(|d| d.ban.clone());
         let caps = &ctx.caps;
@@ -512,8 +540,8 @@ impl Render for UserCardView {
             .font_family(theme::FONT)
             .child(header);
 
-        // ---- Twitch account info
-        if is_twitch {
+        // ---- account info (Twitch: /api/mod/user, Kick: kick.com's channel-user lookup)
+        if is_twitch || self.platform == Platform::Kick {
             let mut info = div().flex().flex_col().gap(px(4.)).border_b_1().border_color(c(theme::LINE)).p(px(10.)).text_color(c(theme::MUTED));
             if self.relogin {
                 info = info.child(div().text_color(c(theme::AMBER_300)).child("Log in again to enable mod tools."));
@@ -714,36 +742,48 @@ impl Render for UserCardView {
         }
         if self.platform == Platform::Kick && ctx.co_can_moderate && !self.user.id.is_empty() {
             if let Some(Row { body: RowBody::Kick(m), .. }) = last.as_deref() {
+                // ban state from the card lookup: None free (or unknown), Some(true) banned, Some(false) timed out
+                let state = self.data.as_ref().and_then(|d| d.ban.as_ref().map(|b| b.0));
                 let mut row = div().mb(px(8.)).flex().flex_wrap().gap(px(4.));
                 for (label, sec) in [("1m", 60u32), ("5m", 300), ("10m", 600), ("1h", 3600), ("24h", 86400), ("7d", 604800)] {
                     let (sk, m) = (self.sk.clone(), m.clone());
                     row = row.child(Self::ladder_btn(format!("k-{label}"), label, false).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         let (sk, m) = (sk.clone(), m.clone());
                         let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::KickMod { sk, action: "timeout", msg: Box::new(m), seconds: Some(sec) }, cx));
+                        this.reload_soon(cx);
                     })));
                 }
                 let (sk1, m1, sk2, m2) = (self.sk.clone(), m.clone(), self.sk.clone(), m.clone());
-                card = card.child(
-                    div()
-                        .border_b_1()
-                        .border_color(c(theme::LINE))
-                        .p(px(10.))
-                        .child(Self::heading("Timeout"))
-                        .child(row)
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(6.))
-                                .child(btn("k-ban", "Ban", BtnOpts::danger()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                                    let (sk, m) = (sk1.clone(), m1.clone());
-                                    let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::KickMod { sk, action: "ban", msg: Box::new(m), seconds: None }, cx));
-                                })))
-                                .child(btn("k-unban", "Unban", BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                                    let (sk, m) = (sk2.clone(), m2.clone());
-                                    let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::KickMod { sk, action: "unban", msg: Box::new(m), seconds: None }, cx));
-                                }))),
-                        ),
-                );
+                // One button for the user's state: Ban when free, Unban when banned, Untimeout when timed out (Kick
+                // lifts both with the same call). Ban asks once more here in the card.
+                let buttons = div().flex().gap(px(6.));
+                let buttons = match state {
+                    Some(permanent) => buttons.child(btn("k-unban", if permanent { "Unban" } else { "Untimeout" }, BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let (sk, m) = (sk2.clone(), m2.clone());
+                        let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::KickMod { sk, action: "unban", msg: Box::new(m), seconds: None }, cx));
+                        this.reload_soon(cx);
+                    }))),
+                    None if self.kick_ban_ask => buttons
+                        .child(btn("k-ban-ok", "Confirm ban", BtnOpts::danger()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                            let (sk, m) = (sk1.clone(), m1.clone());
+                            this.kick_ban_ask = false;
+                            let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::KickMod { sk, action: "ban!", msg: Box::new(m), seconds: None }, cx));
+                            this.reload_soon(cx);
+                        })))
+                        .child(btn("k-ban-cancel", "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.kick_ban_ask = false;
+                            cx.notify();
+                        }))),
+                    None => buttons.child(btn("k-ban", "Ban", BtnOpts::danger()).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.kick_ban_ask = true;
+                        cx.notify();
+                    }))),
+                };
+                let mut section = div().border_b_1().border_color(c(theme::LINE)).p(px(10.));
+                if state != Some(true) {
+                    section = section.child(Self::heading("Timeout")).child(row);
+                }
+                card = card.child(section.child(buttons));
             }
         }
 

@@ -213,6 +213,8 @@ pub fn kick_card_user(u: &Value) -> Value {
         let b = &u["banned"];
         let expires = b["expires_at"].as_str().map(String::from);
         out["ban"] = json!({"permanent": b["permanent"].as_bool().unwrap_or(expires.is_none()), "expiresAt": expires, "reason": s(&b["reason"])});
+    } else if u["banned"].as_bool() == Some(true) {
+        out["ban"] = json!({"permanent": true, "expiresAt": Value::Null, "reason": ""});
     }
     out
 }

@@ -274,6 +274,16 @@ impl InlineContent {
         h
     }
 
+    /// The widest line at a width: what a `fit()` flow takes up among flex items.
+    pub fn width_at(&self, width: f32, window: &Window, cx: &App) -> f32 {
+        let imgs = cx.global::<ImagesHandle>().clone();
+        let epoch = epoch_of(cx);
+        if let Some(l) = self.cache.borrow().as_ref().filter(|l| (l.width - width).abs() < 0.01 && l.epoch == epoch) {
+            return l.used_w;
+        }
+        layout(self, width, window, &imgs, epoch).used_w
+    }
+
     /// Forget the cached layout (an image size became known).
     pub fn invalidate(&self) {
         *self.cache.borrow_mut() = None;
@@ -401,6 +411,12 @@ fn box_center(v: VAlign, h: f32, base_size: f32, ratio: f32, window: &Window) ->
         }
         VAlign::BottomAt(down) => down - h / 2.0,
     }
+}
+
+/// The width of plain text in the row font (a chip's label).
+pub fn plain_text_width(window: &Window, text: &str, size: f32, weight: FontWeight) -> f32 {
+    let font = text_font(weight, false);
+    window.text_system().shape_line(SharedString::from(text.to_string()), px(size), &[TextRun { len: text.len(), font, color: Hsla::default(), background_color: None, underline: None, strikethrough: None }], None).width.f()
 }
 
 fn base_metrics(window: &Window, size: f32) -> (f32, f32) {

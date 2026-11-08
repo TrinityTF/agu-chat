@@ -1623,9 +1623,14 @@ impl ChatPane {
             }
             BuiltRow::Feed(f) => ItemMetrics { h: 2.0 + fl(f.base * 0.9 * LINE_HEIGHT), mt: 0.0, mb: 0.0 },
             BuiltRow::Automod(a) => {
-                // py-1 + header line (the chip makes it 18.5) + body + the buttons / resolved line
+                // py-1 + header line (the chip makes it 18.5) + body + the buttons / resolved line. The header is a
+                // wrapping flex row (icon 14, the name flow, the chip): the chip drops to its own line, 6px below,
+                // when it does not fit after the name.
                 let w = width - 3.0 - 16.0;
-                let head = a.header.height_at(w, window, cx).max(18.5);
+                let name_w = (w - 14.0 - 6.0).max(1.0);
+                let chip_w = super::inline::plain_text_width(window, &a.chip, 10.0, gpui::FontWeight::NORMAL) + 12.0 + 2.0;
+                let fits = 14.0 + 6.0 + a.header.width_at(name_w, window, cx) + 6.0 + chip_w <= w;
+                let head = if fits { a.header.height_at(name_w, window, cx).max(18.5) } else { a.header.height_at(name_w, window, cx).max(14.0) + 6.0 + 18.5 };
                 let body = a.body.height_at(w, window, cx);
                 let tail = if a.status == "held" { if a.can_resolve { 4.0 + 19.95 } else { 0.0 } } else { 15.95 };
                 ItemMetrics { h: 8.0 + head + body + tail, mt: 1.0, mb: 1.0 }
