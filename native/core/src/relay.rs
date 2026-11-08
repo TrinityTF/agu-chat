@@ -278,8 +278,8 @@ mod tests {
     fn ctx() -> Arc<Ctx> {
         let dir = std::env::temp_dir().join(format!("agu-relay-{}", crate::util::uuid_v4()));
         let log = Arc::new(Logger::new(&dir, true));
-        let st = Store::open(dir, log.clone());
-        Arc::new(Ctx::new(st.settings.clone(), st.secrets.clone(), log, "t".into()))
+        let st = Store::open(dir.clone(), log.clone());
+        Arc::new(Ctx::new(st.settings.clone(), st.secrets.clone(), log, "t".into(), dir.clone()))
     }
 
     #[tokio::test(start_paused = true)]

@@ -24,6 +24,7 @@ use crate::chat::rows::ReplyTarget;
 use crate::chat::services::Services;
 use crate::icons::{self, icon};
 use crate::chat::ui_util::cbtn as btn;
+use crate::layout::tree::{is_whisper, short_name};
 use crate::layout::ui::BtnOpts;
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
@@ -214,6 +215,11 @@ impl SendBox {
         self.sources.iter().filter(|s| SENDABLE.contains(&s.source.platform) && s.can_send).collect()
     }
 
+    /// What "All chats" reaches: a whisper goes to one person, never along with a broadcast.
+    fn broadcast(&self) -> Vec<&SendSource> {
+        self.sendable().into_iter().filter(|s| !is_whisper(&s.source)).collect()
+    }
+
     /// A reply pins the target: its id only means something in the chat it came from.
     fn effective(&self) -> String {
         let sendable = self.sendable();
@@ -222,7 +228,7 @@ impl SendBox {
                 return s.sk.clone();
             }
         }
-        if self.target == ALL && sendable.len() > 1 {
+        if self.target == ALL && self.broadcast().len() > 1 {
             return ALL.into();
         }
         sendable.iter().find(|s| s.sk == self.target).or(sendable.first()).map(|s| s.sk.clone()).unwrap_or_default()
@@ -232,7 +238,7 @@ impl SendBox {
         let eff = self.effective();
         let sendable = self.sendable();
         if eff == ALL {
-            sendable
+            self.broadcast()
         } else {
             sendable.into_iter().filter(|s| s.sk == eff).collect()
         }
@@ -272,6 +278,7 @@ impl SendBox {
             return format!("Send to {}", sendable.iter().map(|s| icons::platform_label(s.source.platform)).collect::<Vec<_>>().join(" + "));
         }
         match self.single() {
+            Some(s) if is_whisper(&s.source) => format!("Whisper {}", short_name(&s.source)),
             Some(s) => format!("Message {}{}", if s.source.platform == Platform::Twitch { "#" } else { "" }, s.source.channel),
             None => "Message ".into(),
         }
@@ -348,7 +355,8 @@ impl SendBox {
         self.hist_idx = None;
         let inventory = self.inventory();
         let caps = self.single().filter(|s| s.source.platform == Platform::Twitch).map(|s| s.caps.clone());
-        let slash_ok = self.single().map(|s| s.source.platform == Platform::Twitch).unwrap_or(false);
+        // A whisper is plain text: "/" starts nothing there.
+        let slash_ok = self.single().map(|s| s.source.platform == Platform::Twitch && !is_whisper(&s.source)).unwrap_or(false);
         let mut mentions = std::mem::take(&mut self.mentions);
         let chat_cache: std::cell::OnceCell<Vec<String>> = std::cell::OnceCell::new();
         let app: &gpui::App = cx;
@@ -489,7 +497,7 @@ impl SendBox {
 
         // Slash commands (everything but "/me") run against one Twitch source.
         if t.starts_with('/') && !is_me(&t) {
-            if let Some(s) = single.as_ref().filter(|s| s.source.platform == Platform::Twitch) {
+            if let Some(s) = single.as_ref().filter(|s| s.source.platform == Platform::Twitch && !is_whisper(&s.source)) {
                 let (cmd, rest) = parse_command(&t).unwrap_or_default();
                 if cmd == "clear" {
                     self.confirm = Some(Confirmed::Clear);
@@ -796,7 +804,7 @@ impl SendBox {
 
     fn target_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let eff = self.effective();
-        let sendable_n = self.sendable().len();
+        let sendable_n = self.broadcast().len();
         let mut menu = div()
             .id("target-menu")
             .absolute()
@@ -830,8 +838,8 @@ impl SendBox {
                     .text_color(if sel { c(theme::TEXT) } else { c(theme::MUTED) })
                     .when(can, |d| d.hover(|s| s.bg(c(theme::RAISED_2))))
                     .when(!can, |d| d.opacity(0.5))
-                    .child(icons::platform_icon(s.source.platform, 14., true))
-                    .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(s.source.channel.clone())))
+                    .child(icons::source_icon(&s.source, 14., true))
+                    .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(if is_whisper(&s.source) { short_name(&s.source) } else { s.source.channel.clone() })))
                     .when(!can, |d| d.child(div().text_size(px(10.)).text_color(c(theme::FAINT)).child("read-only")))
                     .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
                         if can {
@@ -874,7 +882,7 @@ impl Render for SendBox {
         self.aids(window, cx);
         let disabled = self.sendable().is_empty();
         let eff = self.effective();
-        let single_platform = self.single().map(|s| s.source.platform);
+        let single_source = self.single().map(|s| s.source.clone());
         let show_target = self.sources.iter().filter(|s| SENDABLE.contains(&s.source.platform)).count() > 1 || self.sendable().len() > 1;
         let has_text = !self.input.read(cx).text().trim().is_empty();
 
@@ -1025,7 +1033,11 @@ impl Render for SendBox {
                     .child(if eff == ALL {
                         div().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::BOLD).text_color(c(theme::MUTED)).child("All").into_any_element()
                     } else {
-                        icons::platform_icon(single_platform.unwrap_or(Platform::Twitch), 16., true).into_any_element()
+                        match &single_source {
+                            Some(s) => icons::source_icon(s, 16., true),
+                            None => icons::platform_icon(Platform::Twitch, 16., true),
+                        }
+                        .into_any_element()
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                         if !this.sendable().is_empty() {

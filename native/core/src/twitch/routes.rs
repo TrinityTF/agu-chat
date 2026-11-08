@@ -218,6 +218,11 @@ fn map_emote(e: &Value, template: Option<&Value>) -> Option<Value> {
 // ---------- routes ----------
 
 async fn send(req: RouteReq) -> R {
+    if let Some(login) = super::whisper::login_of(&req.source.channel) {
+        let text = slice_utf16(&bstr(&body_of(&req.body), "text"), 10_000);
+        super::whisper::send(&login, &text).await?;
+        return ok_default();
+    }
     let n = need(&req, Some("user:write:chat")).await?;
     let b = body_of(&req.body);
     let text = slice_utf16(&bstr(&b, "text"), 500);

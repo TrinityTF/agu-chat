@@ -3,12 +3,13 @@
 //! painted as a GPUI monochrome sprite. Like the React icons they have no colour of their own: they take the
 //! surrounding text colour (`currentColor`), resolved at paint time, so a parent's `hover(text_color)` recolours
 //! them exactly as it does in CSS. `.color(..)` overrides it (the platform brand colours).
-use agu_chat_core::protocol::Platform;
+use agu_chat_core::protocol::{Platform, SourceRef};
 use gpui::{
     App, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TransformationMatrix,
     Window, px, size,
 };
 
+use crate::layout::tree::is_whisper;
 use crate::theme;
 
 macro_rules! icons {
@@ -31,6 +32,7 @@ icons! {
     CHANNEL_POINTS => "channel-points",
     TWITCH => "platform-twitch", KICK => "platform-kick", YOUTUBE => "platform-youtube", RUMBLE => "platform-rumble",
     PLATFORM_X => "platform-x",
+    MAIL => "mail",
 }
 
 /// An icon element: a square of `size` px (`className="h-3.5 w-3.5"` = `icon(X, 14.0)`).
@@ -99,6 +101,19 @@ pub fn platform_icon(platform: Platform, size: f32, colored: bool) -> Icon {
     let i = icon(path, size);
     if colored {
         i.color(theme::c(theme::platform_color(platform)))
+    } else {
+        i
+    }
+}
+
+/// A source's mark: a whisper conversation shows an envelope in Twitch purple, everything else its platform's.
+pub fn source_icon(source: &SourceRef, size: f32, colored: bool) -> Icon {
+    if !is_whisper(source) {
+        return platform_icon(source.platform, size, colored);
+    }
+    let i = icon(MAIL, size);
+    if colored {
+        i.color(theme::c(theme::platform_color(Platform::Twitch)))
     } else {
         i
     }

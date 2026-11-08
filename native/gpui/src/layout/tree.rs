@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agu_chat_core::protocol::{Layout, Platform, SourceRef, SplitNode, Tab};
+use agu_chat_core::twitch::whisper;
 use serde_json::Value;
 
 /// `Extract<SplitNode, { kind: "leaf" }>`: a leaf's fields, as a value type that converts to/from `SplitNode`.
@@ -151,8 +152,21 @@ fn looks_like_url(c: &str) -> bool {
     false
 }
 
-/// Short display name of a source: a URL shows its last meaningful part.
+/// A Twitch whisper conversation (a reserved channel, see core's twitch/whisper.rs).
+pub fn is_whisper(s: &SourceRef) -> bool {
+    s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_some()
+}
+
+/// `is_whisper` for a source key (`twitch:whisper:bob`).
+pub fn is_whisper_key(sk: &str) -> bool {
+    sk.strip_prefix("twitch:").map(|c| whisper::login_of(c).is_some()).unwrap_or(false)
+}
+
+/// Short display name of a source: a URL shows its last meaningful part, a whisper conversation the other user.
 pub fn short_name(s: &SourceRef) -> String {
+    if let Some(login) = Some(s).filter(|s| s.platform == Platform::Twitch).and_then(|s| whisper::login_of(&s.channel)) {
+        return login;
+    }
     let c = s.channel.trim();
     if looks_like_url(c) {
         if let Some((host, v, parts)) = parse_url(c) {
@@ -160,6 +174,12 @@ pub fn short_name(s: &SourceRef) -> String {
         }
     }
     c.to_string()
+}
+
+/// A tab that holds nothing but whisper conversations.
+pub fn whisper_only(tab: &Tab) -> bool {
+    let all: Vec<SourceRef> = leaves(tab.root.as_ref()).into_iter().flat_map(|l| l.sources).collect();
+    !all.is_empty() && all.iter().all(is_whisper)
 }
 
 /// Every channel in the tab, once each ("EsfandTV" and "@esfandtv" count as one).
@@ -484,6 +504,22 @@ mod tests {
         assert_eq!(tab_title(&Tab { id: "t".into(), title: String::new(), root: None }, false), "New tab");
         let s = SourceRef { platform: Platform::Youtube, channel: "https://www.youtube.com/watch?v=abc123".into() };
         assert_eq!(short_name(&s), "abc123");
+    }
+
+    #[test]
+    fn a_whisper_conversation_is_named_after_the_other_user() {
+        let w = SourceRef { platform: Platform::Twitch, channel: "whisper:bob".into() };
+        assert!(is_whisper(&w));
+        assert!(is_whisper_key(&source_key(&w)));
+        assert!(!is_whisper_key("twitch:bob") && !is_whisper_key("kick:whisper:bob"));
+        assert!(!is_whisper(&SourceRef { platform: Platform::Kick, channel: "whisper:bob".into() }));
+        assert!(!is_whisper(&SourceRef { platform: Platform::Twitch, channel: "bob".into() }));
+        assert_eq!(short_name(&w), "bob");
+        let only = new_tab(Some(vec![w.clone()]));
+        assert_eq!(tab_title(&only, false), "bob");
+        assert!(whisper_only(&only));
+        assert!(!whisper_only(&new_tab(Some(vec![w, SourceRef { platform: Platform::Twitch, channel: "bob".into() }]))));
+        assert!(!whisper_only(&new_tab(None)));
     }
 
     #[test]
