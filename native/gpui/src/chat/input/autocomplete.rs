@@ -322,12 +322,13 @@ impl Mentions {
 
 /// `AutocompleteDropdown`: absolute bottom-full left-0 z-30 mb-1 max-h-56 w-72, rows px-2 py-1 text-xs.
 /// `on_pick` runs on mouse down (the input must not lose focus before the pick).
-pub fn autocomplete_dropdown(state: &AutoState, on_pick: impl Fn(usize, &mut gpui::Window, &mut gpui::App) + Clone + 'static) -> AnyElement {
+pub fn autocomplete_dropdown(state: &AutoState, scroll: &gpui::ScrollHandle, on_pick: impl Fn(usize, &mut gpui::Window, &mut gpui::App) + Clone + 'static) -> AnyElement {
     let is_cmd = state.mode == AutoMode::Cmd;
     let mut panel = div()
         .id("auto-dd")
         .max_h(px(224.))
         .overflow_y_scroll()
+        .track_scroll(scroll)
         .py(px(4.))
         .text_size(px(12.))
         .line_height(px(16.));
@@ -385,11 +386,12 @@ pub fn autocomplete_dropdown(state: &AutoState, on_pick: impl Fn(usize, &mut gpu
 }
 
 /// `MentionDropdown`: like the above, w-56, an "@" then the name.
-pub fn mention_dropdown(state: &MentionState, on_pick: impl Fn(usize, &mut gpui::Window, &mut gpui::App) + Clone + 'static) -> AnyElement {
+pub fn mention_dropdown(state: &MentionState, scroll: &gpui::ScrollHandle, on_pick: impl Fn(usize, &mut gpui::Window, &mut gpui::App) + Clone + 'static) -> AnyElement {
     let mut panel = div()
         .id("mention-dd")
         .max_h(px(224.))
         .overflow_y_scroll()
+        .track_scroll(scroll)
         .py(px(4.))
         .text_size(px(12.))
         .line_height(px(16.));

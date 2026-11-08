@@ -208,6 +208,10 @@ impl UserCardView {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        if self.platform == Platform::Kick && !self.user.name.is_empty() {
+            self.load_kick(cx);
+            return;
+        }
         if self.platform != Platform::Twitch || self.user.id.is_empty() {
             self.loading = false;
             return;
@@ -229,6 +233,27 @@ impl UserCardView {
                 } else if !r.ok {
                     v.toast(Some((format!("Couldn't load user info: {}", r.text()), true)), cx);
                 } else {
+                    v.data = Some(parse_mod_user(&r.body));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+/// Kick: avatar, account age, follow date and ban from kick.com (core `GET /api/kick/user`). A failure just
+    /// leaves the card without them.
+    fn load_kick(&mut self, cx: &mut Context<Self>) {
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        self.loading = true;
+        let bridge = cx.global::<Services>().bridge.clone();
+        let name: String = self.user.name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+        cx.spawn(async move |this, cx| {
+            let r = relay_api(&bridge, &ctx.source, &format!("/api/kick/user?name={name}"), None, None).await;
+            let _ = this.update(cx, |v, cx| {
+                v.loading = false;
+                if r.ok {
                     v.data = Some(parse_mod_user(&r.body));
                 }
                 cx.notify();

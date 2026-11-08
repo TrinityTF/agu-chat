@@ -1653,8 +1653,10 @@ impl ChatPane {
         let mod_list = self.mod_list.clone();
         let rule = self.rule_of(row);
         let rs = self.settings.clone();
-        // the setting alone decides (a merged co-chat used to force the marks on, so switching it off did nothing)
-        let show_platform = rs.show_platform_marks;
+        // The setting, and only in a split that mixes platforms: with one platform the mark says nothing. (A merged
+        // co-chat used to force the marks on regardless of the setting, so switching it off did nothing.)
+        let mixed = self.sources.iter().any(|s| s.platform != self.sources[0].platform);
+        let show_platform = rs.show_platform_marks && mixed;
         let ctx = RowCtx { rs: &rs, show_platform, mod_buttons: self.mod_mode && rs.show_mod_buttons, mod_list: &mod_list };
         let st = self.store.source(&row.sk);
         match &row.body {

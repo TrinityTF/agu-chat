@@ -61,6 +61,13 @@ pub enum SendBoxEvent {}
 
 pub struct SendBox {
     pane: WeakEntity<ChatPane>,
+    /// The autocomplete / mention lists' scroll: the selected row is kept in view as Tab / arrows move it.
+    auto_scroll: gpui::ScrollHandle,
+    mention_scroll: gpui::ScrollHandle,
+    /// The selection the lists were last scrolled to (start of the word, row): only a move scrolls, so the mouse
+    /// wheel still works on the list.
+    auto_at: Option<(usize, usize)>,
+    mention_at: Option<(usize, usize)>,
     pub input: Entity<TextInput>,
     picker_q: Entity<TextInput>,
     sources: Vec<SendSource>,
@@ -162,6 +169,10 @@ impl SendBox {
             skip_changed: 0,
             aids_done: false,
             prev_reply_id: None,
+            auto_scroll: gpui::ScrollHandle::new(),
+            mention_scroll: gpui::ScrollHandle::new(),
+            auto_at: None,
+            mention_at: None,
             prev_focused: false,
             _subs: subs,
         }
@@ -940,12 +951,27 @@ impl Render for SendBox {
         };
 
         let mut row = div().relative().flex().items_end().gap(px(6.)).p(px(6.));
+        // a list that closed starts over at its top when it opens again
+        if self.auto.is_none() {
+            self.auto_at = None;
+        }
+        if self.mentions.state.is_none() {
+            self.mention_at = None;
+        }
         if !disabled {
             if let Some(a) = &self.auto {
-                row = row.child(autocomplete_dropdown(a, pick_auto));
+                if self.auto_at != Some((a.start, a.idx)) {
+                    self.auto_at = Some((a.start, a.idx));
+                    self.auto_scroll.scroll_to_item(a.idx);
+                }
+                row = row.child(autocomplete_dropdown(a, &self.auto_scroll, pick_auto));
             }
             if let Some(m) = &self.mentions.state {
-                row = row.child(mention_dropdown(m, pick_mention));
+                if self.mention_at != Some((m.start, m.idx)) {
+                    self.mention_at = Some((m.start, m.idx));
+                    self.mention_scroll.scroll_to_item(m.idx);
+                }
+                row = row.child(mention_dropdown(m, &self.mention_scroll, pick_mention));
             }
             if self.picker_open {
                 row = row.child(self.picker_el(cx));

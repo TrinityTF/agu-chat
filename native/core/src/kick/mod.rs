@@ -73,7 +73,7 @@ impl PlatformModule for Kick {
     }
 
     fn routes(&self) -> Vec<(String, Handler)> {
-        vec![("POST /api/kick/send".into(), Arc::new(|req| Box::pin(route_send(req)))), ("GET /api/kick/caps".into(), Arc::new(|req| Box::pin(route_caps(req)))), ("POST /api/kick/action".into(), Arc::new(|req| Box::pin(route_action(req))))]
+        vec![("POST /api/kick/send".into(), Arc::new(|req| Box::pin(route_send(req)))), ("GET /api/kick/caps".into(), Arc::new(|req| Box::pin(route_caps(req)))), ("POST /api/kick/action".into(), Arc::new(|req| Box::pin(route_action(req)))), ("GET /api/kick/user".into(), Arc::new(|req| Box::pin(route_user(req))))]
     }
 
     fn accounts(&self) -> Option<Arc<dyn Accounts>> {
@@ -174,9 +174,9 @@ async fn is_mod_here(slug: &str, ua: &str) -> bool {
         }
     }
     let seen = MOD_SEEN.lock().unwrap().get(slug).copied().unwrap_or(false);
-    // kick.com files the slug with dashes where the display name has underscores
-    let user_slug = me.slug.to_lowercase().replace('_', "-");
-    match get_channel_user(slug, &user_slug, ua).await {
+    // This lookup takes the USERNAME (`Agu_TF`, case-insensitive); the slug (`agu-tf`) answers 404.
+    let who = if me.name.is_empty() { me.slug.clone() } else { me.name.clone() };
+    match get_channel_user(slug, &who, ua).await {
         Ok(u) => {
             let v = u.map(|u| channel_user_is_mod(&u)).unwrap_or(false) || seen;
             MOD_CACHE.lock().unwrap().insert(key, (now_ms(), v));
@@ -184,6 +184,37 @@ async fn is_mod_here(slug: &str, ua: &str) -> bool {
         }
         Err(_) => seen,
     }
+}
+
+/// GET /api/kick/user?name=<username>: what the user card shows for a Kick chatter, in the shape the Twitch card
+/// reads ({user: {login, displayName, avatar, createdAt}, followedAt, ban}). kick.com's channel-user lookup, keyed
+/// by USERNAME (the slug answers 404). No login needed.
+async fn route_user(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let name = req.query_get("name").unwrap_or("").trim().to_string();
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Ok(route_err(400, "bad name"));
+    }
+    let slug = parse_kick_source(&req.source.channel).unwrap_or_else(|| req.source.channel.clone());
+    match get_channel_user(&slug, &name, &req.ctx.user_agent).await {
+        Ok(Some(u)) => Ok(RouteRes { status: 200, body: kick_card_user(&u) }),
+        Ok(None) => Ok(route_err(404, "No such Kick user")),
+        Err(e) => Ok(route_err(502, &e)),
+    }
+}
+
+/// kick.com's channel-user answer -> the card's shape.
+pub fn kick_card_user(u: &Value) -> Value {
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let mut out = json!({
+        "user": {"login": s(&u["slug"]), "displayName": s(&u["username"]), "avatar": s(&u["profile_pic"]), "createdAt": s(&u["created_at"])},
+        "followedAt": u["following_since"].as_str().map(Value::from).unwrap_or(Value::Null),
+    });
+    if u["banned"].is_object() {
+        let b = &u["banned"];
+        let expires = b["expires_at"].as_str().map(String::from);
+        out["ban"] = json!({"permanent": b["permanent"].as_bool().unwrap_or(expires.is_none()), "expiresAt": expires, "reason": s(&b["reason"])});
+    }
+    out
 }
 
 /// GET /api/kick/caps: `connected` follows the login. canModerate (timeout, ban, unban) needs the moderation:ban scope and
