@@ -1,11 +1,14 @@
-//! The "Agu Chat - Sign in on twitch.tv" window: Microsoft Edge WebView2 (through `wry`) showing twitch.tv's own login page.
+//! The "Agu Chat - Log in to Twitch" window: Microsoft Edge WebView2 (through `wry`) showing twitch.tv's own pages.
 //!
 //! The same design as `x_login.rs` (a plain Win32 window, because GPUI's DirectComposition paints over child
-//! windows): the user types the password into twitch.tv's page, never into Agu Chat. When the `auth-token` cookie
-//! of twitch.tv shows up in the WebView2 cookie manager the window closes and the token goes to core in memory
-//! (`agu_chat_core::twitch::web`, which verifies it and stores it encrypted). The WebView2 profile lives in
-//! `<data>/webview-twitch` and is deleted once the WebView is gone; a folder left behind by a crash is removed at
-//! the next start. Closing the window without signing in is a cancel.
+//! windows): the user types the password into twitch.tv's page, never into Agu Chat. It is one window for the whole
+//! Twitch login (`agu_chat_core::twitch::signin`): twitch.tv's login page first, unless the profile already holds
+//! the session. When the `auth-token` cookie shows up it goes to core in memory (which verifies it and stores it
+//! encrypted) and the same window is pointed at the page that authorises the app (`show`). Core closes it when the
+//! login ends; closing it by hand is a cancel.
+//!
+//! The WebView2 profile lives in `<data>/webview-twitch` and keeps the twitch.tv session between logins, so the
+//! next login skips the sign-in page. `forget` (Twitch log out, an expired session) deletes it.
 use std::cell::RefCell;
 use std::num::NonZeroIsize;
 use std::path::PathBuf;
@@ -32,29 +35,35 @@ const LOGIN_URL: &str = "https://www.twitch.tv/login";
 const COOKIE_URL: &str = "https://www.twitch.tv";
 const POLL_MS: u32 = 500;
 const TIMER_ID: usize = 1;
-const WINDOW_TITLE: &str = "Agu Chat \u{2014} Sign in on twitch.tv";
-const MISSING_RUNTIME: &str = "The twitch.tv sign-in needs Microsoft Edge WebView2, which could not be started. Install the WebView2 Runtime from microsoft.com/edge/webview2 and try again.";
+/// Ticks (`POLL_MS` each) after which the window shows even though the profile has not answered.
+const SHOW_AFTER_TICKS: u32 = 6;
+const WINDOW_TITLE: &str = "Agu Chat \u{2014} Log in to Twitch";
+const MISSING_RUNTIME: &str = "The Twitch login needs Microsoft Edge WebView2, which could not be started. Install the WebView2 Runtime from microsoft.com/edge/webview2 and try again.";
 
 type Reply = oneshot::Sender<Result<Cookies, String>>;
 
 enum Req {
     Open(Reply),
+    /// the page to show, and the sender that is dropped when the window is gone
+    Show(String, oneshot::Sender<()>),
     Close,
+    Forget,
 }
 
-/// The open sign-in window's handle (0 = none), so a cancel from Settings can close it.
+/// The open window's handle (0 = none), so core can close it.
 static HWND_OPEN: AtomicIsize = AtomicIsize::new(0);
 
 fn profile_dir() -> PathBuf {
     agu_chat_core::default_data_dir().join("webview-twitch")
 }
 
-/// Delete the profile folder, retrying while the WebView2 processes let go of it.
+/// Delete the profile folder, retrying while the WebView2 processes let go of it. A window opened meanwhile is
+/// using the folder again, so that ends it.
 fn delete_profile_later() {
     let dir = profile_dir();
     std::thread::spawn(move || {
         for _ in 0..30 {
-            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+            if HWND_OPEN.load(Ordering::SeqCst) != 0 || !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
                 return;
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -62,27 +71,41 @@ fn delete_profile_later() {
     });
 }
 
-/// Hook the core's twitch.tv sign-in up to this window. Called once, with the real backend.
+/// Hook the core's Twitch login up to this window. Called once, with the real backend.
 pub fn install(cx: &mut App) {
-    // a profile a crashed run left behind
-    delete_profile_later();
     let (tx, mut rx) = mpsc::unbounded::<Req>();
-    let (open_tx, close_tx) = (tx.clone(), tx);
+    let (open_tx, show_tx, close_tx, forget_tx) = (tx.clone(), tx.clone(), tx.clone(), tx);
     auth::set_login_hook(LoginHook {
         open: Arc::new(move || {
             let (rtx, rrx) = oneshot::channel();
             let _ = open_tx.unbounded_send(Req::Open(rtx));
             Box::pin(async move { rrx.await.unwrap_or_else(|_| Err(String::new())) })
         }),
+        show: Arc::new(move |url| {
+            let (stx, srx) = oneshot::channel();
+            let _ = show_tx.unbounded_send(Req::Show(url, stx));
+            // resolves when the sender is dropped: the window is gone
+            Box::pin(async move {
+                let _ = srx.await;
+            })
+        }),
         close: Arc::new(move || {
             let _ = close_tx.unbounded_send(Req::Close);
+        }),
+        forget: Arc::new(move || {
+            let _ = forget_tx.unbounded_send(Req::Forget);
         }),
     });
     cx.spawn(async move |_cx| {
         while let Some(req) = rx.next().await {
             match req {
                 Req::Open(reply) => open(reply),
+                Req::Show(url, closed) => show(&url, closed),
                 Req::Close => close_window(),
+                Req::Forget => {
+                    close_window();
+                    delete_profile_later();
+                }
             }
         }
     })
@@ -129,7 +152,12 @@ struct Login {
     // field order is drop order: the WebView goes before the context that holds its profile folder
     webview: Option<WebView>,
     web_ctx: Option<WebContext>,
+    /// answered with the cookie; gone once it was
     reply: Option<Reply>,
+    /// held while the authorisation page is up; dropped with the window, which tells core
+    closed: Option<oneshot::Sender<()>>,
+    shown: bool,
+    ticks: u32,
     /// the answer of the last cookie request, picked up by the next tick
     slot: Slot,
     inflight: Arc<AtomicBool>,
@@ -175,8 +203,9 @@ fn register_class() -> PCWSTR {
     name
 }
 
-/// Open the sign-in window (replacing one that is open). `reply` gets the cookies, or an error; closing the
-/// window without logging in drops it, which the core reads as a cancel.
+/// Open the window on twitch.tv's login page (replacing one that is open). It stays hidden until it is clear the
+/// user has to sign in: a profile that already holds the session never shows the login page. `reply` gets the
+/// cookies, or an error; closing the window first drops it, which core reads as a cancel.
 fn open(reply: Reply) {
     close_window();
     let class = register_class();
@@ -192,7 +221,7 @@ fn open(reply: Reply) {
         CreateWindowExW(WINDOW_EX_STYLE(0), class, &title, WS_OVERLAPPEDWINDOW, x, y, 520, 760, None, None, inst, None)
     };
     let Ok(hwnd) = hwnd else {
-        let _ = reply.send(Err("Could not open the twitch.tv sign-in window.".into()));
+        let _ = reply.send(Err("Could not open the Twitch login window.".into()));
         return;
     };
     // size in device pixels for this monitor's scale
@@ -214,16 +243,40 @@ fn open(reply: Reply) {
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
-            delete_profile_later();
             return;
         }
     };
-    CUR.with(|c| *c.borrow_mut() = Some(Login { webview: Some(webview), web_ctx: Some(web_ctx), reply: Some(reply), slot: Default::default(), inflight: Default::default() }));
+    CUR.with(|c| *c.borrow_mut() = Some(Login { webview: Some(webview), web_ctx: Some(web_ctx), reply: Some(reply), closed: None, shown: false, ticks: 0, slot: Default::default(), inflight: Default::default() }));
     HWND_OPEN.store(hwnd.0 as isize, Ordering::SeqCst);
     unsafe {
         SetTimer(hwnd, TIMER_ID, POLL_MS, None);
+    }
+}
+
+fn show_window(hwnd: HWND) {
+    unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// Point the open window at `url` (the page that authorises the app) and keep `closed` until the window is gone.
+/// With no window left `closed` is dropped here, which tells core at once.
+fn show(url: &str, closed: oneshot::Sender<()>) {
+    let h = HWND_OPEN.load(Ordering::SeqCst);
+    let open = CUR.with(|c| match c.borrow_mut().as_mut() {
+        Some(l) => {
+            if let Some(wv) = &l.webview {
+                let _ = wv.load_url(url);
+            }
+            l.closed = Some(closed);
+            l.shown = true;
+            true
+        }
+        None => false,
+    });
+    if open {
+        show_window(HWND(h as *mut core::ffi::c_void));
     }
 }
 
@@ -239,9 +292,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_ID => {
-            if tick() {
-                let _ = DestroyWindow(hwnd);
-            }
+            tick(hwnd);
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -254,42 +305,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // taken out of the cell before anything is dropped, so nothing re-enters it
             let login = CUR.with(|c| c.borrow_mut().take());
             if let Some(mut l) = login {
-                // closing the window without a login is a cancel
+                // closing the window before the cookie arrived is a cancel
                 if let Some(r) = l.reply.take() {
                     let _ = r.send(Err(String::new()));
                 }
+                l.closed.take(); // tells core the window is gone
                 l.webview.take();
                 l.web_ctx.take();
             }
-            delete_profile_later();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
-/// Pick up the last cookie answer, then ask again. True when both cookies were there and went to the core.
-fn tick() -> bool {
-    let (answer, inflight) = CUR.with(|c| match c.borrow().as_ref() {
-        Some(l) => (l.slot.lock().unwrap().take(), Some(l.inflight.clone())),
-        None => (None, None),
-    });
-    let Some(inflight) = inflight else { return false };
-    if let Some(list) = answer {
-        let get = |n: &str| list.iter().find(|(k, v)| k == n && !v.is_empty()).map(|(_, v)| v.clone());
-        if let Some(auth_token) = get("auth-token") {
-            let cookies = Cookies { auth_token };
-            let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
-            if let Some(r) = reply {
-                let _ = r.send(Ok(cookies));
-            }
-            return true;
+/// Pick up the last cookie answer, then ask again until the cookie is there. The window stays hidden when the
+/// profile already holds the session; otherwise it shows as soon as the profile answered without it.
+fn tick(hwnd: HWND) {
+    let (answer, inflight, shown, ticks) = CUR.with(|c| match c.borrow_mut().as_mut() {
+        Some(l) if l.reply.is_some() => {
+            l.ticks += 1;
+            (l.slot.lock().unwrap().take(), Some(l.inflight.clone()), l.shown, l.ticks)
         }
+        _ => (None, None, true, 0),
+    });
+    let Some(inflight) = inflight else { return };
+    let token = answer.as_ref().and_then(|list| list.iter().find(|(k, v)| k == "auth-token" && !v.is_empty()).map(|(_, v)| v.clone()));
+    if let Some(auth_token) = token {
+        let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
+        if let Some(r) = reply {
+            let _ = r.send(Ok(Cookies { auth_token }));
+        }
+        return;
+    }
+    if !shown && (answer.is_some() || ticks >= SHOW_AFTER_TICKS) {
+        CUR.with(|c| {
+            if let Some(l) = c.borrow_mut().as_mut() {
+                l.shown = true;
+            }
+        });
+        show_window(hwnd);
     }
     if !inflight.swap(true, Ordering::SeqCst) && !CUR.with(|c| c.borrow().as_ref().map(request_cookies).unwrap_or(false)) {
         inflight.store(false, Ordering::SeqCst);
     }
-    false
 }
 
 /// Ask WebView2's cookie manager for twitch.tv's cookies; the callback runs on this thread from the message loop.

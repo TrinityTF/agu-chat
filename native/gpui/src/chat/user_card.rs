@@ -471,7 +471,8 @@ impl UserCardView {
         .detach();
     }
 
-    /// "Sign in on twitch.tv": the sign-in window opens (core), then the card follows the sign-in until it ends.
+    /// "Log in to Twitch": the same login as in Settings (one window: twitch.tv, then authorising the app); the card
+    /// follows it until it ends.
     fn start_signin(&mut self, cx: &mut Context<Self>) {
         if self.signin_busy {
             return;
@@ -481,10 +482,10 @@ impl UserCardView {
         cx.notify();
         let bridge = cx.global::<Services>().bridge.clone();
         cx.spawn(async move |this, cx| {
-            let r = relay_api(&bridge, &ctx.source, "/api/twitch/web/login", Some("POST"), Some(json!({}))).await;
+            let started = bridge.accounts_login(Platform::Twitch, json!({})).await;
             let mut signed_in = false;
-            let mut error = if r.ok { None } else { Some(r.text()) };
-            if r.ok {
+            let mut error = started.as_ref().err().cloned();
+            if started.is_ok() {
                 for _ in 0..700 {
                     cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                     let st = relay_api(&bridge, &ctx.source, "/api/twitch/web", None, None).await;
@@ -492,8 +493,10 @@ impl UserCardView {
                         continue;
                     }
                     signed_in = st.body["signedIn"].as_bool().unwrap_or(false);
-                    error = st.body["error"].as_str().map(String::from);
                     break;
+                }
+                if !signed_in {
+                    error = bridge.accounts_get().await.get(&Platform::Twitch).and_then(|a| a.error.clone());
                 }
             }
             let _ = this.update(cx, |v, cx| {
@@ -1271,10 +1274,9 @@ impl Render for UserCardView {
         }
         card = card.child(strip);
 
-        // a moderator without a twitch.tv sign-in: the other tabs are one sign-in away
+        // a moderator without a twitch.tv session (an older login, or none): the other tabs are one login away
         if show_signin_prompt(self.platform, whisper, ctx.caps.is_mod == Some(true) || ctx.caps.is_broadcaster == Some(true), self.web_status) {
             let busy = self.signin_busy;
-            let text = if self.web_status == WebStatus::Expired { "Your twitch.tv sign-in expired. Sign in again to see warnings, timeouts, bans and mod comments." } else { "Sign in on twitch.tv to see warnings, timeouts, bans and mod comments" };
             card = card.child(
                 div()
                     .flex()
@@ -1284,8 +1286,8 @@ impl Render for UserCardView {
                     .border_color(c(theme::LINE))
                     .px(px(10.))
                     .py(px(6.))
-                    .child(div().min_w_0().flex_1().text_size(px(11.)).line_height(px(15.)).text_color(c(theme::FAINT)).child(text))
-                    .child(btn("web-signin", if busy { "Waiting..." } else { "Sign in on twitch.tv" }, BtnOpts { disabled: busy, ..Default::default() }).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.start_signin(cx)))),
+                    .child(div().min_w_0().flex_1().text_size(px(11.)).line_height(px(15.)).text_color(c(theme::FAINT)).child("Log in to Twitch again to see warnings, timeouts, bans and mod comments"))
+                    .child(btn("web-signin", if busy { "Waiting..." } else { "Log in to Twitch" }, BtnOpts { disabled: busy, ..Default::default() }).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.start_signin(cx)))),
             );
         }
 

@@ -2,11 +2,12 @@
 //! subscription, warnings / timeouts / bans, shared mod comments), the way the 7TV browser extension gets it:
 //! Twitch's web GraphQL endpoint (gql.twitch.tv) called with the `auth-token` cookie of a twitch.tv sign-in.
 //!
-//! This is separate from the OAuth login (`auth.rs`, Helix), which stays as it is.
+//! It is stored apart from the OAuth login (`auth.rs`, Helix) but the user gets both from one "Log in"
+//! (`signin.rs`).
 //!
 //! LOGIN. The app (gpui crate) opens a window with twitch.tv's own login page and hands back the `auth-token`
-//! cookie through the login hook (`set_login_hook`), in memory only. It is verified with `currentUser { id login }`
-//! before anything is stored, in the encrypted secrets store under `twitch_web`. `AGU_AUTH_READONLY=1` never
+//! cookie through the login hook (`set_login_hook`), in memory only. `store` verifies it with `currentUser { id
+//! login }` before keeping it, in the encrypted secrets store under `twitch_web`. `AGU_AUTH_READONLY=1` never
 //! writes or deletes it.
 //!
 //! CALLS. Plain JSON POSTs with raw query text, `Client-Id` of the twitch.tv web page and `Authorization: OAuth
@@ -19,19 +20,17 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::task::AbortHandle;
 
 use super::auth;
 use super::rt::{ctx, user_agent};
 use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
-use crate::util::{now_ms, Listeners};
+use crate::util::Listeners;
 
 const SECRET_KEY: &str = "twitch_web";
 const GQL_URL: &str = "https://gql.twitch.tv/gql";
 /// The public client id twitch.tv's own web page uses.
 const WEB_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
-pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-pub const EXPIRED_MESSAGE: &str = "twitch.tv sign-in expired, sign in again";
+pub const EXPIRED_MESSAGE: &str = "Your twitch.tv session expired, log in to Twitch again";
 pub const INTEGRITY_MESSAGE: &str = "Twitch asks for its own browser check before it shows this, so it is not available here.";
 pub const COMMENT_MAX_CHARS: usize = 500;
 
@@ -366,10 +365,17 @@ impl std::fmt::Debug for Cookies {
 
 pub type LoginFuture = BoxFuture<'static, Result<Cookies, String>>;
 
+/// The login window the app provides: one window for the twitch.tv sign-in and then Twitch's authorisation page.
 #[derive(Clone)]
 pub struct LoginHook {
+    /// Open the window on twitch.tv's login page. Gives the cookies as soon as the browser profile holds them (the
+    /// window stays open); `Err("")` when the window was closed first.
     pub open: Arc<dyn Fn() -> LoginFuture + Send + Sync>,
+    /// Show this page in the window. Resolves when the window is gone, closed by the user or by `close`.
+    pub show: Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>,
     pub close: Arc<dyn Fn() + Send + Sync>,
+    /// Close the window and drop twitch.tv's cookies from the browser profile, so the next login can pick an account.
+    pub forget: Arc<dyn Fn() + Send + Sync>,
 }
 
 static HOOK: Mutex<Option<LoginHook>> = Mutex::new(None);
@@ -378,19 +384,14 @@ pub fn set_login_hook(h: LoginHook) {
     *HOOK.lock().unwrap() = Some(h);
 }
 
-struct Flow {
-    id: u64,
-    expires_at: i64,
-    task: Option<AbortHandle>,
+pub fn login_hook() -> Option<LoginHook> {
+    HOOK.lock().unwrap().clone()
 }
 
 #[derive(Default)]
 struct State {
     record: Option<Arc<Record>>,
-    pending: Option<Flow>,
-    last_error: Option<String>,
     expired: bool,
-    seq: u64,
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));
@@ -452,21 +453,17 @@ fn session() -> Option<Arc<Record>> {
     st().record.clone()
 }
 
-/// The state Settings shows: signed in as whom, whether that is the Twitch account of the app, pending, error.
+/// The state Settings and the card read: signed in as whom, whether that is the Twitch account of the app, and
+/// whether the combined login is still waiting for the user.
 pub fn state_json() -> Value {
     let g = st();
-    let app_login = auth::current().map(|r| r.user.login.clone()).unwrap_or_default();
-    let mut out = json!({"signedIn": g.record.is_some(), "pending": g.pending.is_some(), "expired": g.expired && g.record.is_none()});
+    let app = auth::state();
+    let app_login = app.user.as_ref().map(|u| u.login.clone()).unwrap_or_default();
+    let mut out = json!({"signedIn": g.record.is_some(), "pending": app.pending.is_some()});
     if let Some(r) = &g.record {
         out["login"] = json!(r.login);
         out["sameUser"] = json!(app_login.is_empty() || app_login.eq_ignore_ascii_case(&r.login));
         out["appLogin"] = json!(app_login);
-    }
-    if let Some(p) = &g.pending {
-        out["expiresAt"] = json!(p.expires_at);
-    }
-    if let Some(e) = &g.last_error {
-        out["error"] = json!(e);
     }
     out
 }
@@ -479,42 +476,16 @@ fn mark_expired() {
         }
         g.record = None;
         g.expired = true;
-        g.last_error = Some(EXPIRED_MESSAGE.into());
     }
     persist();
+    // the browser profile still holds the dead cookie, which the next login would capture again
+    if let Some(h) = login_hook() {
+        (h.forget)();
+    }
     changed();
 }
 
 // ---------- login ----------
-
-pub async fn login() -> Result<Value, String> {
-    let Some(hook) = HOOK.lock().unwrap().clone() else { return Err("The twitch.tv sign-in is not available in this build.".into()) };
-    cancel();
-    let id = {
-        let mut g = st();
-        g.last_error = None;
-        g.seq += 1;
-        g.seq
-    };
-    let (open, close) = (hook.open.clone(), hook.close.clone());
-    let task = tokio::spawn(async move {
-        let r = match tokio::time::timeout(LOGIN_TIMEOUT, open()).await {
-            Ok(r) => r,
-            Err(_) => {
-                close();
-                Err("The twitch.tv sign-in window timed out, try again.".into())
-            }
-        };
-        let r = match r {
-            Ok(c) => verify(c).await,
-            Err(e) => Err(e),
-        };
-        finish(id, r);
-    });
-    st().pending = Some(Flow { id, expires_at: now_ms() + LOGIN_TIMEOUT.as_millis() as i64, task: Some(task.abort_handle()) });
-    changed();
-    Ok(json!({"pending": true}))
-}
 
 /// `currentUser` answer -> (id, login)
 pub fn parse_verify(data: &Value) -> Option<(String, String)> {
@@ -523,64 +494,34 @@ pub fn parse_verify(data: &Value) -> Option<(String, String)> {
     (!id.is_empty() && !login.is_empty()).then(|| (id.to_string(), login.to_string()))
 }
 
-async fn verify(c: Cookies) -> Result<Record, String> {
+/// Verify the cookie of the login window and keep it as the web session.
+pub async fn store(c: Cookies) -> Result<(), GqlError> {
     if c.auth_token.is_empty() {
-        return Err("The twitch.tv sign-in did not finish, try again.".into());
+        return Err(GqlError::Other("The twitch.tv sign-in did not finish, try again.".into()));
     }
-    let data = gql_with(&c.auth_token, "VerifyLogin", VERIFY_QUERY, json!({})).await.map_err(|e| format!("{} (twitch.tv sign-in not saved)", e.message()))?;
-    let (user_id, login) = parse_verify(&data).ok_or_else(|| "Twitch did not say who this sign-in belongs to (twitch.tv sign-in not saved)".to_string())?;
-    Ok(Record { auth_token: c.auth_token, user_id, login })
-}
-
-fn finish(id: u64, r: Result<Record, String>) {
+    let data = gql_with(&c.auth_token, "VerifyLogin", VERIFY_QUERY, json!({})).await?;
+    let (user_id, login) = parse_verify(&data).ok_or_else(|| GqlError::Other("Twitch did not say who this sign-in belongs to.".into()))?;
     {
         let mut g = st();
-        if g.pending.as_ref().map(|f| f.id) != Some(id) {
-            return; // cancelled or replaced
-        }
-        g.pending = None;
-        match r {
-            Ok(rec) => {
-                g.record = Some(Arc::new(rec));
-                g.last_error = None;
-                g.expired = false;
-            }
-            Err(e) if e.is_empty() => {}
-            Err(e) => g.last_error = Some(e),
-        }
-    }
-    persist();
-    changed();
-}
-
-pub fn cancel() {
-    let close = {
-        let mut g = st();
-        match g.pending.take() {
-            Some(f) => {
-                if let Some(t) = f.task {
-                    t.abort();
-                }
-            }
-            None => return,
-        }
-        HOOK.lock().unwrap().as_ref().map(|h| h.close.clone())
-    };
-    if let Some(c) = close {
-        c();
-    }
-    changed();
-}
-
-pub async fn logout() {
-    cancel();
-    {
-        let mut g = st();
-        g.record = None;
-        g.last_error = None;
+        g.record = Some(Arc::new(Record { auth_token: c.auth_token, user_id, login }));
         g.expired = false;
     }
     persist();
+    changed();
+    Ok(())
+}
+
+/// Sign out of the web session and the browser profile behind it.
+pub fn logout() {
+    {
+        let mut g = st();
+        g.record = None;
+        g.expired = false;
+    }
+    persist();
+    if let Some(h) = login_hook() {
+        (h.forget)();
+    }
     changed();
 }
 
@@ -642,20 +583,6 @@ where
 pub fn routes() -> Vec<(String, Handler)> {
     vec![
         ("GET /api/twitch/web".into(), route(|_| async { res(200, state_json()) })),
-        ("POST /api/twitch/web/login".into(), route(|_| async {
-            match login().await {
-                Ok(v) => res(200, v),
-                Err(e) => res(400, json!({"error": e})),
-            }
-        })),
-        ("POST /api/twitch/web/cancel".into(), route(|_| async {
-            cancel();
-            res(200, json!({"ok": true}))
-        })),
-        ("POST /api/twitch/web/logout".into(), route(|_| async {
-            logout().await;
-            res(200, json!({"ok": true}))
-        })),
         ("GET /api/twitch/card".into(), route(card)),
         ("GET /api/twitch/card/messages".into(), route(card_messages)),
         ("POST /api/twitch/card/comment".into(), route(comment_add)),
@@ -679,7 +606,7 @@ async fn channel_id(req: &RouteReq) -> Result<String, GqlError> {
 /// GET /api/twitch/card?login=&id= : Twitch's viewer card of the person in this channel.
 async fn card(req: RouteReq) -> Result<RouteRes, RouteError> {
     if !is_signed_in() {
-        return res(401, json!({"error": "Sign in on twitch.tv first", "code": if st().expired { "expired" } else { "signed-out" }}));
+        return res(401, json!({"error": "Log in to Twitch first", "code": if st().expired { "expired" } else { "signed-out" }}));
     }
     let target_login = req.query_get("login").unwrap_or("").to_lowercase();
     let target_id = req.query_get("id").unwrap_or("").to_string();

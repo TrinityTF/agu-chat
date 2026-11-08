@@ -61,7 +61,7 @@ pub fn tabs_for(platform: Platform, whisper: bool, has_logs: bool) -> Vec<Tab> {
     }
 }
 
-/// The muted "Sign in on twitch.tv" line: a Twitch channel (not a whisper) where the user moderates and has no
+/// The muted "Log in to Twitch again" line: a Twitch channel (not a whisper) where the user moderates and has no
 /// working twitch.tv sign-in.
 pub fn show_signin_prompt(platform: Platform, whisper: bool, is_mod_here: bool, web: WebStatus) -> bool {
     platform == Platform::Twitch && !whisper && is_mod_here && matches!(web, WebStatus::SignedOut | WebStatus::Expired)

@@ -687,7 +687,8 @@ impl SettingsDialog {
                 this.busy = false;
                 match r {
                     Ok(v) => {
-                        if let Ok(p) = serde_json::from_value::<DevicePrompt>(v.clone()) {
+                        // Twitch has no code to show: its state (pending / error) comes with the account
+                        if let (Ok(p), true) = (serde_json::from_value::<DevicePrompt>(v.clone()), platform != Platform::Twitch) {
                             this.prompts.insert(platform, p);
                         }
                         if platform == Platform::Rumble {
@@ -712,17 +713,27 @@ impl SettingsDialog {
         cx.notify();
     }
 
+    /// One Twitch login: the window of `twitch_login.rs` signs in on twitch.tv and authorises the app, so there is
+    /// no code to show; this only waits with the user.
     fn twitch_account(&mut self, st: &AccountState, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if st.connected {
-            self.prompts.remove(&Platform::Twitch);
-        }
-        let pending = st.pending.clone().or_else(|| self.prompts.get(&Platform::Twitch).cloned());
         let own_id = self.settings.twitch_client_id.clone();
         let err = self.err.get("twitch").cloned().or_else(|| st.error.clone()).unwrap_or_default();
         let body: AnyElement = if st.connected {
-            self.connected_line(Platform::Twitch, st, cx)
-        } else if let Some(p) = pending {
-            self.device_code(Platform::Twitch, &p, cx)
+            let mut col = div().flex().flex_col().gap(px(6.)).child(self.connected_line(Platform::Twitch, st, cx));
+            if self.web.get("signedIn").and_then(|v| v.as_bool()) == Some(true) && self.web.get("sameUser").and_then(|v| v.as_bool()) == Some(false) {
+                let web_login = self.web.get("login").and_then(|v| v.as_str()).unwrap_or("another account");
+                col = col.child(txt(11.).text_color(c(theme::AMBER_300)).child(format!("The twitch.tv session ({web_login}) is not the account Agu Chat is logged in as. Mod logs on the user card only work for the account that moderates. Log out and log in again to use one account.")));
+            }
+            col.into_any_element()
+        } else if st.pending.is_some() {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_color(c(theme::MUTED)).child("Waiting for you in the Twitch window..."))
+                .child(btn(eid("tw-cancel-login"), "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_login(Platform::Twitch, cx))))
+                .into_any_element()
         } else {
             let busy = self.busy;
             let login = btn(eid("tw-login"), "Log in with Twitch", BtnOpts { primary: true, disabled: busy, ..Default::default() });
@@ -781,106 +792,10 @@ impl SettingsDialog {
                     )
                     .into_any_element()
             };
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(login)
-                        .child(txt(11.).text_color(c(theme::FAINT)).child("You approve it on twitch.tv; your password never goes through Agu Chat.")),
-                )
-                .child(advanced)
-                .into_any_element()
+            div().flex().flex_col().gap(px(8.)).child(login).child(advanced).into_any_element()
         };
-        let web_block = self.twitch_web_block(cx);
-        Self::card().child(Self::account_title(Platform::Twitch)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).child(web_block).into_any_element()
+        Self::card().child(Self::account_title(Platform::Twitch)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
     }
-
-    /// Calls core's twitch.tv web sign-in routes (`/api/twitch/web...`); the answer is the sign-in's state.
-    fn web_call(&mut self, path: &'static str, post: bool, cx: &mut Context<Self>) {
-        let fut = self.bridge.api(SourceRef { platform: Platform::Twitch, channel: String::new() }, path.to_string(), ApiInit { method: post.then(|| "POST".to_string()), body: post.then(|| json!({})) });
-        cx.spawn(async move |this, cx| {
-            let r = fut.await;
-            let _ = this.update(cx, |this, cx| {
-                if r.status == 200 && r.body.get("signedIn").is_some() {
-                    this.web = r.body;
-                } else if r.status != 200 {
-                    this.err.insert("twitch-web".into(), r.body.get("error").and_then(|e| e.as_str()).unwrap_or("Could not reach the sign-in").to_string());
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        if post {
-            let again = self.bridge.api(SourceRef { platform: Platform::Twitch, channel: String::new() }, "/api/twitch/web".to_string(), ApiInit::default());
-            cx.spawn(async move |this, cx| {
-                let r = again.await;
-                let _ = this.update(cx, |this, cx| {
-                    if r.status == 200 {
-                        this.web = r.body;
-                    }
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-    }
-
-    /// The twitch.tv web sign-in (separate from the Twitch login above): what the user card reads Twitch's own
-    /// mod logs, comments and badges with.
-    fn twitch_web_block(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let w = self.web.clone();
-        let flag = |k: &str| w.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-        let text = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let err = self.err.get("twitch-web").cloned().unwrap_or_else(|| text("error"));
-        let head = txt(12.).font_weight(gpui::FontWeight::SEMIBOLD).child("twitch.tv (mod logs)");
-        let body: AnyElement = if flag("signedIn") {
-            let mut col = div().flex().flex_col().gap(px(6.)).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .child(div().min_w_0().truncate().child("Signed in as ").child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(text("login"))))
-                    .child(btn(eid("web-out"), "Sign out", BtnOpts::danger()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.err.remove("twitch-web");
-                        this.web_call("/api/twitch/web/logout", true, cx);
-                    }))),
-            );
-            if w.get("sameUser").and_then(|v| v.as_bool()) == Some(false) {
-                col = col.child(txt(11.).text_color(c(theme::AMBER_300)).child(format!("This is not the Twitch account Agu Chat is logged in as ({}). Mod logs only work for the account that moderates.", text("appLogin"))));
-            }
-            col.into_any_element()
-        } else if flag("pending") {
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(8.))
-                .child(div().text_color(c(theme::MUTED)).child("Waiting for you to sign in on twitch.tv in the sign-in window..."))
-                .child(btn(eid("web-cancel"), "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.web_call("/api/twitch/web/cancel", true, cx))))
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap(px(8.))
-                .child(btn(eid("web-in"), "Sign in", BtnOpts::primary()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.err.remove("twitch-web");
-                    this.web_call("/api/twitch/web/login", true, cx);
-                })))
-                .child(txt(11.).text_color(c(theme::FAINT)).child(if flag("expired") { "Your twitch.tv sign-in expired. Sign in again to see warnings, timeouts, bans and mod comments on the user card." } else { "Shows Twitch's own warnings, timeouts, bans and shared mod comments on the user card, like the 7TV extension does. You sign in on twitch.tv inside Agu Chat; only the session is kept, encrypted on this PC." }))
-                .into_any_element()
-        };
-        div().mt(px(14.)).pt(px(12.)).border_t_1().border_color(c(theme::LINE)).child(div().mb(px(8.)).child(head)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
-    }
-
 
     fn rumble_login_result(&mut self, v: &Value, cx: &mut Context<Self>) {
         self.set_text_of("rumble.pass", "", cx);

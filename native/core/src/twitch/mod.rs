@@ -16,6 +16,7 @@ pub mod helix;
 pub mod http;
 pub mod irc_hub;
 pub mod routes;
+pub mod signin;
 pub mod rt;
 pub mod shared;
 pub mod source;
@@ -46,13 +47,16 @@ impl Accounts for TwitchAccounts {
         auth::state()
     }
     fn login(&self, _args: Value) -> BoxFuture<'static, Result<Value, String>> {
-        Box::pin(async { auth::login().await.map(|p| serde_json::to_value(p).unwrap_or(Value::Null)) })
+        Box::pin(async { signin::login().await.map(|p| serde_json::to_value(p).unwrap_or(Value::Null)) })
     }
     fn cancel(&self) {
         auth::cancel();
     }
     fn logout(&self) -> BoxFuture<'static, ()> {
-        Box::pin(auth::logout())
+        Box::pin(async {
+            auth::logout().await;
+            web::logout();
+        })
     }
 }
 

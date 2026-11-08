@@ -343,10 +343,9 @@ impl AguBridge for MockBridge {
                     let signed_in = std::env::var("AGU_MOCK_WEB").map(|v| v != "out").unwrap_or(true);
                     ok(if signed_in { json!({ "signedIn": true, "pending": false, "expired": false, "login": "a_g_u__", "sameUser": std::env::var("AGU_MOCK_WEB").map(|v| v != "other").unwrap_or(true), "appLogin": "a_g_u__" }) } else { json!({ "signedIn": false, "pending": false, "expired": false }) })
                 }
-                "/api/twitch/web/login" | "/api/twitch/web/cancel" | "/api/twitch/web/logout" => ok(json!({ "ok": true })),
                 "/api/twitch/card" => {
                     if std::env::var("AGU_MOCK_WEB").map(|v| v == "out").unwrap_or(false) {
-                        return ApiResult { status: 401, body: json!({ "error": "Sign in on twitch.tv first", "code": "signed-out" }) };
+                        return ApiResult { status: 401, body: json!({ "error": "Log in to Twitch first", "code": "signed-out" }) };
                     }
                     let login = query.split('&').find_map(|kv| kv.strip_prefix("login=")).unwrap_or("cooldude").to_string();
                     let t = |days: i64| chrono::DateTime::from_timestamp_millis(now_ms() - days * 86_400_000).map(|d| d.to_rfc3339()).unwrap_or_default();

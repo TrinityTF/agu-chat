@@ -404,6 +404,23 @@ pub fn cancel() {
     changed();
 }
 
+/// The device flow `user_code` belongs to is still waiting for the user (false once it finished, failed, was
+/// cancelled or replaced by a newer one).
+pub fn is_waiting(user_code: &str) -> bool {
+    st().pending.as_ref().map(|f| f.user_code == user_code).unwrap_or(false)
+}
+
+/// Ends the device flow `user_code` belongs to, if it is still the pending one: a message makes it a failure the
+/// account shows, none a plain cancel.
+pub fn end_flow(user_code: &str, error: Option<&str>) {
+    let id = st().pending.as_ref().filter(|f| f.user_code == user_code).map(|f| f.id);
+    match (id, error) {
+        (Some(id), Some(msg)) => fail_flow(id, msg),
+        (Some(_), None) => cancel(),
+        (None, _) => {}
+    }
+}
+
 pub async fn logout() {
     cancel();
     let old = {
