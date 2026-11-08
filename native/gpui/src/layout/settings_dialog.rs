@@ -902,6 +902,34 @@ impl SettingsDialog {
         Self::card().child(Self::account_title(Platform::Kick)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
     }
 
+    /// X signs in through a window inside Agu Chat that shows x.com's own login page (the password goes to x.com,
+    /// not to Agu Chat); only the resulting session is kept, encrypted on this PC.
+    fn x_account(&mut self, st: &AccountState, cx: &mut Context<Self>) -> AnyElement {
+        let err = self.err.get("x").cloned().or_else(|| st.error.clone()).unwrap_or_default();
+        let body: AnyElement = if st.connected {
+            self.connected_line(Platform::X, st, cx)
+        } else if st.pending.is_some() {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_color(c(theme::MUTED)).child("Waiting for you to log in to X in the sign-in window…"))
+                .child(btn(eid("x-cancel"), "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_login(Platform::X, cx))))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(8.))
+                .child(btn(eid("login-x"), "Log in", BtnOpts::primary()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.login(Platform::X, json!({}), cx))))
+                .child(txt(11.).text_color(c(theme::FAINT)).child("X chat shows names and can be written to once you log in. You sign in on x.com inside Agu Chat; only the session is kept, encrypted on this PC."))
+                .into_any_element()
+        };
+        Self::card().child(Self::account_title(Platform::X)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
+    }
+
     fn render_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(accounts) = self.accounts.clone() else { return div().text_color(c(theme::FAINT)).child("Loading…").into_any_element() };
         let get = |p: Platform| accounts.get(&p).cloned().unwrap_or_default();
@@ -911,7 +939,7 @@ impl SettingsDialog {
             .child(self.rumble_account(&get(Platform::Rumble), window, cx))
             .child(self.kick_account(&get(Platform::Kick), cx))
             .child(self.other_account(Platform::Youtube, &get(Platform::Youtube), cx))
-            .child(self.other_account(Platform::X, &get(Platform::X), cx))
+            .child(self.x_account(&get(Platform::X), cx))
             .into_any_element()
     }
 

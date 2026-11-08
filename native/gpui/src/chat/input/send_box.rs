@@ -28,7 +28,7 @@ use crate::layout::ui::BtnOpts;
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
 
-const SENDABLE: [Platform; 3] = [Platform::Twitch, Platform::Rumble, Platform::Kick];
+const SENDABLE: [Platform; 4] = [Platform::Twitch, Platform::Rumble, Platform::Kick, Platform::X];
 const ALL: &str = "*";
 const HISTORY_MAX: usize = 100;
 
@@ -115,6 +115,7 @@ fn send_path(p: Platform) -> Option<&'static str> {
         Platform::Twitch => Some("/api/chat/send"),
         Platform::Rumble => Some("/api/rumble/send"),
         Platform::Kick => Some("/api/kick/send"),
+        Platform::X => Some("/api/x/send"),
         _ => None,
     }
 }

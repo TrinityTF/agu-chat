@@ -14,3 +14,9 @@ pub fn get_user_agent() -> String {
     let g = USER_AGENT.lock().unwrap();
     if g.is_empty() { "AguChat".to_string() } else { g.clone() }
 }
+
+/// What requests made with the user's own x.com session send: x.com answers a session from something that does
+/// not look like a browser with anti-bot errors, and the session is a browser's, so the same string is used.
+pub fn browser_user_agent() -> &'static str {
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+}

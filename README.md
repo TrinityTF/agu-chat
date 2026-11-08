@@ -37,7 +37,7 @@ and run it. Windows 10 or 11, 64-bit. Agu Chat keeps itself up to date after tha
 | Kick | Yes | Yes | Yes, where you're the broadcaster or a moderator | Log in in **Settings → Accounts → Kick**. |
 | YouTube | Yes | Not yet | Not yet | Read-only in this beta. |
 | Rumble | Yes | Yes | Yes, where Rumble allows your account | Log in with your Rumble account in Settings. Your password is only used to sign in and is never saved. |
-| X | Yes | No | No | Chatters show as "X user 12345", because X only shows names to logged-in accounts. Paste the broadcast link to be sure the chat is found. |
+| X | Yes | Yes | Not yet | Log in in **Settings → Accounts → X** to see chat with names and to write in it. Paste the broadcast link to be sure the chat is found. |
 
 ## Logging in to Twitch
 
@@ -92,7 +92,9 @@ update**. Switching from Beta to Stable keeps your current version until a newer
 
 Your logins are stored only on your PC, encrypted with Windows' own protection, and are never sent anywhere except
 to the platform they belong to. The one exception is Kick: its login and token refresh go through Agu Chat's
-sign-in service at api.agu.lol, which passes the tokens to your PC and keeps nothing. Settings and logs are in `%APPDATA%\Agu Chat\`.
+sign-in service at api.agu.lol, which passes the tokens to your PC and keeps nothing. X login happens in a sign-in
+window inside Agu Chat (it shows x.com's own page, so your password goes to X only); only the resulting session is kept, encrypted
+on your PC like the others. Settings and logs are in `%APPDATA%\Agu Chat\`.
 
 ## Building from source
 

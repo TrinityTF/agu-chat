@@ -80,6 +80,10 @@ fn main() {
             .detach();
             (backend, dir)
         };
+        if !mock {
+            // X login: the core asks for the sign-in window through this hook
+            layout::x_login::install(cx);
+        }
         chat::services::init(cx, bridge.clone(), data_dir);
 
         // Where the window opens: its saved bounds, pulled back onto a screen when needed (windowState.js).

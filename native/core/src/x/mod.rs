@@ -1,34 +1,46 @@
-//! Port of src/main/x/index.js: the X (Twitter) platform module (read-only). See docs/ARCHITECTURE.md.
+//! Port of src/main/x/index.js: the X (Twitter) platform module. See docs/ARCHITECTURE.md.
 //!
-//! Reads x.com's live-chat stream (newline-delimited JSON, backfill first) with a GUEST token only: no
-//! account, no bot session, no paid v2 API calls. Emits the frames /ws/x sends: chatlog {status, messages},
-//! chat {messages}, status {status}, plus the uniform conn frame. Sending is not possible without X's paid
-//! API, so canSend is always false.
+//! Reads x.com's live-chat stream (newline-delimited JSON, backfill first) with a GUEST token and, for names and
+//! sending, the user's own x.com session (auth.rs). Nothing goes through the Agu Chat website and nothing is
+//! paid: no X API v2, only the web endpoints x.com's own client calls. Emits the frames /ws/x sends: chatlog
+//! {status, messages}, chat {messages}, status {status}, plus the uniform conn frame.
 //!
 //! WHAT IS AND IS NOT POSSIBLE AS A GUEST (measured; see vendor/x_live.rs):
-//!  * Given a broadcast id, everything works anonymously: state, title, chat history, live chat.
+//!  * Given a broadcast id, state, title, chat history and live chat all work anonymously.
 //!  * Getting the id from a handle is auth-gated at X's end. The public profile only carries a broadcast link
 //!    if the streamer tweeted it, so a handle source finds the stream only then; pasting the broadcast link
 //!    (x.com/i/broadcasts/<id>) always works.
-//!  * Names: events carry only a user id, so chatters show as "X user <last 5 digits of the id>".
+//!  * Names: events carry only a user id and the lookup needs a login. So X chat is shown only while logged in:
+//!    events wait (250 ms batches) while their authors' names are looked up (names.rs), and a message whose
+//!    author's username X does not give is dropped, never shown under a made-up name. Logged out, no stream is
+//!    read and the column says to log in (the broadcast itself is still found, so sending works as soon as the
+//!    login is there). A refused session (401/403) is an expired login (auth.rs).
+//!  * Sending: `POST /api/x/send`, x.com's own `sendLiveChatMutation` with the session, to the broadcast this
+//!    source reads. X's error text is passed on as is.
 //!
 //! Differences from the JS: timers are `util::Timer`s, the stream loop is a task owned by the current chat
 //! (its AbortHandle is the chat's AbortController), `stop()` aborts the source's tasks (`net::Jobs`).
+pub mod auth;
+pub mod names;
 pub mod ua;
 pub mod vendor;
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
+
+use futures_util::future::BoxFuture;
 
 use serde_json::{json, Map, Value};
 use tokio::task::AbortHandle;
 
 use crate::net::Jobs;
-use crate::platforms::{Ctx, Emit, PlatformModule, Source};
-use crate::protocol::{Frame, Platform};
+use crate::platforms::{Accounts, Ctx, Emit, PlatformModule, Source};
+use crate::protocol::{AccountState, Frame, Platform};
+use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, js_string, js_trim, now_ms, truthy, Timer};
 use ua::set_user_agent;
+use names::Known;
 use vendor::x_chat::{read_live_chat, to_x_chat_msg};
 use vendor::x_live::{broadcast_id_in_url, broadcast_states, find_live, normalize_handle, FindLive};
 
@@ -46,8 +58,22 @@ const MAX_RECHECK_MS: u64 = 5 * 60_000;
 // Events are held this long so the ~100-message backfill arrives as one chatlog rather than 100 frames.
 const BATCH_MS: u64 = 250;
 
-const READ_ONLY_REASON: &str = "X is read-only (sending needs X's paid API)";
-const NAMES_NOTICE: &str = "X does not give guests chatter names; they show as X user + the last digits of their id.";
+// A name lookup that fails (network, 5xx) is retried this many times, one second, two, four apart, and then the batch is dropped.
+const LOOKUP_RETRIES: u32 = 3;
+// Events waiting for their names never pile up past this (the oldest go first).
+const MAX_PENDING: usize = 2000;
+const NOT_LIVE_REASON: &str = "Not live";
+
+/// normalized channel -> the broadcast id its source is reading right now (what sending needs). Like Kick's USER_IDS.
+static BROADCASTS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn set_broadcast(norm: &str, id: Option<&str>) {
+    let mut m = BROADCASTS.lock().unwrap();
+    match id {
+        Some(id) => m.insert(norm.to_string(), id.to_string()),
+        None => m.remove(norm),
+    };
+}
 
 /// "broadcast:<id>" for a broadcast link/id, otherwise the lowercased X username.
 pub fn normalize_channel(input: &str) -> Result<String, String> {
@@ -82,9 +108,65 @@ impl PlatformModule for X {
 
     fn create_source(&self, channel: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<dyn Source> {
         set_user_agent(&ctx.user_agent);
+        auth::ensure_ctx(&ctx); // sources can be created before init() in tests
         // JS normalizes again here; the relay hands over an already normalized channel.
         let norm = normalize_channel(&channel).unwrap_or(channel);
         XSource::new(norm, emit, ctx)
+    }
+
+    fn routes(&self) -> Vec<(String, Handler)> {
+        vec![("POST /api/x/send".into(), Arc::new(|req| Box::pin(route_send(req))))]
+    }
+
+    fn accounts(&self) -> Option<Arc<dyn Accounts>> {
+        Some(Arc::new(XAccounts))
+    }
+
+    fn init(&self, ctx: Arc<Ctx>) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            auth::init(ctx);
+            Ok(())
+        })
+    }
+}
+
+struct XAccounts;
+
+impl Accounts for XAccounts {
+    fn state(&self) -> AccountState {
+        auth::state()
+    }
+    fn login(&self, _args: Value) -> BoxFuture<'static, Result<Value, String>> {
+        Box::pin(auth::login())
+    }
+    fn cancel(&self) {
+        auth::cancel();
+    }
+    fn logout(&self) -> BoxFuture<'static, ()> {
+        Box::pin(auth::logout())
+    }
+}
+
+fn route_err(status: u16, msg: &str) -> RouteRes {
+    RouteRes { status, body: json!({"error": msg}) }
+}
+
+/// POST /api/x/send {text, replyTo?}: the message goes to the broadcast this column is reading. Length is X's call,
+/// its error comes back as the toast.
+async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let text = js_str_or_empty(Some(&req.body["text"])).trim().to_string();
+    if text.is_empty() {
+        return Ok(route_err(400, "empty message"));
+    }
+    if !auth::is_logged_in() {
+        return Ok(route_err(401, if auth::is_expired() { auth::EXPIRED_MESSAGE } else { auth::LOGGED_OUT_REASON }));
+    }
+    let norm = normalize_channel(&req.source.channel).unwrap_or_else(|_| req.source.channel.clone());
+    let Some(broadcast) = BROADCASTS.lock().unwrap().get(&norm).cloned() else { return Ok(route_err(409, NOT_LIVE_REASON)) };
+    let reply = js_str_or_empty(Some(&req.body["replyTo"]));
+    match auth::send_chat(&broadcast, &text, Some(reply.as_str()).filter(|r| !r.is_empty())).await {
+        Ok(()) => Ok(RouteRes { status: 200, body: json!({"ok": true}) }),
+        Err(e) => Ok(route_err(e.status, &e.message)),
     }
 }
 
@@ -106,6 +188,11 @@ struct St {
     pending: Vec<Value>,
     pending_timer: Timer,
     pending_armed: bool,
+    /// the chat whose events a flush task is looking names up for right now
+    flushing: Option<u64>,
+    /// an auth change asked for a fresh resolve while a tick was running
+    rerun: bool,
+    auth_listener: Option<u64>,
     poll_timer: Timer,
     polling: bool,
     soft_misses: u32,
@@ -129,7 +216,11 @@ fn conn_frame(st: &St, pinned: bool) -> Value {
     let error = js_str_or_empty(s.get("error"));
     let state = js_str_or_empty(s.get("state"));
     let live = truthy(&s["live"]);
-    let (st_name, detail) = if !st.resolved_once {
+    let logged_in = auth::is_logged_in();
+    let (st_name, detail) = if !logged_in {
+        // No login, no chat: names (and so every message) need the session.
+        ("offline", auth::logged_out_detail().to_string())
+    } else if !st.resolved_once {
         ("connecting", "Looking for a live X broadcast...".to_string())
     } else if !error.is_empty() {
         ("error", error)
@@ -150,8 +241,11 @@ fn conn_frame(st: &St, pinned: bool) -> Value {
     if !title.is_empty() {
         f["title"] = json!(title);
     }
-    f["canSend"] = json!(false);
-    f["readOnlyReason"] = json!(READ_ONLY_REASON);
+    let can_send = logged_in && live;
+    f["canSend"] = json!(can_send);
+    if !can_send {
+        f["readOnlyReason"] = json!(if logged_in { NOT_LIVE_REASON } else { auth::LOGGED_OUT_REASON });
+    }
     f
 }
 
@@ -188,6 +282,9 @@ impl XSource {
                 pending: Vec::new(),
                 pending_timer: Timer::new(),
                 pending_armed: false,
+                flushing: None,
+                rerun: false,
+                auth_listener: None,
                 poll_timer: Timer::new(),
                 polling: false,
                 soft_misses: 0,
@@ -239,6 +336,8 @@ impl XSource {
                     st.status.insert(k.to_string(), v);
                 }
             }
+            let live_id = if truthy(&st.status["live"]) { st.status.get("broadcastId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from) } else { None };
+            set_broadcast(&self.norm, live_id.as_deref());
             changed.then(|| Value::Object(st.status.clone()))
         };
         if let Some(status) = changed {
@@ -303,6 +402,7 @@ impl XSource {
             return OFFLINE_POLL_MS;
         }
 
+        let logged_in = auth::is_logged_in();
         let chat_id = {
             let mut st = self.st.lock().unwrap();
             st.soft_misses = 0;
@@ -311,10 +411,16 @@ impl XSource {
                 st.backlog.clear();
                 st.seen.clear();
             }
+            if !logged_in {
+                // Without a login there are no names and so no messages: the broadcast is only noted (sending
+                // needs it once the login is there) and no stream is read.
+                None
+            } else {
             let id = st.next_chat;
             st.next_chat += 1;
             st.chat = Some(Chat { id, broadcast_id: found.broadcast_id.clone(), cursor: String::new(), fails: 0, hello: false, task: None });
-            id
+            Some(id)
+            }
         };
         self.set_status(vec![
             ("live", json!(true)),
@@ -323,9 +429,13 @@ impl XSource {
             ("state", json!("RUNNING")),
             ("url", json!(format!("https://x.com/i/broadcasts/{}", found.broadcast_id))),
             ("error", Value::Null),
-            ("notice", json!(NAMES_NOTICE)),
+            ("notice", Value::Null),
         ]);
-        self.start_stream(chat_id, found.broadcast_id);
+        match chat_id {
+            Some(id) => self.start_stream(id, found.broadcast_id),
+            // looked at again soon, so a login that happened meanwhile starts the chat
+            None => return LIVE_CHECK_MS,
+        }
         LIVE_CHECK_MS
     }
 
@@ -369,13 +479,13 @@ impl XSource {
             Some((id, b)) => self.tick_live(id, b).await,
             None => self.tick_resolve().await,
         };
-        let stopped = {
+        let (stopped, rerun) = {
             let mut st = self.st.lock().unwrap();
             st.polling = false;
-            st.stopped
+            (st.stopped, std::mem::take(&mut st.rerun))
         };
         if !stopped {
-            self.schedule(next);
+            self.schedule(if rerun { 0 } else { next });
         }
     }
 
@@ -487,26 +597,93 @@ impl XSource {
         }
         let mut st = self.st.lock().unwrap();
         st.pending.push(ev);
-        if !st.pending_armed {
+        if st.pending.len() > MAX_PENDING {
+            let cut = st.pending.len() - MAX_PENDING;
+            st.pending.drain(..cut);
+        }
+        // A running flush takes what arrives meanwhile when it is done with its batch.
+        if !st.pending_armed && st.flushing != Some(chat_id) {
             st.pending_armed = true;
             let s = self.clone();
             st.pending_timer.set(Duration::from_millis(BATCH_MS), async move {
-                s.st.lock().unwrap().pending_armed = false;
-                s.flush(chat_id);
+                {
+                    let mut st = s.st.lock().unwrap();
+                    st.pending_armed = false;
+                    if st.flushing == Some(chat_id) {
+                        return;
+                    }
+                    st.flushing = Some(chat_id);
+                }
+                let s2 = s.clone();
+                s.jobs.spawn(s2.flush_task(chat_id));
             });
         }
     }
 
-    fn flush(&self, chat_id: u64) {
+    /// Hand the waiting events on, batch after batch, until none are left. Each batch waits for its authors' names.
+    async fn flush_task(self: Arc<Self>, chat_id: u64) {
+        loop {
+            let batch = {
+                let mut st = self.st.lock().unwrap();
+                let current = st.chat.as_ref().map(|c| c.id) == Some(chat_id);
+                if !current || st.pending.is_empty() || st.stopped {
+                    if st.flushing == Some(chat_id) {
+                        st.flushing = None;
+                    }
+                    return;
+                }
+                std::mem::take(&mut st.pending)
+            };
+            let msgs = self.name_batch(chat_id, &batch).await;
+            self.deliver(chat_id, msgs);
+        }
+    }
+
+    /// The batch's messages, each with its author's name; those whose author has no username are left out.
+    /// Unknown authors are looked up (retrying a failed call with backoff, then the batch is dropped).
+    async fn name_batch(&self, chat_id: u64, batch: &[Value]) -> Vec<Value> {
+        let ids = names::unknown_ids(batch.iter().map(|ev| js_string(&ev["userId"])));
+        if !ids.is_empty() {
+            let mut attempt = 0;
+            loop {
+                match names::fetch_names(&ids).await {
+                    Ok(()) => break,
+                    Err(e) if e.is_auth() => {
+                        self.ctx.log(&format!("[x:{}] name lookup refused ({}), login expired", self.norm, e.status));
+                        return Vec::new();
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        self.ctx.log(&format!("[x:{}] name lookup failed ({attempt}): {}", self.norm, e.message));
+                        if attempt > LOOKUP_RETRIES || !self.is_current(chat_id) {
+                            return Vec::new();
+                        }
+                        tokio::time::sleep(Duration::from_millis(1000 * (1 << (attempt - 1)))).await;
+                    }
+                }
+            }
+        }
+        if !auth::is_logged_in() {
+            return Vec::new();
+        }
+        batch
+            .iter()
+            .filter_map(|ev| match names::cached(&js_string(&ev["userId"])) {
+                Known::User(u) => to_x_chat_msg(ev, &u),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Add a named batch to the backlog and emit it: the first batch is the backfill and goes out as one chatlog.
+    fn deliver(&self, chat_id: u64, msgs: Vec<Value>) {
         let frame = {
             let mut st = self.st.lock().unwrap();
-            let batch = std::mem::take(&mut st.pending);
-            if batch.is_empty() || st.chat.as_ref().map(|c| c.id) != Some(chat_id) {
+            if st.chat.as_ref().map(|c| c.id) != Some(chat_id) {
                 return;
             }
             let mut fresh: Vec<Value> = Vec::new();
-            for ev in &batch {
-                let Some(msg) = to_x_chat_msg(ev) else { continue };
+            for msg in msgs {
                 if !st.seen.insert(js_string(&msg["id"])) {
                     continue;
                 }
@@ -537,6 +714,29 @@ impl XSource {
         }
     }
 
+    /// The login changed (in, out, expired): start over, so a login brings the backfill in as a chatlog and a
+    /// logout empties the column.
+    fn on_auth_change(self: &Arc<Self>) {
+        if self.stopped() {
+            return;
+        }
+        self.drop_chat();
+        let f = {
+            let mut st = self.st.lock().unwrap();
+            st.backlog.clear();
+            st.seen.clear();
+            st.soft_misses = 0;
+            st.rerun = true;
+            chatlog_of(&st)
+        };
+        self.emit(f);
+        self.publish_conn();
+        // the running tick picks `rerun` up when it ends; otherwise resolve now
+        if !self.st.lock().unwrap().polling {
+            self.schedule(0);
+        }
+    }
+
     fn drop_chat(&self) {
         let task = {
             let mut st = self.st.lock().unwrap();
@@ -561,12 +761,27 @@ impl Source for XSource {
             f
         };
         self.emit(f);
+        // conn (canSend, the login ask) and the chat itself follow the login
+        let me: Weak<XSource> = Arc::downgrade(&self);
+        let id = auth::EVENTS.on(Arc::new(move |_| {
+            if let Some(s) = me.upgrade() {
+                s.on_auth_change();
+            }
+        }));
+        self.st.lock().unwrap().auth_listener = Some(id);
         let s = self.clone();
         self.jobs.spawn(s.tick());
     }
 
     fn stop(&self) {
-        self.st.lock().unwrap().stopped = true;
+        {
+            let mut st = self.st.lock().unwrap();
+            st.stopped = true;
+            if let Some(id) = st.auth_listener.take() {
+                auth::EVENTS.off(id);
+            }
+        }
+        set_broadcast(&self.norm, None);
         self.drop_chat();
         self.st.lock().unwrap().poll_timer.clear();
         self.jobs.abort_all();

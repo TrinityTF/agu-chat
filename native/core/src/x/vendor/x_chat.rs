@@ -7,8 +7,9 @@
 //! `ts` as the cursor, or 30 seconds later after an error. An event is {ts, chatType, userId, message}: `ts`
 //! is epoch nanoseconds as a string, chatType 1 is a chat message, userId is the X account's rest id.
 //!
-//! A GUEST TOKEN IS ENOUGH to read it. NAMES need a login (the lookup x.com uses answers 404 to a guest), so
-//! messages arrive under a placeholder name made from the last digits of the user id.
+//! A GUEST TOKEN IS ENOUGH to read the stream. NAMES need a login (the lookup x.com uses answers 404 to a guest):
+//! `to_x_chat_msg` is given the chatter looked up with the user's session (x/names.rs) and makes no message for
+//! an author whose username is not known.
 //!
 //! Differences from the JS: the `fetch`/`guestToken` injection points are gone, `onEvent` is a closure
 //! argument, and the request gets a 30 s header deadline (JS had none; a hang there would stall the loop).
@@ -18,6 +19,7 @@ use serde_json::{json, Value};
 use super::x_live::{guest_token, WEB_BEARER};
 use crate::net::{self, FetchOpts};
 use crate::util::{js_number, js_string, js_trim, now_ms, truthy};
+use crate::x::names::XUser;
 use crate::x::ua::get_user_agent;
 
 // Both hosts x.com serves the endpoint on; the second is tried when the first fails outright.
@@ -53,16 +55,9 @@ pub fn ts_to_ms(ts: &str) -> i64 {
     }
 }
 
-/// What a message shows for someone whose name is not known (a guest cannot look names up).
-pub fn placeholder_name(user_id: &str) -> String {
-    let chars: Vec<char> = user_id.chars().collect();
-    let tail: String = chars[chars.len().saturating_sub(5)..].iter().collect();
-    format!("X user {tail}")
-}
-
-/// One live-chat event -> a chat message, or None for everything else. Only chatType 1 with text is a
-/// message; the stream also carries moderator lists, can/cannot-chat notices and mutes.
-pub fn to_x_chat_msg(ev: &Value) -> Option<Value> {
+/// One live-chat event -> a chat message, or None for everything else. Only chatType 1 with text from an author
+/// with a known username is a message; the stream also carries moderator lists, can/cannot-chat notices and mutes.
+pub fn to_x_chat_msg(ev: &Value, author: &XUser) -> Option<Value> {
     if !ev.is_object() || ev["chatType"] != 1 {
         return None;
     }
@@ -71,6 +66,9 @@ pub fn to_x_chat_msg(ev: &Value) -> Option<Value> {
         return None;
     }
     let (ts, uid) = (js_string(&ev["ts"]), js_string(&ev["userId"]));
+    if author.username.is_empty() || author.id != uid {
+        return None;
+    }
     let ms = ts_to_ms(&ts);
     Some(json!({
         "platform": "x",
@@ -79,9 +77,10 @@ pub fn to_x_chat_msg(ev: &Value) -> Option<Value> {
         "ts": if ms != 0 { ms } else { now_ms() },
         "user": {
             "id": uid,
-            "name": placeholder_name(&uid),
-            "login": "",
-            "avatar": "",
+            "name": if author.name.is_empty() { &author.username } else { &author.name },
+            "login": author.username,
+            "avatar": author.avatar,
+            "verified": author.verified,
             "twitterId": uid,
         },
         "text": text,
@@ -159,30 +158,39 @@ mod tests {
         assert_eq!(ts_to_ms("123456"), 0);
         assert_eq!(ts_to_ms("1234567"), 1);
         assert_eq!(ts_to_ms(""), 0);
-        assert_eq!(placeholder_name("1234567890"), "X user 67890");
-        assert_eq!(placeholder_name("42"), "X user 42");
+    }
+
+    fn author(id: &str, login: &str, name: &str) -> XUser {
+        XUser { id: id.into(), username: login.into(), name: name.into(), avatar: "https://x/a.jpg".into(), verified: true }
     }
 
     #[test]
     fn events_to_rows() {
         let ev = json!({"ts": "1794052800123456789", "chatType": 1, "userId": "1234567890", "message": "hello"});
-        let m = to_x_chat_msg(&ev).unwrap();
+        let a = author("1234567890", "alice", "Alice A");
+        let m = to_x_chat_msg(&ev, &a).unwrap();
         assert_eq!(m["id"], "1794052800123456789:1234567890");
         assert_eq!(m["ts"], 1_794_052_800_123i64);
-        assert_eq!(m["user"], json!({"id": "1234567890", "name": "X user 67890", "login": "", "avatar": "", "twitterId": "1234567890"}));
+        assert_eq!(m["user"], json!({"id": "1234567890", "name": "Alice A", "login": "alice", "avatar": "https://x/a.jpg", "verified": true, "twitterId": "1234567890"}));
         assert_eq!(m["text"], "hello");
         assert_eq!(m["platform"], "x");
+        // an empty display name falls back to the username
+        assert_eq!(to_x_chat_msg(&ev, &author("1234567890", "alice", "")).unwrap()["user"]["name"], "alice");
+        // no username, or somebody else's name: no message, never a placeholder
+        assert!(to_x_chat_msg(&ev, &author("1234567890", "", "Alice")).is_none());
+        assert!(to_x_chat_msg(&ev, &author("999", "bob", "Bob")).is_none());
         // numeric userId is stringified
-        assert_eq!(to_x_chat_msg(&json!({"ts": "1794052800123456789", "chatType": 1, "userId": 99, "message": "x"})).unwrap()["user"]["id"], "99");
+        assert_eq!(to_x_chat_msg(&json!({"ts": "1794052800123456789", "chatType": 1, "userId": 99, "message": "x"}), &author("99", "n", "N")).unwrap()["user"]["id"], "99");
         // not messages
-        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 2, "userId": "1", "message": "x"})).is_none());
-        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 1, "userId": "1", "message": "   "})).is_none());
-        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 1, "userId": "", "message": "x"})).is_none());
-        assert!(to_x_chat_msg(&json!({"chatType": 1, "userId": "1", "message": "x"})).is_none());
-        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 1, "userId": "1", "message": 5})).is_none());
-        assert!(to_x_chat_msg(&json!("str")).is_none());
+        let a1 = author("1", "a", "A");
+        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 2, "userId": "1", "message": "x"}), &a1).is_none());
+        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 1, "userId": "1", "message": "   "}), &a1).is_none());
+        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 1, "userId": "", "message": "x"}), &a1).is_none());
+        assert!(to_x_chat_msg(&json!({"chatType": 1, "userId": "1", "message": "x"}), &a1).is_none());
+        assert!(to_x_chat_msg(&json!({"ts": "1", "chatType": 1, "userId": "1", "message": 5}), &a1).is_none());
+        assert!(to_x_chat_msg(&json!("str"), &a1).is_none());
         // a short ts has no millisecond part: falls back to now
-        let short = to_x_chat_msg(&json!({"ts": "12345", "chatType": 1, "userId": "1", "message": "x"})).unwrap();
+        let short = to_x_chat_msg(&json!({"ts": "12345", "chatType": 1, "userId": "1", "message": "x"}), &a1).unwrap();
         assert!(short["ts"].as_i64().unwrap() > 1_700_000_000_000);
     }
 }
