@@ -111,7 +111,6 @@ pub struct SettingsDialog {
     pub(super) err: HashMap<String, String>,
     // accounts
     prompts: HashMap<Platform, DevicePrompt>,
-    twitch_changing: bool,
     busy: bool,
     rumble_need_code: bool,
     copied: bool,
@@ -270,7 +269,6 @@ impl SettingsDialog {
             slider_bounds: HashMap::new(),
             err: HashMap::new(),
             prompts: HashMap::new(),
-            twitch_changing: false,
             busy: false,
             rumble_need_code: false,
             copied: false,
@@ -374,14 +372,7 @@ impl SettingsDialog {
     }
 
     fn commit(&mut self, key: &str, enter: bool, cx: &mut Context<Self>) {
-        if key == "twitch.cid" {
-            if enter {
-                let v = self.text_of(key, cx);
-                if !v.trim().is_empty() {
-                    self.save_client_id(v.trim().to_string(), cx);
-                }
-            }
-        } else if key == "ign.user" {
+        if key == "ign.user" {
             if enter {
                 self.add_ignored_user(cx);
             }
@@ -706,17 +697,9 @@ impl SettingsDialog {
         cx.notify();
     }
 
-    fn save_client_id(&mut self, v: String, cx: &mut Context<Self>) {
-        self.set(json!({ "twitchClientId": v.trim() }), cx);
-        self.set_text_of("twitch.cid", "", cx);
-        self.twitch_changing = false;
-        cx.notify();
-    }
-
     /// One Twitch login: the window of `twitch_login.rs` signs in on twitch.tv and authorises the app, so there is
     /// no code to show; this only waits with the user.
-    fn twitch_account(&mut self, st: &AccountState, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let own_id = self.settings.twitch_client_id.clone();
+    fn twitch_account(&mut self, st: &AccountState, cx: &mut Context<Self>) -> AnyElement {
         let err = self.err.get("twitch").cloned().or_else(|| st.error.clone()).unwrap_or_default();
         let body: AnyElement = if st.connected {
             let mut col = div().flex().flex_col().gap(px(6.)).child(self.connected_line(Platform::Twitch, st, cx));
@@ -738,61 +721,7 @@ impl SettingsDialog {
             let busy = self.busy;
             let login = btn(eid("tw-login"), "Log in with Twitch", BtnOpts { primary: true, disabled: busy, ..Default::default() });
             let login = if busy { login } else { login.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.login(Platform::Twitch, json!({}), cx))) };
-            let advanced: AnyElement = if self.twitch_changing {
-                let input = self.input("twitch.cid", "Your app's Client ID", InputStyle::Field, "", false, false, window, cx);
-                let can_save = !self.text_of("twitch.cid", cx).trim().is_empty();
-                let save = btn(eid("tw-save"), "Save", BtnOpts { primary: true, disabled: !can_save, ..Default::default() });
-                let save = if can_save {
-                    save.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        let v = this.text_of("twitch.cid", cx);
-                        this.save_client_id(v, cx);
-                    }))
-                } else {
-                    save
-                };
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.))
-                    .child(div().flex_1().min_w_0().child(input))
-                    .child(save)
-                    .child(btn(eid("tw-cancel"), "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.twitch_changing = false;
-                        cx.notify();
-                    })))
-                    .into_any_element()
-            } else if !own_id.is_empty() {
-                let short: String = own_id.chars().take(6).collect();
-                txt(11.)
-                    .flex()
-                    .text_color(c(theme::FAINT))
-                    .child(format!("Using your own Twitch app ({short}…). "))
-                    .child(
-                        div()
-                            .id("tw-default")
-                            .underline()
-                            .hover(|s| s.text_color(c(theme::TEXT)))
-                            .child("Use Agu Chat's")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_client_id(String::new(), cx))),
-                    )
-                    .into_any_element()
-            } else {
-                txt(11.)
-                    .text_color(c(theme::FAINT))
-                    .child(
-                        div()
-                            .id("tw-adv")
-                            .underline()
-                            .hover(|s| s.text_color(c(theme::TEXT)))
-                            .child("Advanced: log in through your own Twitch app")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.twitch_changing = true;
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element()
-            };
-            div().flex().flex_col().gap(px(8.)).child(login).child(advanced).into_any_element()
+            login.into_any_element()
         };
         Self::card().child(Self::account_title(Platform::Twitch)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
     }
@@ -954,7 +883,7 @@ impl SettingsDialog {
         let get = |p: Platform| accounts.get(&p).cloned().unwrap_or_default();
         div()
             .child(Self::h("Accounts"))
-            .child(self.twitch_account(&get(Platform::Twitch), window, cx))
+            .child(self.twitch_account(&get(Platform::Twitch), cx))
             .child(self.rumble_account(&get(Platform::Rumble), window, cx))
             .child(self.kick_account(&get(Platform::Kick), cx))
             .child(self.other_account(Platform::Youtube, &get(Platform::Youtube), cx))
