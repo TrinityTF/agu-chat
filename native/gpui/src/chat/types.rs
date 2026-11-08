@@ -35,6 +35,8 @@ lenient! {
         pub ts: i64,
         pub user: ChatUser,
         pub badges: String,
+        /// IRC `badge-info`: "subscriber/14" is the months behind the subscriber badge
+        pub badge_info: String,
         pub text: String,
         pub emotes: String,
         pub gifs: Option<String>,

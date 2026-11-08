@@ -280,7 +280,15 @@ impl TwitchSource {
     // ---------- anonymous mod feed ----------
 
     fn push_mod_feed(&self, kind: &str, text: &str) {
-        let feed = json!({"ts": now_ms(), "kind": kind, "text": text});
+        self.push_mod_feed_rec(kind, text, None);
+    }
+
+    /// `rec` is the structured form of a one-user action (who, by whom, how long, why) for the card's history.
+    fn push_mod_feed_rec(&self, kind: &str, text: &str, rec: Option<Value>) {
+        let mut feed = json!({"ts": now_ms(), "kind": kind, "text": text});
+        if let Some(r) = rec {
+            feed["mod"] = r;
+        }
         {
             let mut s = self.st.lock().unwrap();
             s.mod_feed.push(feed.clone());
@@ -366,7 +374,8 @@ impl TwitchSource {
         let Some(action) = event.get("action").and_then(Value::as_str).filter(|a| !a.is_empty()) else { return };
         let actor = or_str(or_str(js_str_or_empty(event.get("moderator_user_name")), js_str_or_empty(event.get("moderator_user_login"))), "A moderator".into());
         if let Some(built) = build_moderate_entry(action, &actor, event) {
-            self.push_mod_feed(built.kind, &built.text);
+            let rec = super::vendor::modfeed_text::moderate_record(action, &actor, event);
+            self.push_mod_feed_rec(built.kind, &built.text, rec);
         }
     }
 

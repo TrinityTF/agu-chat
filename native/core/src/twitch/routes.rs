@@ -394,13 +394,11 @@ async fn mod_user(req: RouteReq) -> R {
             Err(err) => follow_error = Some(err.message),
         }
     }
-    let mut ban = Some(Value::Null); // None = undefined (omitted)
+    // Helix answers /moderation/banned only for the channel's own broadcaster (a moderator's token gets a 401),
+    // so for everyone else the ban is left out: the card derives it from the bans and timeouts it saw itself.
+    let mut ban = None; // None = undefined (omitted)
     let mut ban_error: Option<String> = None;
-    if !allowed {
-        ban_error = Some("Only moderators can see ban status".into());
-    } else if !has("moderator:manage:banned_users") {
-        ban_error = Some("missing moderator:manage:banned_users scope".into());
-    } else {
+    if acc.is_broadcaster && has("moderator:manage:banned_users") {
         match helix_get("/moderation/banned", q! {"broadcaster_id" => n.channel_id.clone(), "user_id" => id.clone()}).await {
             Ok(b) => {
                 ban = Some(match b["data"].get(0).filter(|r| !r.is_null()) {
@@ -408,10 +406,7 @@ async fn mod_user(req: RouteReq) -> R {
                     None => Value::Null,
                 });
             }
-            Err(err) => {
-                ban = None;
-                ban_error = Some(err.message);
-            }
+            Err(err) => ban_error = Some(err.message),
         }
     }
     let mut out = json!({"user": user, "followedAt": followed_at});

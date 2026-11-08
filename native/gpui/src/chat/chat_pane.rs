@@ -1420,7 +1420,7 @@ impl ChatPane {
         let above = f32::from(rect.top()) > f32::from(wb.size.height) / 2.0;
         // A card the user once resized by hand sets the size of every card after it.
         let remembered = crate::window_state::card_size();
-        let (cw, ch) = remembered.map(|s| (s.width.max(240.0), s.height.max(super::popout::POPOUT_MIN_H))).unwrap_or((300.0, super::popout::POPOUT_H0));
+        let (cw, ch) = remembered.map(|s| (s.width.max(240.0), s.height.max(super::popout::POPOUT_MIN_H))).unwrap_or((340.0, super::popout::POPOUT_H0));
         // The pop-out opens beside the name: below it, or above it in the lower half (cards run ~380px tall).
         let up = if remembered.is_some() { ch } else { 380.0 };
         let x = f32::from(wb.origin.x) + f32::from(rect.left()) + stagger;
@@ -1481,7 +1481,9 @@ impl ChatPane {
                     _ => false,
                 }
         };
-        let recent: Vec<RowRef> = self.store.rows().iter().rev().filter(|r| mine(r)).take(15).cloned().collect();
+        let recent: Vec<RowRef> = self.store.rows().iter().rev().filter(|r| mine(r)).take(super::user_card::RECENT_MAX).cloned().collect();
+        let recent_total = self.store.rows().iter().filter(|r| mine(r)).count();
+        let (badges, sub) = recent.first().map(|r| super::user_card::badges_of(r, env.map(|e| &*e.badge_map), &st.rumble_badges)).unwrap_or_default();
         let login = ignore_login(&user.login, &user.name);
         Some(super::user_card::CardCtx {
             source: st.source.clone(),
@@ -1493,7 +1495,11 @@ impl ChatPane {
             can_ignore: !login.is_empty(),
             emotes: env.and_then(|e| e.emotes.clone()),
             recent,
+            recent_total,
             readable_colors: self.settings.readable_colors,
+            badges,
+            sub,
+            me: self.me_login_lower(),
         })
     }
 
