@@ -16,7 +16,7 @@ use crate::layout::app::{AguApp, DragGhost, SourcesDrag, SplitDrag, TabDrag};
 use crate::chat::chat_pane::Activity;
 use crate::layout::hotkeys::{hotkey_hint, HotkeyAction};
 use crate::layout::tab_window::tab_window;
-use crate::layout::tree::{auto_title, tab_title};
+use crate::layout::tree::{auto_title, tab_title, whisper_only};
 use crate::layout::ui::{tip, MenuEntry, MenuItem, MenuState};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
@@ -69,6 +69,9 @@ impl AguApp {
         let mut w = 1.0 + 20.0 + title;
         if mark {
             w += 6.0 + 4.0;
+        }
+        if whisper_only(t) {
+            w += 12.0 + 4.0;
         }
         if selected && self.tabs.editing.as_deref() != Some(&t.id) {
             w += 4.0 + 16.0;
@@ -346,6 +349,9 @@ impl AguApp {
             } else {
                 if let Some(m) = mark {
                     el = el.child(div().size(px(6.)).flex_none().rounded_full().bg(if m == Activity::Highlight { c(theme::ACCENT_SOFT) } else { c(theme::FAINT) }));
+                }
+                if whisper_only(t) {
+                    el = el.child(div().flex_none().child(icons::icon(icons::MAIL, 12.).color(c(theme::platform_color(agu_chat_core::protocol::Platform::Twitch)))));
                 }
                 el = el.child(div().id(("tab-title", i)).min_w_0().truncate().tooltip(tip(full_title)).child(label));
             }

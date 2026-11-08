@@ -58,6 +58,8 @@ pub const SCOPES: &[&str] = &[
     // Only used on the user's own channel, to label channel-point redeems and Bits Power-ups in chat.
     "channel:read:redemptions",
     "bits:read",
+    "user:read:whispers", // whisper tabs: hear whispers (EventSub user.whisper.message)
+    "user:manage:whispers", // send them
 ];
 
 /// "change": login / logout / expiry / scope change (not routine refreshes)

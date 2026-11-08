@@ -15,7 +15,7 @@ use gpui::{
 use crate::icons;
 use crate::layout::app::{AguApp, DragGhost, Dialog, SourcesDrag, SplitDrag};
 use crate::layout::hotkeys::{hotkey_hint, HotkeyAction};
-use crate::layout::tree::{short_name, source_key, Edge, Leaf};
+use crate::layout::tree::{is_whisper, short_name, source_key, Edge, Leaf};
 use crate::layout::ui::{tip, MenuEntry, MenuItem};
 use crate::theme::{self, c};
 
@@ -151,7 +151,7 @@ impl AguApp {
                         div()
                             .relative()
                             .flex_none()
-                            .child(icons::platform_icon(platform, 14., true))
+                            .child(icons::source_icon(&rows[idxs[0]].0, 14., true))
                             .child(
                                 div()
                                     .absolute()
@@ -210,7 +210,7 @@ impl AguApp {
                         .items_center()
                         .gap(px(6.))
                         .tooltip(tip(dot_tip(i)))
-                        .child(icons::platform_icon(s.platform, 14., true))
+                        .child(icons::source_icon(s, 14., true))
                         .child(div().min_w_0().truncate().font_weight(gpui::FontWeight::MEDIUM).child(short_name(s)))
                         .child(dot_el),
                 );
@@ -247,12 +247,16 @@ impl AguApp {
                 v
             }
         };
-        header = header.child(modes_view);
+        // Whispers have no moderation: nothing to toggle or set.
+        let whispers_only = leaf.sources.iter().all(is_whisper);
+        if !whispers_only {
+            header = header.child(modes_view);
+        }
 
         // Mod mode toggle
         let mod_on = leaf.mod_mode;
         let (t1, l1) = (tab_id.clone(), leaf_id.clone());
-        header = header.child(
+        header = header.when(!whispers_only, |h| h.child(
             div()
                 .id("hdr-mod")
                 .flex()
@@ -266,7 +270,7 @@ impl AguApp {
                 .tooltip(tip(if mod_on { "Mod mode on" } else { "Mod mode off" }))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.toggle_mod(&t1, &l1, cx)))
                 .child(icons::icon(icons::SWORD, 14.)),
-        );
+        ));
 
         // Split menu
         let menu_key = format!("split-menu:{leaf_id}");

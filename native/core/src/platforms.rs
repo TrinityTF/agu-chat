@@ -2,6 +2,7 @@
 //! contract from docs/ARCHITECTURE.md (`PlatformModule`, `Source`, `Accounts`) and the shared `Ctx` that
 //! main.js builds and hands to the modules.
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
@@ -21,12 +22,14 @@ pub struct Ctx {
     pub secrets: Arc<SecretStore>,
     pub logger: Arc<Logger>,
     pub user_agent: String,
+    /// The app's data dir, for a module's own files.
+    pub data_dir: PathBuf,
     accounts_changed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Ctx {
-    pub fn new(settings: Arc<SettingsStore>, secrets: Arc<SecretStore>, logger: Arc<Logger>, user_agent: String) -> Self {
-        Ctx { settings, secrets, logger, user_agent, accounts_changed: Mutex::new(None) }
+    pub fn new(settings: Arc<SettingsStore>, secrets: Arc<SecretStore>, logger: Arc<Logger>, user_agent: String, data_dir: PathBuf) -> Self {
+        Ctx { settings, secrets, logger, user_agent, data_dir, accounts_changed: Mutex::new(None) }
     }
     pub fn log(&self, msg: &str) {
         self.logger.log(msg);

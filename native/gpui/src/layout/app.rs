@@ -10,7 +10,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agu_chat_core::protocol::{AguBridge, Layout, Settings, SourceRef, SplitNode, Tab, Unsubscribe, UpdaterState};
+use agu_chat_core::protocol::{AguBridge, Layout, Platform, Settings, SourceRef, SplitNode, Tab, Unsubscribe, UpdaterState};
+use agu_chat_core::twitch::whisper;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use gpui::{
@@ -199,6 +200,7 @@ impl AguApp {
             _unsubs: Vec::new(),
         };
         app.sync_panes(cx);
+        app.listen_for_whispers(cx);
 
         // settings / updater changes from the backend
         let (mut rx, u) = stream::<Settings>(|cb| bridge.on_settings(cb));
@@ -358,6 +360,52 @@ impl AguApp {
             }
         }
         self.panes.retain(|id, _| keep.contains(id));
+    }
+
+    /// The whisper inbox (core's `whisper:*` source) says who whispered; a conversation with no tab yet gets one.
+    fn listen_for_whispers(&mut self, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        let inbox_sub: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+        let (tx, mut rx) = unbounded::<String>();
+        let ids = inbox_sub.clone();
+        let unsub = bridge.on_frame(Arc::new(move |sub, frame| {
+            if ids.lock().unwrap().as_deref() == Some(sub.as_str()) && frame["type"] == "whisper" {
+                if let Some(login) = frame["login"].as_str() {
+                    let _ = tx.unbounded_send(login.to_string());
+                }
+            }
+        }));
+        self._unsubs.push(Unsub(Some(unsub)));
+        cx.spawn(async move |this, cx| {
+            let source = SourceRef { platform: Platform::Twitch, channel: whisper::inbox_channel().into() };
+            let Ok(id) = bridge.subscribe(source).await else { return };
+            *inbox_sub.lock().unwrap() = Some(id);
+            while let Some(login) = rx.next().await {
+                if this.update(cx, |this, cx| this.on_whisper(&login, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// A whisper arrived from `login`. Without a tab for the conversation, one opens in the background, marked
+    /// like any tab with news: it never takes the selection or the focus.
+    fn on_whisper(&mut self, login: &str, cx: &mut Context<Self>) {
+        // an ignored user's whispers are kept out of sight like their chat: no tab pops up for them
+        if crate::chat::ignores::is_user_ignored(&self.settings.ignored_users, Platform::Twitch, login) {
+            return;
+        }
+        let channel = whisper::channel_for(login);
+        let open = self.layout.tabs.iter().any(|t| leaves(t.root.as_ref()).iter().any(|l| l.sources.iter().any(|s| s.platform == Platform::Twitch && s.channel == channel)));
+        if open {
+            return;
+        }
+        let tab = new_tab(Some(vec![SourceRef { platform: Platform::Twitch, channel }]));
+        let id = tab.id.clone();
+        self.mutate(cx, |l| l.tabs.push(tab));
+        self.unread.insert(id, Activity::Highlight);
+        cx.notify();
     }
 
     /// `activityFor(tabId)`

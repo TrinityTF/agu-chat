@@ -103,7 +103,7 @@ impl Backend {
         );
         let logger = Arc::new(Logger::new(&data_dir, meta.packaged));
         let store = Store::open(data_dir.clone(), logger.clone());
-        let ctx = Arc::new(Ctx::new(store.settings.clone(), store.secrets.clone(), logger.clone(), user_agent(&meta.version)));
+        let ctx = Arc::new(Ctx::new(store.settings.clone(), store.secrets.clone(), logger.clone(), user_agent(&meta.version), data_dir.clone()));
         let modules = Arc::new(modules());
         crate::kick::auth::set_opener(Arc::new(|url: &str| {
             if is_openable_url(url) {

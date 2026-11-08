@@ -218,6 +218,11 @@ fn map_emote(e: &Value, template: Option<&Value>) -> Option<Value> {
 // ---------- routes ----------
 
 async fn send(req: RouteReq) -> R {
+    if let Some(login) = super::whisper::login_of(&req.source.channel) {
+        let text = slice_utf16(&bstr(&body_of(&req.body), "text"), 10_000);
+        super::whisper::send(&login, &text).await?;
+        return ok_default();
+    }
     let n = need(&req, Some("user:write:chat")).await?;
     let b = body_of(&req.body);
     let text = slice_utf16(&bstr(&b, "text"), 500);
@@ -363,7 +368,10 @@ async fn caps(req: RouteReq) -> R {
 }
 
 async fn mod_user(req: RouteReq) -> R {
-    let n = need(&req, None).await?;
+    let whisper = super::whisper::parse(&req.source.channel).is_some();
+    if whisper && auth::current().is_none() {
+        return Err(login_required().into());
+    }
     let Some(id) = req.query_get("id").filter(|s| !s.is_empty()).map(String::from) else { return Err(local(400, "missing id")) };
     let page = helix_get("/users", q! {"id" => id.clone()}).await?;
     let u = page["data"].get(0).filter(|u| !u.is_null());
@@ -371,6 +379,11 @@ async fn mod_user(req: RouteReq) -> R {
         Some(u) => json!({"id": u["id"], "login": u["login"], "displayName": u["display_name"], "avatar": u["profile_image_url"].as_str().unwrap_or(""), "createdAt": u["created_at"]}),
         None => Value::Null,
     };
+    // a whisper conversation has no channel: the account itself, no follow or ban status
+    if whisper {
+        return ok(json!({"user": user, "followedAt": Value::Null}));
+    }
+    let n = need(&req, None).await?;
 
     // followedAt / ban only answer for a broadcaster or moderator, and need their scopes. A refusal is
     // reported as followError / banError so the card can tell "not following" apart from "could not check".
@@ -389,13 +402,11 @@ async fn mod_user(req: RouteReq) -> R {
             Err(err) => follow_error = Some(err.message),
         }
     }
-    let mut ban = Some(Value::Null); // None = undefined (omitted)
+    // Helix answers /moderation/banned only for the channel's own broadcaster (a moderator's token gets a 401),
+    // so for everyone else the ban is left out: the card derives it from the bans and timeouts it saw itself.
+    let mut ban = None; // None = undefined (omitted)
     let mut ban_error: Option<String> = None;
-    if !allowed {
-        ban_error = Some("Only moderators can see ban status".into());
-    } else if !has("moderator:manage:banned_users") {
-        ban_error = Some("missing moderator:manage:banned_users scope".into());
-    } else {
+    if acc.is_broadcaster && has("moderator:manage:banned_users") {
         match helix_get("/moderation/banned", q! {"broadcaster_id" => n.channel_id.clone(), "user_id" => id.clone()}).await {
             Ok(b) => {
                 ban = Some(match b["data"].get(0).filter(|r| !r.is_null()) {
@@ -403,10 +414,7 @@ async fn mod_user(req: RouteReq) -> R {
                     None => Value::Null,
                 });
             }
-            Err(err) => {
-                ban = None;
-                ban_error = Some(err.message);
-            }
+            Err(err) => ban_error = Some(err.message),
         }
     }
     let mut out = json!({"user": user, "followedAt": followed_at});

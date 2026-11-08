@@ -109,7 +109,7 @@ pub struct ModesButton {
 
 impl ModesButton {
     pub fn new(sources: &[SourceRef], cx: &mut Context<Self>) -> Self {
-        let twitch: Vec<SourceRef> = sources.iter().filter(|s| s.platform == Platform::Twitch).cloned().collect();
+        let twitch: Vec<SourceRef> = sources.iter().filter(|s| s.platform == Platform::Twitch && !crate::layout::tree::is_whisper(s)).cloned().collect();
         let mut v = ModesButton {
             twitch,
             caps: Default::default(),

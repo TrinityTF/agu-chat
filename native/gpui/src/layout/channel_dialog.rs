@@ -3,13 +3,17 @@
 use std::rc::Rc;
 
 use agu_chat_core::protocol::{Platform, SourceRef};
+use agu_chat_core::twitch::whisper;
 use gpui::{div, prelude::*, px, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Subscription, Window};
 
 use crate::icons;
-use crate::layout::tree::{short_name, source_key};
+use crate::layout::tree::{is_whisper, short_name, source_key};
 use crate::layout::ui::{btn, modal, BtnOpts};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
+
+const WHISPER_HINT: &str = "Twitch username to whisper. Needs a Twitch login with whisper access, and a verified phone number on your Twitch account.";
+const WHISPER_PLACEHOLDER: &str = "username";
 
 fn hint(p: Platform) -> &'static str {
     match p {
@@ -92,6 +96,8 @@ pub struct ChannelDialog {
     title: String,
     submit_label: String,
     platform: Platform,
+    /// Twitch whispers instead of a channel's chat (the Whisper option next to the platforms)
+    whisper: bool,
     input: Entity<TextInput>,
     sources: Vec<SourceRef>,
     error: String,
@@ -101,7 +107,8 @@ pub struct ChannelDialog {
 impl ChannelDialog {
     pub fn new(window: &mut Window, cx: &mut Context<Self>, title: &str, initial: Vec<SourceRef>, submit_label: &str) -> Self {
         let platform = initial.first().map(|s| s.platform).unwrap_or(Platform::Twitch);
-        let input = cx.new(|cx| TextInput::new(window, cx, placeholder(platform), InputStyle::Field));
+        let whisper = initial.first().map(is_whisper).unwrap_or(false);
+        let input = cx.new(|cx| TextInput::new(window, cx, if whisper { WHISPER_PLACEHOLDER } else { placeholder(platform) }, InputStyle::Field));
         let sub = cx.subscribe(&input, |this, _input, ev: &TextInputEvent, cx| match ev {
             TextInputEvent::Changed => {
                 this.error.clear();
@@ -111,7 +118,7 @@ impl ChannelDialog {
             _ => {}
         });
         input.update(cx, |i, _| i.focus(window));
-        ChannelDialog { title: title.into(), submit_label: submit_label.into(), platform, input, sources: initial, error: String::new(), _sub: sub }
+        ChannelDialog { title: title.into(), submit_label: submit_label.into(), platform, whisper, input, sources: initial, error: String::new(), _sub: sub }
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &gpui::App) {
@@ -131,7 +138,12 @@ impl ChannelDialog {
                 None
             }
             Ok(channel) => {
-                let r = SourceRef { platform: self.platform, channel };
+                let r = SourceRef { platform: self.platform, channel: if self.whisper { whisper::channel_for(&channel) } else { channel } };
+                if self.sources.first().map(|s| is_whisper(s) != is_whisper(&r)).unwrap_or(false) {
+                    self.error = "A whisper can't share a split with channels.".into();
+                    cx.notify();
+                    return None;
+                }
                 let key = source_key(&r).to_lowercase();
                 if !self.sources.iter().any(|s| source_key(s).to_lowercase() == key) {
                     self.sources.push(r);
@@ -170,7 +182,7 @@ impl Render for ChannelDialog {
         let typed_empty = self.input.read(cx).text().trim().is_empty();
 
         let platforms = div().flex().flex_wrap().gap(px(4.)).children(Platform::ALL.iter().map(|&p| {
-            let selected = self.platform == p;
+            let selected = !self.whisper && self.platform == p;
             div()
                 .id(("platform", p as usize))
                 .flex()
@@ -185,6 +197,7 @@ impl Render for ChannelDialog {
                 .when(!selected, |d| d.border_color(c(theme::LINE)).text_color(c(theme::MUTED)).hover(|s| s.bg(c(theme::RAISED_2))))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.platform = p;
+                    this.whisper = false;
                     this.error.clear();
                     this.input.update(cx, |i, cx| {
                         i.set_placeholder(placeholder(p), cx);
@@ -195,6 +208,32 @@ impl Render for ChannelDialog {
                 .child(icons::platform_icon(p, 14., true))
                 .child(icons::platform_label(p))
         }));
+        let platforms = platforms.child(
+            div()
+                .id("platform-whisper")
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(4.))
+                .border_1()
+                .px(px(8.))
+                .py(px(4.))
+                .text_size(px(12.))
+                .when(self.whisper, |d| d.border_color(c(theme::ACCENT)).bg(theme::mention()).text_color(c(theme::TEXT)))
+                .when(!self.whisper, |d| d.border_color(c(theme::LINE)).text_color(c(theme::MUTED)).hover(|s| s.bg(c(theme::RAISED_2))))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.platform = Platform::Twitch;
+                    this.whisper = true;
+                    this.error.clear();
+                    this.input.update(cx, |i, cx| {
+                        i.set_placeholder(WHISPER_PLACEHOLDER, cx);
+                        i.focus(window);
+                    });
+                    cx.notify();
+                }))
+                .child(icons::icon(icons::MAIL, 14.).color(c(theme::platform_color(Platform::Twitch))))
+                .child("Whisper"),
+        );
 
         let in_split = if self.sources.is_empty() {
             div().text_size(px(12.)).text_color(c(theme::FAINT)).child("Nothing yet. Add several channels to merge their chats into one split.").into_any_element()
@@ -216,7 +255,7 @@ impl Render for ChannelDialog {
                         .pl(px(6.))
                         .pr(px(4.))
                         .text_size(px(12.))
-                        .child(icons::platform_icon(s.platform, 14., true))
+                        .child(icons::source_icon(s, 14., true))
                         .child(div().max_w(px(180.)).truncate().child(short_name(s)))
                         .child(
                             div()
@@ -245,7 +284,7 @@ impl Render for ChannelDialog {
             .child(div().child(Self::label("Platform".into())).child(platforms))
             .child(
                 div()
-                    .child(Self::label("Channel".into()))
+                    .child(Self::label(if self.whisper { "Username" } else { "Channel" }.into()))
                     .child(
                         div().flex().gap(px(6.)).child(div().flex_1().min_w_0().child(self.input.clone())).child(
                             btn("add-typed", "Add", BtnOpts { disabled: typed_empty, ..Default::default() }).when(!typed_empty, |b| {
@@ -255,7 +294,7 @@ impl Render for ChannelDialog {
                             }),
                         ),
                     )
-                    .child(div().mt(px(4.)).text_size(px(11.)).text_color(c(theme::FAINT)).child(hint(self.platform)))
+                    .child(div().mt(px(4.)).text_size(px(11.)).text_color(c(theme::FAINT)).child(if self.whisper { WHISPER_HINT } else { hint(self.platform) }))
                     .when(!self.error.is_empty(), |d| d.child(div().mt(px(4.)).text_size(px(11.)).text_color(c(theme::RED_400)).child(self.error.clone()))),
             )
             .child(
@@ -278,7 +317,7 @@ impl Render for ChannelDialog {
             .into_any_element();
 
         let close_fn: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |w, cx| close(&(), w, cx));
-        modal(&self.title, 460., close_fn, body, Some(footer))
+        modal(&self.title, 520., close_fn, body, Some(footer))
     }
 }
 

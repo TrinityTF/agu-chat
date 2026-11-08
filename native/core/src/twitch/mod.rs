@@ -3,6 +3,7 @@
 //!   reading   anonymous IRC (one shared socket, irc_hub.rs) + recent-messages history (backlog.rs)
 //!   mod feed  one EventSub session (eventsub.rs) for the channels the user moderates
 //!   writing   Helix with the user's own token (routes.rs)
+//!   whispers  reserved `whisper:` channels, see whisper.rs
 //!   login     OAuth device code flow with Agu Chat's Public client id (auth.rs)
 //!
 //! Nothing here talks to agu.lol / api.agu.lol, and there is no bot account or client secret.
@@ -19,6 +20,7 @@ pub mod rt;
 pub mod shared;
 pub mod source;
 pub mod vendor;
+pub mod whisper;
 
 use std::sync::{Arc, Mutex};
 
@@ -61,6 +63,9 @@ impl PlatformModule for TwitchModule {
     }
 
     fn normalize_channel(&self, input: &str) -> Result<String, String> {
+        if whisper::parse(input.trim()).is_some() {
+            return whisper::normalize(input);
+        }
         channel::normalize_channel(input)
     }
 
@@ -68,7 +73,11 @@ impl PlatformModule for TwitchModule {
         if rt::ctx().is_none() {
             rt::set_ctx(ctx); // sources can be created before init() in tests
         }
-        source::TwitchSource::new(channel, emit)
+        match whisper::parse(&channel) {
+            Some(whisper::Channel::Inbox) => whisper::Inbox::new(emit),
+            Some(whisper::Channel::User(login)) => whisper::Conversation::new(login, emit),
+            None => source::TwitchSource::new(channel, emit),
+        }
     }
 
     fn routes(&self) -> Vec<(String, Handler)> {

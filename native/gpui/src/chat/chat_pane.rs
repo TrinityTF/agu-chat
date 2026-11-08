@@ -41,6 +41,7 @@ use super::twitch::emotes::{merge_emote_sets, EmoteSets, ProviderScopedMap};
 use super::twitch::events::notice_visible;
 use super::twitch::use_twitch_data::{load_badges, load_provider_sets, ProviderSets, TwitchData};
 use super::types::*;
+use crate::layout::tree::{is_whisper, is_whisper_key};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 
 /// Tabs that got live chat while not selected: "message" (a subtle marker) or "highlight" (a strong one).
@@ -486,7 +487,9 @@ impl ChatPane {
         for (sk, source, channel_id) in sks {
             match source.platform {
                 Platform::Twitch => {
-                    if self.requested.insert(format!("badges:{sk}")) {
+                    // A whisper conversation has no channel: no badges, cheers, mod rights or channel emotes.
+                    let whisper = is_whisper(&source);
+                    if !whisper && self.requested.insert(format!("badges:{sk}")) {
                         let (bridge, s2, sk2) = (self.bridge.clone(), source.clone(), sk.clone());
                         cx.spawn(async move |this, cx| {
                             if let Some((map, cid)) = load_badges(&bridge, &s2, &sk2).await {
@@ -501,7 +504,7 @@ impl ChatPane {
                         })
                         .detach();
                     }
-                    if self.requested.insert(format!("cheermotes:{sk}:{acct}")) {
+                    if !whisper && self.requested.insert(format!("cheermotes:{sk}:{acct}")) {
                         let (bridge, s2, sk2) = (self.bridge.clone(), source.clone(), sk.clone());
                         cx.spawn(async move |this, cx| {
                             if let Some(cm) = super::twitch::cheermotes::load_cheermotes(&bridge, &s2, &sk2).await {
@@ -513,7 +516,7 @@ impl ChatPane {
                         })
                         .detach();
                     }
-                    if self.requested.insert(format!("caps:{sk}:{acct}")) {
+                    if !whisper && self.requested.insert(format!("caps:{sk}:{acct}")) {
                         let (bridge, s2, sk2) = (self.bridge.clone(), source.clone(), sk.clone());
                         cx.spawn(async move |this, cx| {
                             let caps = fetch_mod_caps(&bridge, &s2).await;
@@ -524,7 +527,7 @@ impl ChatPane {
                         })
                         .detach();
                     }
-                    if self.requested.insert(format!("pickeremotes:{sk}:{}", channel_id.clone().unwrap_or_default())) {
+                    if !whisper && self.requested.insert(format!("pickeremotes:{sk}:{}", channel_id.clone().unwrap_or_default())) {
                         let (bridge, s2, sk2, cid) = (self.bridge.clone(), source.clone(), sk.clone(), channel_id.clone().unwrap_or_else(|| sk.clone()));
                         cx.spawn(async move |this, cx| {
                             let r = super::twitch::emotes::fetch_twitch_picker_emotes(&bridge, &s2, &cid).await;
@@ -941,7 +944,8 @@ impl ChatPane {
                 }
             }
             activity.get_or_insert(Activity::Message);
-            let mention = matches!(&r.body, RowBody::Msg(m) if text_mentions_login(&m.text, &me_login));
+            // A whisper is addressed to the user by definition.
+            let mention = matches!(&r.body, RowBody::Msg(m) if is_whisper_key(&r.sk) || text_mentions_login(&m.text, &me_login));
             let rule = if mention { None } else { self.rule_of(r) };
             if !mention && rule.is_none() {
                 continue;
@@ -1416,7 +1420,7 @@ impl ChatPane {
         let above = f32::from(rect.top()) > f32::from(wb.size.height) / 2.0;
         // A card the user once resized by hand sets the size of every card after it.
         let remembered = crate::window_state::card_size();
-        let (cw, ch) = remembered.map(|s| (s.width.max(240.0), s.height.max(super::popout::POPOUT_MIN_H))).unwrap_or((300.0, super::popout::POPOUT_H0));
+        let (cw, ch) = remembered.map(|s| (s.width.max(240.0), s.height.max(super::popout::POPOUT_MIN_H))).unwrap_or((340.0, super::popout::POPOUT_H0));
         // The pop-out opens beside the name: below it, or above it in the lower half (cards run ~380px tall).
         let up = if remembered.is_some() { ch } else { 380.0 };
         let x = f32::from(wb.origin.x) + f32::from(rect.left()) + stagger;
@@ -1477,7 +1481,9 @@ impl ChatPane {
                     _ => false,
                 }
         };
-        let recent: Vec<RowRef> = self.store.rows().iter().rev().filter(|r| mine(r)).take(15).cloned().collect();
+        let recent: Vec<RowRef> = self.store.rows().iter().rev().filter(|r| mine(r)).take(super::user_card::RECENT_MAX).cloned().collect();
+        let recent_total = self.store.rows().iter().filter(|r| mine(r)).count();
+        let (badges, sub) = recent.first().map(|r| super::user_card::badges_of(r, env.map(|e| &*e.badge_map), &st.rumble_badges)).unwrap_or_default();
         let login = ignore_login(&user.login, &user.name);
         Some(super::user_card::CardCtx {
             source: st.source.clone(),
@@ -1489,7 +1495,11 @@ impl ChatPane {
             can_ignore: !login.is_empty(),
             emotes: env.and_then(|e| e.emotes.clone()),
             recent,
+            recent_total,
             readable_colors: self.settings.readable_colors,
+            badges,
+            sub,
+            me: self.me_login_lower(),
         })
     }
 

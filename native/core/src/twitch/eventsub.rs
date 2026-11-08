@@ -8,6 +8,9 @@
 //! the user's OWN channel it also hears channel-point redeems and Bits Power-ups (IRC never sees a redeem
 //! without text).
 //!
+//! The same session also carries the user's whispers (`user.whisper.message`, keyed under WHISPER_KEY in `subs`)
+//! for as long as whisper.rs wants them, so they arrive with no Twitch channel open too.
+//!
 //! It never sends anything on the socket (Twitch closes with 4001 on client traffic).
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -20,6 +23,7 @@ use super::auth;
 use super::helix::helix;
 use super::rt::{log, user_agent};
 use super::source::TwitchSource;
+use super::whisper;
 use crate::util::Timer;
 use crate::ws::{self, WsEvent, WsHandle};
 
@@ -47,6 +51,9 @@ const MOD_SUBS: [(&str, &str); 5] = [
 ];
 const REDEEM_SUB: (&str, &str) = ("channel.channel_points_custom_reward_redemption.add", "1");
 const POWER_UP_SUB: (&str, &str) = ("channel.custom_power_up_redemption.add", "1");
+const WHISPER_SUB: (&str, &str) = (whisper::EVENT_TYPE, "1");
+/// Where the whisper subscription sits in `subs` / `retry_timers`: a channel id is all digits, so it cannot clash.
+const WHISPER_KEY: &str = "@whispers";
 
 // Scope precheck, so a token that predates one of these scopes does not make Twitch refuse subscriptions one
 // by one: the 4 scopes below plus one of read/manage per channel.moderate category.
@@ -89,6 +96,8 @@ struct Sock {
 struct State {
     attached: HashMap<String, Arc<TwitchSource>>, // channelId -> source
     subs: HashMap<String, HashMap<String, String>>, // channelId -> (type -> subscription id)
+    /// whisper.rs wants the user's whispers, with or without attached channels
+    whispers: bool,
     ws: Option<Sock>,
     reconnect_socket: Option<Sock>, // session_reconnect handoff in flight
     ws_seq: u64,
@@ -115,6 +124,7 @@ impl EventSubManager {
             st: Mutex::new(State {
                 attached: HashMap::new(),
                 subs: HashMap::new(),
+                whispers: false,
                 ws: None,
                 reconnect_socket: None,
                 ws_seq: 0,
@@ -176,8 +186,7 @@ impl EventSubManager {
             t.clear();
         }
         let mine = s.subs.remove(&id);
-        let empty = s.attached.is_empty();
-        if empty {
+        if s.attached.is_empty() && !s.whispers {
             Self::close_locked(&mut s);
         }
         drop(s);
@@ -213,6 +222,107 @@ impl EventSubManager {
             let me = self.clone();
             tokio::spawn(async move { me.evaluate(source).await });
         }
+        if self.st.lock().unwrap().whispers {
+            let me = self.clone();
+            tokio::spawn(async move { me.evaluate_whispers().await });
+        }
+    }
+
+    // ---------- whispers ----------
+
+    /// Starts or stops listening for the user's whispers (whisper.rs calls it as conversations come and go).
+    pub fn set_whispers(self: &Arc<Self>, on: bool) {
+        let (changed, stale) = {
+            let mut s = self.st.lock().unwrap();
+            let changed = s.whispers != on;
+            s.whispers = on;
+            let mut stale = None;
+            if changed && !on {
+                if let Some(mut t) = s.retry_timers.remove(WHISPER_KEY) {
+                    t.clear();
+                }
+                stale = s.subs.remove(WHISPER_KEY).and_then(|m| m.into_values().next());
+                if s.attached.is_empty() {
+                    Self::close_locked(&mut s);
+                }
+            }
+            (changed, stale)
+        };
+        if let Some(sub_id) = stale.filter(|i| !i.is_empty()) {
+            tokio::spawn(async move {
+                let _ = helix("/eventsub/subscriptions", "DELETE", crate::q! {"id" => sub_id}, None).await;
+            });
+        }
+        if changed && on {
+            let me = self.clone();
+            tokio::spawn(async move { me.evaluate_whispers().await });
+        }
+    }
+
+    // A login from before whispers has no scope for them: then the session is not opened for this alone.
+    async fn evaluate_whispers(self: &Arc<Self>) {
+        let Some(rec) = auth::current() else { return };
+        if !whisper::has_scopes(&rec.scopes) {
+            return;
+        }
+        {
+            let mut s = self.st.lock().unwrap();
+            if !s.whispers {
+                return;
+            }
+            if s.session_user.is_none() {
+                s.session_user = Some(rec.user.id.clone());
+            }
+        }
+        self.ensure_session();
+        if self.st.lock().unwrap().session_id.is_some() {
+            self.subscribe_whispers().await;
+        }
+    }
+
+    async fn subscribe_whispers(self: &Arc<Self>) {
+        let session_id = self.st.lock().unwrap().session_id.clone();
+        let (Some(session_id), Some(rec)) = (session_id, auth::current()) else { return };
+        {
+            let s = self.st.lock().unwrap();
+            if !s.whispers || s.subs.get(WHISPER_KEY).map(|m| m.contains_key(WHISPER_SUB.0)).unwrap_or(false) {
+                return;
+            }
+        }
+        if !whisper::has_scopes(&rec.scopes) {
+            return;
+        }
+        let body = json!({"type": WHISPER_SUB.0, "version": WHISPER_SUB.1, "condition": {"user_id": rec.user.id}, "transport": {"method": "websocket", "session_id": session_id}});
+        let result = helix("/eventsub/subscriptions", "POST", Vec::new(), Some(body)).await;
+        let mut s = self.st.lock().unwrap();
+        if s.session_id.as_deref() != Some(session_id.as_str()) || !s.whispers {
+            return;
+        }
+        match result {
+            Ok(v) => {
+                s.subs.entry(WHISPER_KEY.into()).or_default().insert(WHISPER_SUB.0.into(), v["data"][0]["id"].as_str().unwrap_or("").to_string());
+            }
+            Err(err) if err.status == 409 => {
+                s.subs.entry(WHISPER_KEY.into()).or_default().insert(WHISPER_SUB.0.into(), String::new()); // already on this session
+            }
+            Err(err) => {
+                log(&format!("eventsub: whispers failed ({}) {}", err.status, err.message));
+                self.retry_whispers_later(&mut s);
+            }
+        }
+    }
+
+    fn retry_whispers_later(self: &Arc<Self>, s: &mut State) {
+        if s.retry_timers.contains_key(WHISPER_KEY) {
+            return;
+        }
+        let me = self.clone();
+        let mut t = Timer::new();
+        t.set(Duration::from_millis(RETRY_SOURCE_MS), async move {
+            me.st.lock().unwrap().retry_timers.remove(WHISPER_KEY);
+            me.evaluate_whispers().await;
+        });
+        s.retry_timers.insert(WHISPER_KEY.into(), t);
     }
 
     fn is_attached(&self, id: &str, source: &Arc<TwitchSource>) -> bool {
@@ -361,8 +471,13 @@ impl EventSubManager {
         Self::close_locked(&mut s);
     }
 
+    /// Something wants the session: an attached channel or the whispers.
+    fn wanted_locked(s: &State) -> bool {
+        !s.attached.is_empty() || s.whispers
+    }
+
     fn schedule_reconnect_locked(self: &Arc<Self>, s: &mut State) {
-        if s.reconnect_timer.is_set() || s.attached.is_empty() {
+        if s.reconnect_timer.is_set() || !Self::wanted_locked(s) {
             return;
         }
         let me = self.clone();
@@ -370,7 +485,7 @@ impl EventSubManager {
         s.reconnect_timer.set(Duration::from_millis(delay), async move {
             let mut s = me.st.lock().unwrap();
             s.reconnect_timer.clear();
-            if !s.attached.is_empty() {
+            if Self::wanted_locked(&s) {
                 me.connect_locked(&mut s);
             }
         });
@@ -450,7 +565,7 @@ impl EventSubManager {
             let me = self.clone();
             async move { me.subscribe_source(src).await }
         });
-        futures_util::future::join_all(futs).await;
+        tokio::join!(futures_util::future::join_all(futs), self.subscribe_whispers());
     }
 
     async fn subscribe_source(self: &Arc<Self>, source: Arc<TwitchSource>) {
@@ -574,6 +689,9 @@ impl EventSubManager {
         if sub.is_null() || event.is_null() {
             return;
         }
+        if sub["type"] == WHISPER_SUB.0 {
+            return whisper::on_event(event);
+        }
         let bid = crate::util::js_str_or_empty(sub["condition"].get("broadcaster_user_id"));
         let source = self.st.lock().unwrap().attached.get(&bid).cloned();
         if let (Some(source), Some(ty)) = (source, sub["type"].as_str()) {
@@ -611,7 +729,7 @@ impl EventSubManager {
     fn on_revocation(&self, msg: &Value) {
         let sub = &msg["payload"]["subscription"];
         let Some(ty) = sub["type"].as_str().filter(|t| !t.is_empty()) else { return };
-        let id = crate::util::js_str_or_empty(sub["condition"].get("broadcaster_user_id"));
+        let id = if ty == WHISPER_SUB.0 { WHISPER_KEY.to_string() } else { crate::util::js_str_or_empty(sub["condition"].get("broadcaster_user_id")) };
         let status = sub["status"].as_str().unwrap_or("").to_string();
         let source = {
             let mut s = self.st.lock().unwrap();
