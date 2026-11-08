@@ -10,6 +10,18 @@ and run it. Windows 10 or 11, 64-bit. Agu Chat keeps itself up to date after tha
 
 > This is a beta. Expect rough edges, and please report bugs in [Issues](https://github.com/TrinityTF/agu-chat/issues).
 
+## Rebuilt in Rust
+
+Agu Chat started as an Electron app. It has been rebuilt from the ground up as a native Windows app in Rust, with
+the same look and every feature and fix from the Electron version, and a lot lighter:
+
+- **Memory:** about 120 MB with two busy chats open, where the Electron version used 580 MB or more.
+- **CPU:** a fraction of what Electron needed, so it stays quiet next to a game or a stream.
+- **Download:** a 7 MB installer instead of 122 MB.
+- **Starts** almost instantly.
+
+Install it over the Electron version: your settings and logins carry over.
+
 ## Features
 
 - **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
