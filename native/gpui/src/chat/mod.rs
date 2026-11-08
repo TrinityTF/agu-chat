@@ -23,7 +23,7 @@ pub mod store;
 pub mod twitch;
 pub mod types;
 pub mod ui_util;
-pub mod mod_history;
+pub mod card_web;
 pub mod user_card;
 
 /// `Pixels` as a plain number (its field is private).

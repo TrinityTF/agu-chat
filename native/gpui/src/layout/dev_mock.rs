@@ -205,10 +205,7 @@ fn harness_log(platform: Platform) -> Value {
             json!({
                 "type": "chatlog", "channelId": "12826", "messages": messages,
                 "pinned": msg(100, &m, "Pinned: be nice to each other", json!({ "badges": "moderator/1", "pin": { "by": { "id": "4", "login": "modperson", "name": "Modperson" }, "startsAt": null, "endsAt": null } })),
-                "modfeed": [{ "ts": now - 20000, "kind": "timeout", "text": "A moderator timed out someone for 10m" },
-                    { "ts": now - 3_000_000, "kind": "warn", "text": "Modperson warned Cooldude: spam", "mod": { "action": "warn", "by": "Modperson", "userId": "2", "login": "cooldude", "secs": null, "reason": "spam" } },
-                    { "ts": now - 2_000_000, "kind": "timeout", "text": "x", "mod": { "action": "timeout", "by": "Modperson", "userId": "2", "login": "cooldude", "secs": 600, "reason": "caps" } },
-                    { "ts": now - 1_000_000, "kind": "timeout", "text": "x", "mod": { "action": "timeout", "by": "Modperson", "userId": "2", "login": "cooldude", "secs": 3600, "reason": "" } }],
+                "modfeed": [{ "ts": now - 20000, "kind": "timeout", "text": "A moderator timed out someone for 10m" }],
                 "automod": [{ "id": "h1", "ts": now - 15000, "user": { "id": "9", "login": "sketchy", "name": "Sketchy" }, "text": "some borderline message", "reason": "automod", "category": "swearing", "level": 2, "status": "held", "resolvedBy": null }],
                 "suspicious": [{ "id": "3", "login": "dimguy", "name": "Dimguy", "status": "active_monitoring", "types": ["manually_added"], "evaluation": null, "sharedBanChannels": 0 }],
                 "esub": { "active": true, "reason": null }
@@ -342,6 +339,51 @@ impl AguBridge for MockBridge {
             let ok = |b: Value| ApiResult { status: 200, body: b };
             match p.as_str() {
                 "/api/mod/user" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "user": { "id": "2", "login": "cooldude", "displayName": "Cooldude", "avatar": "", "createdAt": "2016-04-30T12:00:00Z" }, "followedAt": "2019-07-09T12:00:00Z" })),
+                "/api/twitch/web" => {
+                    let signed_in = std::env::var("AGU_MOCK_WEB").map(|v| v != "out").unwrap_or(true);
+                    ok(if signed_in { json!({ "signedIn": true, "pending": false, "expired": false, "login": "a_g_u__", "sameUser": std::env::var("AGU_MOCK_WEB").map(|v| v != "other").unwrap_or(true), "appLogin": "a_g_u__" }) } else { json!({ "signedIn": false, "pending": false, "expired": false }) })
+                }
+                "/api/twitch/web/login" | "/api/twitch/web/cancel" | "/api/twitch/web/logout" => ok(json!({ "ok": true })),
+                "/api/twitch/card" => {
+                    if std::env::var("AGU_MOCK_WEB").map(|v| v == "out").unwrap_or(false) {
+                        return ApiResult { status: 401, body: json!({ "error": "Sign in on twitch.tv first", "code": "signed-out" }) };
+                    }
+                    let login = query.split('&').find_map(|kv| kv.strip_prefix("login=")).unwrap_or("cooldude").to_string();
+                    let t = |days: i64| chrono::DateTime::from_timestamp_millis(now_ms() - days * 86_400_000).map(|d| d.to_rfc3339()).unwrap_or_default();
+                    ok(json!({
+                        "user": { "id": "2", "login": login, "displayName": "Cooldude", "avatar": "", "createdAt": "2016-04-30T12:00:00Z" },
+                        "followedAt": "2019-07-09T12:00:00Z",
+                        "sub": { "tier": 2, "months": 14, "gift": false, "prime": false },
+                        "isModerator": false,
+                        "badges": [
+                            { "title": "Subscriber", "description": "14-Month Subscriber", "url": "https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/2" },
+                            { "title": "Moderator", "description": "Moderator", "url": "https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/2" },
+                            { "title": "cheer 1000", "description": "cheer 1000", "url": "https://static-cdn.jtvnw.net/badges/v1/0d85a29f-79d1-4d5d-8c5f-e5d8f5bea4e5/2" }
+                        ],
+                        "canAccessModLogs": true,
+                        "ban": null,
+                        "logs": {
+                            "messages": { "count": 1000, "more": true, "label": "1000+" },
+                            "warnings": { "label": "1", "items": [{ "id": "w1", "ts": t(3), "text": "Modperson warned Cooldude: spam", "type": "WARN" }] },
+                            "timeouts": { "label": "2", "items": [{ "id": "t1", "ts": t(2), "text": "Modperson timed out Cooldude for 10m: caps", "type": "TIMEOUT" }, { "id": "t2", "ts": t(1), "text": "Modperson timed out Cooldude for 1h", "type": "TIMEOUT" }] },
+                            "untimeouts": { "label": "1", "items": [{ "id": "u1", "ts": t(1), "text": "Modperson removed timeout on Cooldude", "type": "UNTIMEOUT" }] },
+                            "bans": { "label": "0", "items": [] }, "unbans": { "label": "0", "items": [] },
+                            "comments": [{ "id": "c1", "ts": t(5), "text": "Keeps spamming links, watch this one", "by": "modperson", "byName": "Modperson", "byId": "4" }, { "id": "c2", "ts": t(1), "text": "Calmed down after the timeout", "by": "a_g_u__", "byName": "a_g_u__", "byId": "1" }]
+                        },
+                        "sameUser": std::env::var("AGU_MOCK_WEB").map(|v| v != "other").unwrap_or(true),
+                        "me": { "login": "a_g_u__" }
+                    }))
+                }
+                "/api/twitch/card/messages" => {
+                    let t = |m: i64| chrono::DateTime::from_timestamp_millis(now_ms() - m * 60_000).map(|d| d.to_rfc3339()).unwrap_or_default();
+                    ok(json!({ "items": [
+                        { "kind": "chat", "id": "x1", "ts": t(4), "text": "this is a fairly long message that is going to wrap onto a second line so we can see how it looks" },
+                        { "kind": "action", "ts": t(6), "text": "Modperson timed out Cooldude for 10m" },
+                        { "kind": "caught", "id": "x2", "ts": t(9), "text": "some borderline message", "status": "DENIED" },
+                        { "kind": "chat", "id": "x3", "ts": t(20), "text": "first message" }
+                    ], "more": false, "cursor": null }))
+                }
+                "/api/twitch/card/comment" => ok(json!({ "comment": { "id": "c3", "ts": chrono::Utc::now().to_rfc3339(), "text": "(mock) comment", "by": "a_g_u__", "byName": "a_g_u__", "byId": "1" }, "ok": true })),
                 "/api/mod/caps" => ok(json!({ "pin": true, "modes": true, "shield": true, "terms": true, "ban": true, "warn": true, "delete": true, "automod": true, "loggedIn": true, "isMod": true })),
                 "/api/rumble/caps" | "/api/kick/caps" => ok(json!({ "connected": true, "canModerate": true, "canDelete": true })),
                 "/api/chat/badges" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "channelId": "12826", "global": [

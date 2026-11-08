@@ -19,7 +19,7 @@ use super::chat_pane::ChatPane;
 use super::inline::{inline_flow, InlineContent};
 use super::mod_actions::{self, ToastMsg};
 use super::mod_caps::{relay_api, ModCaps, ModReach, TIMEOUT_LADDER};
-use super::mod_history::{self, ban_state, BanState, Entry, Kind};
+use super::card_web::{parse_card, parse_comment, parse_messages, show_signin_prompt, sub_line, tabs_for, ts_ms, ActionItem, MsgPage, Tab, WebCard, WebStatus};
 use super::pane_render::{ImageBox, InlineContentBuilder};
 use super::rows::{CardUser, RowAction};
 use super::services::Services;
@@ -183,42 +183,21 @@ fn fmt_stamp(ms: i64) -> String {
 
 const BADGE_SIDE: f32 = 20.0;
 
-/// One line of the Warnings / Timeouts / Bans tabs: what happened and when, then the reason and moderator.
-fn history_row(e: &Entry) -> gpui::Div {
-    let (title, color) = match e.kind {
-        Kind::Timeout => (format!("Timed out{}", e.secs.map(|s| format!(" for {}", fmt_secs(s))).unwrap_or_default()), theme::AMBER_400),
-        Kind::Ban => ("Banned".to_string(), theme::RED_300),
-        Kind::Unban => ("Unbanned".to_string(), theme::MUTED),
-        Kind::Untimeout => ("Timeout removed".to_string(), theme::MUTED),
-        Kind::Warn => ("Warned".to_string(), theme::ORANGE_300),
-    };
-    let detail = match (e.reason.is_empty(), e.by.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => e.reason.clone(),
-        (true, false) => format!("by {}", e.by),
-        (false, false) => format!("{} - by {}", e.reason, e.by),
+/// One line of the Warnings / Timeouts / Bans tabs: Twitch's own sentence for what happened, and when.
+fn history_row(e: &ActionItem) -> gpui::Div {
+    let color = match e.kind.as_str() {
+        "TIMEOUT" => theme::AMBER_400,
+        "BAN" => theme::RED_300,
+        "WARN" => theme::ORANGE_300,
+        _ => theme::MUTED,
     };
     div()
         .flex()
-        .flex_col()
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .gap(px(8.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(color)).child(SharedString::from(title)))
-                .child(div().flex_none().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(fmt_stamp(e.ts)))),
-        )
-        .when(!detail.is_empty(), |d| d.child(div().text_color(c(theme::MUTED)).child(SharedString::from(detail))))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Tab {
-    Messages,
-    Warnings,
-    Timeouts,
-    Bans,
-    Comments,
+        .justify_between()
+        .items_start()
+        .gap(px(8.))
+        .child(div().min_w_0().flex_1().text_color(c(color)).child(SharedString::from(e.text.clone())))
+        .child(div().flex_none().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(fmt_stamp(ts_ms(&e.ts)))))
 }
 
 /// `suspiciousDetails`: spell out why Twitch flagged this user, for the display-only info line.
@@ -269,8 +248,6 @@ struct ModUser {
     followed_at: Option<String>,
     follow_error: bool,
     ban: Option<(bool, Option<String>, String)>,
-    /// the answer carried a ban verdict (null = not banned); without one the card goes by its own history
-    ban_known: bool,
     ban_error: Option<String>,
 }
 
@@ -284,7 +261,6 @@ fn parse_mod_user(v: &Value) -> ModUser {
         followed_at: v.get("followedAt").and_then(|x| x.as_str()).map(|x| x.to_string()),
         follow_error: v.get("followError").map(|x| !x.is_null() && x != &Value::Bool(false) && x != &Value::from("")).unwrap_or(false),
         ban: v.get("ban").filter(|b| b.is_object()).map(|b| (b.get("permanent").and_then(|x| x.as_bool()).unwrap_or(false), b.get("expiresAt").and_then(|x| x.as_str()).map(|x| x.to_string()), b.get("reason").and_then(|x| x.as_str()).unwrap_or("").to_string())),
-        ban_known: v.get("ban").is_some(),
         ban_error: v.get("banError").and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(|x| x.to_string()),
     }
 }
@@ -317,6 +293,14 @@ pub struct UserCardView {
     tab: Tab,
     tab_scroll: ScrollHandle,
     comment_in: Entity<TextInput>,
+    /// Twitch's own viewer card (twitch.tv sign-in), when it answered
+    web: Option<WebCard>,
+    web_status: WebStatus,
+    /// the logged messages (Twitch, first 50, then more on request)
+    msgs: Option<MsgPage>,
+    msgs_loading: bool,
+    signin_busy: bool,
+    comment_busy: bool,
     /// The window size we last fitted (`fit_height`), and whether the user resized the window by hand since:
     /// then the card fills the window (`PopoutFill`) instead of the window following the card, and its size
     /// is remembered for the next card (`window_state::card_size`).
@@ -342,7 +326,7 @@ impl UserCardView {
         });
         let comment_in = cx.new(|cx| {
             let mut t = TextInput::new(window, cx, "Add a comment", InputStyle::Chat);
-            t.set_max_chars(Some(mod_history::COMMENT_MAX_CHARS));
+            t.set_max_chars(Some(agu_chat_core::twitch::web::COMMENT_MAX_CHARS));
             t
         });
         let mut subs = vec![cx.observe(&reason_in, |_, _, cx| cx.notify()), cx.observe(&custom_in, |_, _, cx| cx.notify())];
@@ -387,6 +371,12 @@ impl UserCardView {
             tab: Tab::Messages,
             tab_scroll: ScrollHandle::new(),
             comment_in,
+            web: None,
+            web_status: WebStatus::Unknown,
+            msgs: None,
+            msgs_loading: false,
+            signin_busy: false,
+            comment_busy: false,
             fitted_h: 0.0,
             fitted_w: 0.0,
             user_sized,
@@ -394,40 +384,129 @@ impl UserCardView {
             _subs: subs,
         };
         v.load(cx);
-        // the history tabs follow bans and warnings that arrive while the card is open
-        cx.spawn(async move |this, cx| {
-            let mut seen = mod_history::version();
-            loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(1000)).await;
-                let now = mod_history::version();
-                let changed = now != seen;
-                seen = now;
-                if this.update(cx, |_, cx| if changed { cx.notify() }).is_err() {
-                    return;
-                }
-            }
-        })
-        .detach();
         v
     }
 
-    /// The key this person's history is filed under.
-    fn ukey(&self) -> String {
-        mod_history::user_key(&self.user.id, if self.user.login.is_empty() { &self.user.name } else { &self.user.login })
-    }
-
-    fn history_login(&self) -> String {
-        if self.user.login.is_empty() { self.user.name.to_lowercase() } else { self.user.login.clone() }
-    }
-
     fn add_comment(&mut self, cx: &mut Context<Self>) {
-        let text = self.comment_in.read(cx).text();
+        let text = self.comment_in.read(cx).text().trim().to_string();
         let Some(ctx) = self.pane_ctx(cx) else { return };
-        let by = if ctx.me.is_empty() { "me".to_string() } else { ctx.me.clone() };
-        if mod_history::add_comment(&self.sk, &self.ukey(), &self.history_login(), &by, &text) {
-            self.comment_in.update(cx, |i, cx| i.set_text("", cx));
+        let target = self.web.as_ref().map(|w| w.user_id.clone()).filter(|i| !i.is_empty()).unwrap_or_else(|| self.user.id.clone());
+        if text.is_empty() || self.comment_busy || target.is_empty() {
+            return;
         }
+        self.comment_busy = true;
         cx.notify();
+        let bridge = cx.global::<Services>().bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let r = relay_api(&bridge, &ctx.source, "/api/twitch/card/comment", Some("POST"), Some(json!({"targetId": target, "text": text}))).await;
+            let _ = this.update(cx, |v, cx| {
+                v.comment_busy = false;
+                if r.ok {
+                    if let Some(l) = v.web.as_mut().and_then(|w| w.logs.as_mut()) {
+                        l.comments.push(parse_comment(&r.body["comment"]));
+                    }
+                    v.comment_in.update(cx, |i, cx| i.set_text("", cx));
+                } else {
+                    v.toast(Some((format!("Couldn't add the comment: {}", r.text()), true)), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn delete_comment(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        let bridge = cx.global::<Services>().bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let r = relay_api(&bridge, &ctx.source, "/api/twitch/card/comment", Some("DELETE"), Some(json!({"commentId": id.clone()}))).await;
+            let _ = this.update(cx, |v, cx| {
+                if r.ok {
+                    if let Some(l) = v.web.as_mut().and_then(|w| w.logs.as_mut()) {
+                        l.comments.retain(|c| c.id != id);
+                    }
+                } else {
+                    v.toast(Some((format!("Couldn't delete the comment: {}", r.text()), true)), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The first (or next) 50 logged lines of the person, from Twitch.
+    fn load_messages(&mut self, cx: &mut Context<Self>) {
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        let Some(w) = &self.web else { return };
+        if self.msgs_loading || w.user_id.is_empty() {
+            return;
+        }
+        self.msgs_loading = true;
+        let cursor = self.msgs.as_ref().and_then(|m| m.cursor.clone()).unwrap_or_default();
+        let mut path = format!("/api/twitch/card/messages?id={}", w.user_id.chars().filter(|c| c.is_ascii_digit()).collect::<String>());
+        if !cursor.is_empty() {
+            path.push_str(&format!("&cursor={}", cursor.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '.')).collect::<String>()));
+        }
+        let bridge = cx.global::<Services>().bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let r = relay_api(&bridge, &ctx.source, &path, None, None).await;
+            let _ = this.update(cx, |v, cx| {
+                v.msgs_loading = false;
+                if r.ok {
+                    let page = parse_messages(&r.body);
+                    match v.msgs.as_mut() {
+                        Some(m) => {
+                            m.items.extend(page.items);
+                            m.more = page.more;
+                            m.cursor = page.cursor;
+                        }
+                        None => v.msgs = Some(page),
+                    }
+                } else if v.msgs.is_none() {
+                    v.msgs = Some(MsgPage::default());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Sign in on twitch.tv": the sign-in window opens (core), then the card follows the sign-in until it ends.
+    fn start_signin(&mut self, cx: &mut Context<Self>) {
+        if self.signin_busy {
+            return;
+        }
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        self.signin_busy = true;
+        cx.notify();
+        let bridge = cx.global::<Services>().bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let r = relay_api(&bridge, &ctx.source, "/api/twitch/web/login", Some("POST"), Some(json!({}))).await;
+            let mut signed_in = false;
+            let mut error = if r.ok { None } else { Some(r.text()) };
+            if r.ok {
+                for _ in 0..700 {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    let st = relay_api(&bridge, &ctx.source, "/api/twitch/web", None, None).await;
+                    if !st.ok || st.body["pending"].as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    signed_in = st.body["signedIn"].as_bool().unwrap_or(false);
+                    error = st.body["error"].as_str().map(String::from);
+                    break;
+                }
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.signin_busy = false;
+                if signed_in {
+                    v.load(cx);
+                } else if let Some(e) = error.filter(|e| !e.is_empty()) {
+                    v.toast(Some((e, true)), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn fit_state(&self) -> bool {
@@ -456,19 +535,55 @@ impl UserCardView {
         self.relogin = false;
         let bridge = cx.global::<Services>().bridge.clone();
         let id = self.user.id.clone();
+        let whisper = crate::layout::tree::is_whisper(&ctx.source);
+        let login: String = if self.user.login.is_empty() { self.user.name.to_lowercase() } else { self.user.login.clone() }.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
         cx.spawn(async move |this, cx| {
-            let r = relay_api(&bridge, &ctx.source, &format!("/api/mod/user?id={}", id.replace('%', "%25").replace('&', "%26")), None, None).await;
+            // Twitch's own viewer card first (a twitch.tv sign-in); a whisper has no channel to ask about
+            let mut web: Option<WebCard> = None;
+            let mut status = WebStatus::Unknown;
+            if !whisper && !login.is_empty() {
+                let r = relay_api(&bridge, &ctx.source, &format!("/api/twitch/card?login={login}&id={}", id.chars().filter(|c| c.is_ascii_digit()).collect::<String>()), None, None).await;
+                status = WebStatus::from_answer(r.status, &r.body);
+                if r.ok {
+                    web = Some(parse_card(&r.body));
+                }
+            }
+            // Helix: the account itself, and (for a broadcaster) the ban, when Twitch's card has no mod logs
+            let helix = if web.as_ref().map(|w| w.logs.is_some()).unwrap_or(false) { None } else { Some(relay_api(&bridge, &ctx.source, &format!("/api/mod/user?id={}", id.replace('%', "%25").replace('&', "%26")), None, None).await) };
             let _ = this.update(cx, |v, cx| {
                 v.loading = false;
-                if r.status == 403 && r.text().contains("relogin") {
-                    v.relogin = true;
-                    v.data = None;
-                } else if r.status == 401 {
-                    v.data = None; // logged out: the card just has no account info
-                } else if !r.ok {
-                    v.toast(Some((format!("Couldn't load user info: {}", r.text()), true)), cx);
-                } else {
-                    v.data = Some(parse_mod_user(&r.body));
+                v.web_status = status;
+                v.web = web;
+                if let Some(w) = &v.web {
+                    let mut d = ModUser {
+                        login: w.login.clone(),
+                        display_name: w.display.clone(),
+                        avatar: w.avatar.clone(),
+                        created_at: w.created_at.clone(),
+                        followed_at: w.followed_at.clone(),
+                        ban: w.ban.as_ref().map(|b| (b.permanent, b.expires_at.clone(), b.reason.clone())),
+                        ..Default::default()
+                    };
+                    if let Some(r) = helix.as_ref().filter(|r| r.ok) {
+                        let h = parse_mod_user(&r.body);
+                        d.ban = d.ban.or(h.ban);
+                        d.ban_error = h.ban_error;
+                    }
+                    v.data = Some(d);
+                    if v.web.as_ref().map(|w| w.logs.is_some()).unwrap_or(false) && v.msgs.is_none() {
+                        v.load_messages(cx);
+                    }
+                } else if let Some(r) = helix {
+                    if r.status == 403 && r.text().contains("relogin") {
+                        v.relogin = true;
+                        v.data = None;
+                    } else if r.status == 401 {
+                        v.data = None; // logged out: the card just has no account info
+                    } else if !r.ok {
+                        v.toast(Some((format!("Couldn't load user info: {}", r.text()), true)), cx);
+                    } else {
+                        v.data = Some(parse_mod_user(&r.body));
+                    }
                 }
                 cx.notify();
             });
@@ -682,23 +797,35 @@ impl Render for UserCardView {
             avatar_src = kick_default_avatar(&self.user.id);
         }
         let profile = if !login.is_empty() { profile_url(self.platform, &login) } else { None };
-        let hist = mod_history::snapshot(&self.sk, &self.ukey());
-        // Helix only answers the ban list for the broadcaster; everyone else's card goes by what this app saw
-        let banned = self.data.as_ref().and_then(|d| d.ban.clone()).or_else(|| {
-            if !is_twitch || self.data.as_ref().map(|d| d.ban_known).unwrap_or(false) {
-                return None;
-            }
-            match ban_state(&hist.entries, chrono::Utc::now().timestamp_millis())? {
-                BanState::Banned { reason, .. } => Some((true, None, reason)),
-                BanState::TimedOut { until, reason, .. } => Some((false, chrono::DateTime::from_timestamp_millis(until).map(|d| d.to_rfc3339()), reason)),
-            }
-        });
+        let whisper = crate::layout::tree::is_whisper(&ctx.source);
+        // Twitch's ban status (twitch.tv mod logs), else Helix's (broadcaster only)
+        let banned = self.data.as_ref().and_then(|d| d.ban.clone());
+        let has_logs = self.web.as_ref().map(|w| w.logs.is_some()).unwrap_or(false);
         let caps = &ctx.caps;
         let reach = &ctx.reach;
-        let show_twitch_mod = is_twitch && (reach.ban || reach.timeout || reach.warn || banned.is_some()) && (caps.ban || caps.warn);
+        let show_twitch_mod = is_twitch && !whisper && (reach.ban || reach.timeout || reach.warn || banned.is_some()) && (caps.ban || caps.warn);
         let busy = self.busy;
         let uid = self.user.id.clone();
         let entity = cx.entity();
+
+        // "Ignore user" sits at the right edge of the first row of action buttons (the timeout ladder); when no
+        // such row is drawn it gets a compact row of its own at the end of the action area.
+        let mut ignore_slot: Option<AnyElement> = None;
+        if ctx.can_ignore {
+            let ignored = ctx.ignored;
+            let (platform, ig_login) = (self.platform, super::ignores::ignore_login(&self.user.login, &self.user.name));
+            ignore_slot = Some(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .child(btn("ignore", if ignored { "Unignore user" } else { "Ignore user" }, BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let l = ig_login.clone();
+                        let _ = this.pane.update(cx, |p, cx| p.set_ignored(platform, &l, !ignored, cx));
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        }
 
         // ---- header
         let name_el: AnyElement = match &profile {
@@ -779,9 +906,13 @@ impl Render for UserCardView {
             .child(header);
 
         // ---- badges, from the person's newest line here
-        if !ctx.badges.is_empty() {
+        let badge_list: &[CardBadge] = match &self.web {
+            Some(w) if !w.badges.is_empty() => &w.badges,
+            _ => &ctx.badges,
+        };
+        if !badge_list.is_empty() {
             let mut grid = div().flex().flex_wrap().gap(px(6.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
-            for (i, b) in ctx.badges.iter().enumerate() {
+            for (i, b) in badge_list.iter().enumerate() {
                 let face: AnyElement = match &b.url {
                     Some(u) => ImageBox { url: u.clone().into(), side: BADGE_SIDE, radius: 3.0 }.into_any_element(),
                     None => div()
@@ -832,14 +963,17 @@ impl Render for UserCardView {
                 }
             }
         }
-        if let Some(sb) = &ctx.sub {
-            let months = match sb.months {
-                Some(1) => " for 1 month".to_string(),
-                Some(n) if n > 1 => format!(" for {n} months"),
-                _ => String::new(),
-            };
-            info = info.child(info_line(icons::TAG, format!("Tier {} - Subscribed{months}", sb.tier)));
-            info_rows += 1;
+        match (&self.web, &ctx.sub) {
+            (Some(w), _) if w.sub.is_some() => {
+                let sb = w.sub.as_ref().unwrap();
+                info = info.child(info_line(icons::TAG, sub_line(sb.tier, sb.months, sb.gift, sb.prime)));
+                info_rows += 1;
+            }
+            (None, Some(sb)) => {
+                info = info.child(info_line(icons::TAG, sub_line(sb.tier, sb.months, false, false)));
+                info_rows += 1;
+            }
+            _ => {}
         }
         if let Some((permanent, expires, reason)) = &banned {
             info = info.child(if *permanent {
@@ -851,6 +985,16 @@ impl Render for UserCardView {
         } else if let Some(e) = self.data.as_ref().and_then(|d| d.ban_error.as_ref()) {
             info = info.child(div().text_color(c(theme::FAINT)).child(SharedString::from(format!("Ban status unknown: {e}"))));
             info_rows += 1;
+        }
+        if let Some(w) = &self.web {
+            if !w.same_user {
+                info = info.child(div().text_color(c(theme::AMBER_300)).child(SharedString::from(format!("twitch.tv is signed in as {}, not the Twitch account Agu Chat is logged in as.", if w.me_login.is_empty() { "another account".to_string() } else { w.me_login.clone() }))));
+                info_rows += 1;
+            }
+            if let Some(e) = &w.logs_error {
+                info = info.child(div().text_color(c(theme::FAINT)).child(SharedString::from(e.clone())));
+                info_rows += 1;
+            }
         }
         if has_account && !self.loading {
             if let Some(s) = &ctx.suspicious {
@@ -886,6 +1030,7 @@ impl Render for UserCardView {
                         }
                     })));
                 }
+                row = row.children(ignore_slot.take());
                 m = m.child(div().child(Self::heading("Timeout")).child(row));
             }
             if self.reason_mode {
@@ -1027,7 +1172,8 @@ impl Render for UserCardView {
                         .child(btn("r-ban", "Ban", BtnOpts::danger()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                             let (sk, m) = (sk2.clone(), m2.clone());
                             let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action: "ban", msg: Box::new(m), seconds: 300 }, cx));
-                        }))),
+                        })))
+                        .children(ignore_slot.take()),
                 );
             }
         }
@@ -1072,46 +1218,31 @@ impl Render for UserCardView {
                 };
                 let mut section = div().border_b_1().border_color(c(theme::LINE)).p(px(10.));
                 if state != Some(true) {
+                    row = row.children(ignore_slot.take());
                     section = section.child(Self::heading("Timeout")).child(row);
                 }
                 card = card.child(section.child(buttons));
             }
         }
 
-        // ---- ignore
-        if ctx.can_ignore {
-            let ignored = ctx.ignored;
-            let (platform, ig_login) = (self.platform, super::ignores::ignore_login(&self.user.login, &self.user.name));
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.))
-                    .border_b_1()
-                    .border_color(c(theme::LINE))
-                    .p(px(10.))
-                    .child(btn("ignore", if ignored { "Unignore user" } else { "Ignore user" }, BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                        let l = ig_login.clone();
-                        let _ = this.pane.update(cx, |p, cx| p.set_ignored(platform, &l, !ignored, cx));
-                        cx.notify();
-                    })))
-                    .when(ignored, |d| d.child(div().text_size(px(11.)).text_color(c(theme::FAINT)).child("Messages hidden"))),
-            );
+        // ---- ignore, when no action row took it
+        if let Some(btn_el) = ignore_slot.take() {
+            card = card.child(div().flex().items_center().border_b_1().border_color(c(theme::LINE)).p(px(10.)).child(btn_el));
         }
 
-        // ---- tabs: messages, then what this app saw done to the person, then comments
-        let kind_count = |k: Kind| hist.entries.iter().filter(|e| e.kind == k).count();
-        let counts = [
-            (Tab::Messages, "Messages", ctx.recent_total),
-            (Tab::Warnings, "Warnings", kind_count(Kind::Warn)),
-            (Tab::Timeouts, "Timeouts", kind_count(Kind::Timeout)),
-            (Tab::Bans, "Bans", kind_count(Kind::Ban)),
-            (Tab::Comments, "Comments", hist.comments.len()),
-        ];
+        // ---- tabs: Twitch's own (twitch.tv mod logs) or only the person's lines in this chat
+        let tabs = tabs_for(self.platform, whisper, has_logs);
+        if !tabs.contains(&self.tab) {
+            self.tab = Tab::Messages;
+        }
+        let logs = self.web.as_ref().and_then(|w| w.logs.clone());
         let mut strip = div().flex().flex_wrap().border_b_1().border_color(c(theme::LINE)).px(px(4.));
-        for (i, (tab, label, n)) in counts.into_iter().enumerate() {
+        for (i, tab) in tabs.iter().copied().enumerate() {
             let on = self.tab == tab;
+            let n = match &logs {
+                Some(l) => l.label(tab),
+                None => ctx.recent_total.to_string(),
+            };
             strip = strip.child(
                 div()
                     .id(("card-tab", i))
@@ -1129,8 +1260,8 @@ impl Render for UserCardView {
                     .text_color(if on { c(theme::TEXT) } else { c(theme::MUTED) })
                     .when(!on, |d| d.hover(|s| s.text_color(c(theme::TEXT))))
                     .cursor_pointer()
-                    .child(label)
-                    .child(div().text_color(c(theme::FAINT)).child(SharedString::from(n.to_string())))
+                    .child(tab.label())
+                    .child(div().text_color(c(theme::FAINT)).child(SharedString::from(n)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.tab = tab;
                         this.tab_scroll.set_offset(point(px(0.), px(0.)));
@@ -1140,8 +1271,26 @@ impl Render for UserCardView {
         }
         card = card.child(strip);
 
+        // a moderator without a twitch.tv sign-in: the other tabs are one sign-in away
+        if show_signin_prompt(self.platform, whisper, ctx.caps.is_mod == Some(true) || ctx.caps.is_broadcaster == Some(true), self.web_status) {
+            let busy = self.signin_busy;
+            let text = if self.web_status == WebStatus::Expired { "Your twitch.tv sign-in expired. Sign in again to see warnings, timeouts, bans and mod comments." } else { "Sign in on twitch.tv to see warnings, timeouts, bans and mod comments" };
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .border_b_1()
+                    .border_color(c(theme::LINE))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .child(div().min_w_0().flex_1().text_size(px(11.)).line_height(px(15.)).text_color(c(theme::FAINT)).child(text))
+                    .child(btn("web-signin", if busy { "Waiting..." } else { "Sign in on twitch.tv" }, BtnOpts { disabled: busy, ..Default::default() }).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.start_signin(cx)))),
+            );
+        }
+
         if self.tab == Tab::Comments {
-            let can_add = !self.comment_in.read(cx).text().trim().is_empty();
+            let can_add = !self.comment_busy && !self.comment_in.read(cx).text().trim().is_empty();
             card = card.child(
                 div()
                     .flex()
@@ -1163,6 +1312,38 @@ impl Render for UserCardView {
             .p(px(10.));
         let empty = |t: &str| div().text_color(c(theme::FAINT)).child(SharedString::from(t.to_string()));
         match self.tab {
+            Tab::Messages if logs.is_some() => {
+                // Twitch's log of the person's lines in this channel (first 50, more on request)
+                match &self.msgs {
+                    None => body = body.child(empty("Loading...")),
+                    Some(m) if m.items.is_empty() => body = body.child(empty("No messages.")),
+                    Some(m) => {
+                        let mut list = div().flex().flex_col().gap(px(4.)).text_color(c(theme::MUTED));
+                        for (i, it) in m.items.iter().enumerate() {
+                            let stamp = fmt_stamp(ts_ms(&it.ts));
+                            let (txt_color, text) = match it.kind.as_str() {
+                                "action" => (theme::FAINT, it.text.clone()),
+                                "caught" => (theme::ORANGE_300, format!("{} (held by AutoMod{})", it.text, if it.status.is_empty() { String::new() } else { format!(", {}", it.status.to_lowercase()) })),
+                                _ => (theme::MUTED, it.text.clone()),
+                            };
+                            list = list.child(
+                                div()
+                                    .id(("tw-msg", i))
+                                    .flex()
+                                    .items_start()
+                                    .gap(px(6.))
+                                    .child(div().flex_none().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(stamp)))
+                                    .child(div().min_w_0().flex_1().text_color(c(txt_color)).child(SharedString::from(text))),
+                            );
+                        }
+                        if m.more {
+                            let busy = self.msgs_loading;
+                            list = list.child(div().flex().child(btn("msgs-more", if busy { "Loading..." } else { "Load more" }, BtnOpts { disabled: busy, ..Default::default() }).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.load_messages(cx)))));
+                        }
+                        body = body.child(list);
+                    }
+                }
+            }
             Tab::Messages => {
                 if ctx.recent.is_empty() {
                     body = body.child(empty("No recent messages."));
@@ -1214,28 +1395,29 @@ impl Render for UserCardView {
                 }
             }
             Tab::Warnings | Tab::Timeouts | Tab::Bans => {
-                let (kinds, none): (&[Kind], &str) = match self.tab {
-                    Tab::Warnings => (&[Kind::Warn], "No warnings seen."),
-                    Tab::Timeouts => (&[Kind::Timeout, Kind::Untimeout], "No timeouts seen."),
-                    _ => (&[Kind::Ban, Kind::Unban], "No bans seen."),
+                let none = match self.tab {
+                    Tab::Warnings => "No warnings.",
+                    Tab::Timeouts => "No timeouts.",
+                    _ => "No bans.",
                 };
-                let rows: Vec<&Entry> = hist.entries.iter().rev().filter(|e| kinds.contains(&e.kind)).collect();
+                let rows: Vec<ActionItem> = logs.as_ref().map(|l| l.history(self.tab).into_iter().cloned().collect()).unwrap_or_default();
                 if rows.is_empty() {
                     body = body.child(empty(none));
                 } else {
-                    body = body.child(div().flex().flex_col().gap(px(8.)).children(rows.into_iter().map(history_row)));
+                    body = body.child(div().flex().flex_col().gap(px(8.)).children(rows.iter().map(history_row)));
                 }
             }
             Tab::Comments => {
-                if hist.comments.is_empty() {
+                let mut comments = logs.as_ref().map(|l| l.comments.clone()).unwrap_or_default();
+                comments.sort_by(|x, y| ts_ms(&y.ts).cmp(&ts_ms(&x.ts)));
+                if comments.is_empty() {
                     body = body.child(empty("No comments yet."));
                 } else {
-                    let me = if ctx.me.is_empty() { "me".to_string() } else { ctx.me.clone() };
+                    let me = self.web.as_ref().map(|w| w.me_login.clone()).unwrap_or_default();
                     let mut list = div().flex().flex_col().gap(px(8.));
-                    for (i, cm) in hist.comments.iter().rev().enumerate() {
-                        let mine = cm.by.eq_ignore_ascii_case(&me);
-                        let (id, by) = (cm.ts, cm.by.clone());
-                        let (sk, uk) = (self.sk.clone(), self.ukey());
+                    for (i, cm) in comments.iter().enumerate() {
+                        let mine = !me.is_empty() && cm.by.eq_ignore_ascii_case(&me);
+                        let id = cm.id.clone();
                         list = list.child(
                             div()
                                 .flex()
@@ -1246,7 +1428,7 @@ impl Render for UserCardView {
                                         .min_w_0()
                                         .flex_1()
                                         .child(div().text_color(c(theme::TEXT)).child(SharedString::from(cm.text.clone())))
-                                        .child(div().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(format!("{} - {}", cm.by, fmt_stamp(cm.ts))))),
+                                        .child(div().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(format!("{} - {}", cm.by, fmt_stamp(ts_ms(&cm.ts)))))),
                                 )
                                 .when(mine, |d| {
                                     d.child(
@@ -1259,21 +1441,15 @@ impl Render for UserCardView {
                                             .hover(|s| s.text_color(c(theme::RED_400)))
                                             .cursor_pointer()
                                             .child(icon(icons::TRASH, 14.))
-                                            .on_click(cx.listener(move |_, _: &ClickEvent, _w, cx| {
-                                                mod_history::delete_comment(&sk, &uk, id, &by);
-                                                cx.notify();
-                                            })),
+                                            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.delete_comment(id.clone(), cx))),
                                     )
                                 }),
                         );
                     }
                     body = body.child(list);
                 }
-                body = body.child(div().mt(px(10.)).text_size(px(11.)).text_color(c(theme::FAINT)).child("Only visible in Agu Chat on this PC."));
+                body = body.child(div().mt(px(10.)).text_size(px(11.)).text_color(c(theme::FAINT)).child("Shared with this channel's moderators on Twitch."));
             }
-        }
-        if matches!(self.tab, Tab::Warnings | Tab::Timeouts | Tab::Bans) {
-            body = body.child(div().mt(px(10.)).text_size(px(11.)).text_color(c(theme::FAINT)).child("Recorded by Agu Chat from what it has seen on this PC."));
         }
         card = card.child(body);
 

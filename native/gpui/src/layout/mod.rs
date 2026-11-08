@@ -13,5 +13,6 @@ pub mod split_header;
 pub mod split_view;
 pub mod tab_window;
 pub mod tree;
+pub mod twitch_login;
 pub mod x_login;
 pub mod ui;

@@ -247,7 +247,6 @@ impl ChatStore {
     pub fn apply(&mut self, sk: &str, frame: &Value) -> bool {
         let Some(ty) = frame.get("type").and_then(|t| t.as_str()) else { return false };
         let Some(st) = self.source_mut(sk) else { return false };
-        super::mod_history::observe(sk, ty, frame);
         if let Some(cid) = frame.get("channelId").filter(|c| !c.is_null()) {
             let cid = match cid {
                 Value::String(s) => s.clone(),

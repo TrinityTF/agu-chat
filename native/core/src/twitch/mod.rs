@@ -20,6 +20,7 @@ pub mod rt;
 pub mod shared;
 pub mod source;
 pub mod vendor;
+pub mod web;
 pub mod whisper;
 
 use std::sync::{Arc, Mutex};
@@ -81,7 +82,9 @@ impl PlatformModule for TwitchModule {
     }
 
     fn routes(&self) -> Vec<(String, Handler)> {
-        routes::routes()
+        let mut r = routes::routes();
+        r.extend(web::routes());
+        r
     }
 
     fn accounts(&self) -> Option<Arc<dyn Accounts>> {
@@ -102,6 +105,7 @@ impl PlatformModule for TwitchModule {
             }));
             *AUTH_LISTENER.lock().unwrap() = Some(id);
             auth::init(ctx);
+            web::init();
             Ok(())
         })
     }

@@ -218,32 +218,6 @@ fn build_base_moderate_text(action: &str, actor: &str, event: &Value, sub: Optio
     }
 }
 
-/// The structured twin of `build_moderate_entry` for the one-user actions the user card keeps a history of
-/// (ban, timeout, unban, untimeout, warn). Shared-chat actions happened in another channel, so they are skipped.
-pub fn moderate_record(action: &str, actor: &str, event: &Value) -> Option<Value> {
-    if !["ban", "timeout", "unban", "untimeout", "warn"].contains(&action) {
-        return None;
-    }
-    let sub = event.get(action).filter(|v| truthy(v))?;
-    let user_id = js_str_or_empty(sub.get("user_id"));
-    let login = js_str_or_empty(sub.get("user_login"));
-    if user_id.is_empty() && login.is_empty() {
-        return None;
-    }
-    let secs = match (action, sub.get("expires_at").filter(|v| truthy(v))) {
-        ("timeout", Some(e)) => Some(seconds_until(&js_string(e)) as i64),
-        _ => None,
-    };
-    let mut reason = js_str_or_empty(sub.get("reason"));
-    if action == "warn" {
-        if let Some(rules) = sub.get("chat_rules_cited").and_then(Value::as_array).filter(|r| !r.is_empty()) {
-            let cited = rules.iter().map(|r| if r.is_null() { String::new() } else { js_string(r) }).collect::<Vec<_>>().join(", ");
-            reason = if reason.is_empty() { cited } else { format!("{reason}; {cited}") };
-        }
-    }
-    Some(json!({"action": action, "by": actor, "userId": user_id, "login": login, "secs": secs, "reason": reason}))
-}
-
 // ---------- AutoMod hold/update -> HeldMsg (CHAT v5b) ----------
 
 pub fn map_automod_status(status: &str) -> &'static str {
@@ -308,17 +282,6 @@ mod tests {
         let e = json!({"automod_terms": {"terms": ["a", "b"], "from_automod": true}});
         assert_eq!(build_moderate_entry("add_blocked_term", "Mod", &e).unwrap().text, "Mod added blocked terms \"a\", \"b\" (from AutoMod)");
         assert_eq!(build_moderate_entry("weird", "Mod", &json!({})).unwrap().text, "Mod used weird");
-    }
-
-    #[test]
-    fn moderate_records() {
-        let e = json!({"ban": {"user_id": "7", "user_login": "troll", "reason": "spam"}});
-        let r = moderate_record("ban", "Mod", &e).unwrap();
-        assert_eq!((r["userId"].as_str(), r["by"].as_str(), r["reason"].as_str()), (Some("7"), Some("Mod"), Some("spam")));
-        let e = json!({"warn": {"user_id": "7", "user_login": "troll", "reason": "hey", "chat_rules_cited": ["No spam"]}});
-        assert_eq!(moderate_record("warn", "Mod", &e).unwrap()["reason"], "hey; No spam");
-        assert!(moderate_record("slow", "Mod", &json!({})).is_none());
-        assert!(moderate_record("shared_chat_ban", "Mod", &json!({"shared_chat_ban": {"user_id": "7"}})).is_none());
     }
 
     #[test]
