@@ -5,6 +5,7 @@
 //! The pane builds `SendSource`s each frame and hands them over with `set_props`; the box owns its text, history
 //! and dropdown state. Toasts and "clear the reply" go back to the pane.
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agu_chat_core::protocol::{Platform, SourceRef};
@@ -15,7 +16,7 @@ use gpui::{
 use serde_json::json;
 
 use super::autocomplete::*;
-use super::inventory::{merge_inventories, Inventory, PickerItem, PickerProvider, PickerSection};
+use super::inventory::{kick_emote_url, merge_inventories, Inventory, PickerItem, PickerProvider, PickerSection};
 use super::slash::{confirmed_command, is_me, parse_command, parse_user_arg, run_slash_command, split_args, Confirmed};
 use crate::chat::chat_pane::ChatPane;
 use crate::chat::mod_caps::{relay_api, ModCaps};
@@ -25,8 +26,24 @@ use crate::chat::services::Services;
 use crate::icons::{self, icon};
 use crate::chat::ui_util::cbtn as btn;
 use crate::layout::ui::BtnOpts;
-use crate::text_input::{InputStyle, TextInput, TextInputEvent};
+use crate::text_input::{InlineImageFn, InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
+
+/// What the box draws as an image: the autocomplete's own inventory by the exact text it inserts (the name, or the
+/// wire form of Kick / Rumble emotes), plus any Kick `[emote:id:name]` token whether or not the inventory has it.
+pub fn emote_image_lookup(inventory: &[InvEntry]) -> InlineImageFn {
+    let mut by_text: HashMap<String, SharedString> = HashMap::with_capacity(inventory.len());
+    for e in inventory.iter().filter(|e| !e.img.is_empty()) {
+        by_text.entry(e.insert.clone().unwrap_or_else(|| e.name.clone())).or_insert_with(|| e.img.clone().into());
+    }
+    Rc::new(move |token| by_text.get(token).cloned().or_else(|| kick_token_url(token)))
+}
+
+/// `[emote:123:LUL]` -> the image of emote 123.
+fn kick_token_url(token: &str) -> Option<SharedString> {
+    let (id, name) = token.strip_prefix("[emote:")?.strip_suffix(']')?.split_once(':')?;
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && !name.is_empty()).then(|| kick_emote_url(id).into())
+}
 
 const SENDABLE: [Platform; 4] = [Platform::Twitch, Platform::Rumble, Platform::Kick, Platform::X];
 const ALL: &str = "*";
@@ -86,6 +103,8 @@ pub struct SendBox {
     hist_idx: Option<usize>,
     draft: String,
     skip_changed: u32,
+    /// the target and inventories the input's emote images were built from
+    images_sig: Option<(String, Vec<*const Inventory>)>,
     aids_done: bool,
     prev_reply_id: Option<String>,
     prev_focused: bool,
@@ -167,6 +186,7 @@ impl SendBox {
             hist_idx: None,
             draft: String::new(),
             skip_changed: 0,
+            images_sig: None,
             aids_done: false,
             prev_reply_id: None,
             auto_scroll: gpui::ScrollHandle::new(),
@@ -254,6 +274,17 @@ impl SendBox {
         } else {
             merge_inventories(&t.iter().map(|s| (*s.inventory).clone()).collect::<Vec<_>>())
         }
+    }
+
+    /// Hand the input the emote images of the current target(s); rebuilt only when the target or an inventory changed.
+    fn sync_emote_images(&mut self, cx: &mut Context<Self>) {
+        let sig = (self.effective(), self.targets().iter().map(|s| Arc::as_ptr(&s.inventory)).collect::<Vec<_>>());
+        if self.images_sig.as_ref() == Some(&sig) {
+            return;
+        }
+        let lookup = emote_image_lookup(&self.inventory().inventory);
+        self.images_sig = Some(sig);
+        self.input.update(cx, |i, cx| i.set_inline_images(Some(lookup), cx));
     }
 
     fn placeholder(&self) -> String {
@@ -460,12 +491,14 @@ impl SendBox {
                     }
                     let v = self.history[self.hist_idx.unwrap()].clone();
                     self.put(&v, v.len(), cx);
+                    self.input.update(cx, |i, cx| i.settle(cx));
                     cx.stop_propagation();
                 } else if key == "down" && self.hist_idx.is_some() && !text[pos..].contains('\n') {
                     let i = self.hist_idx.unwrap();
                     self.hist_idx = if i + 1 < self.history.len() { Some(i + 1) } else { None };
                     let v = self.hist_idx.map(|i| self.history[i].clone()).unwrap_or_else(|| self.draft.clone());
                     self.put(&v, v.len(), cx);
+                    self.input.update(cx, |i, cx| i.settle(cx));
                     cx.stop_propagation();
                 }
                 cx.notify();
@@ -872,6 +905,7 @@ impl SendBox {
 impl Render for SendBox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.aids(window, cx);
+        self.sync_emote_images(cx);
         let disabled = self.sendable().is_empty();
         let eff = self.effective();
         let single_platform = self.single().map(|s| s.source.platform);
@@ -1070,5 +1104,42 @@ impl Render for SendBox {
         );
         let _ = (MouseButton::Left, HashMap::<u8, u8>::new());
         root.child(row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, img: &str, insert: Option<&str>) -> InvEntry {
+        InvEntry { name: name.into(), img: img.into(), label: "x".into(), channel_scope: false, insert: insert.map(String::from) }
+    }
+
+    #[test]
+    fn the_inserted_text_is_what_gets_an_image() {
+        let f = emote_image_lookup(&[
+            entry("Kappa", "https://tw/25", None),
+            entry("LUL", "https://files/123", Some("[emote:123:LUL]")),
+            entry("pepe", "https://r/pepe.png", Some(":pepe:")),
+            entry("Nofile", "", None),
+            entry("Kappa", "https://other/dup", None),
+        ]);
+        assert_eq!(f("Kappa").map(|u| u.to_string()), Some("https://tw/25".to_string()));
+        assert_eq!(f("[emote:123:LUL]").map(|u| u.to_string()), Some("https://files/123".to_string()));
+        assert_eq!(f(":pepe:").map(|u| u.to_string()), Some("https://r/pepe.png".to_string()));
+        // Kick's plain name is not what is sent, and the autocomplete is case-sensitive about names it inserts
+        assert_eq!(f("LUL"), None);
+        assert_eq!(f("kappa"), None);
+        assert_eq!(f("Nofile"), None);
+    }
+
+    #[test]
+    fn kick_emote_tokens_always_have_an_image() {
+        let f = emote_image_lookup(&[]);
+        assert_eq!(f("[emote:37226:KEKW]").map(|u| u.to_string()), Some("https://files.kick.com/emotes/37226/fullsize".to_string()));
+        assert_eq!(f("[emote:abc:KEKW]"), None);
+        assert_eq!(f("[emote:1:]"), None);
+        assert_eq!(f("[emote:1:KEKW"), None);
+        assert_eq!(f("emote:1:KEKW]"), None);
     }
 }
