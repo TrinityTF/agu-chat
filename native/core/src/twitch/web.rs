@@ -158,9 +158,21 @@ impl GqlError {
 }
 
 /// HTTP status + JSON body of a gql.twitch.tv answer -> its `data`, or why not.
+///
+/// Twitch answers what it can: a field it refuses (integrity, say) comes back null with an entry in `errors`, the
+/// rest still arrives. Such a partial answer is `Ok`, with the refusals kept under `__errors` for `field_error`.
 pub fn parse_gql(status: u16, body: &Value) -> Result<Value, GqlError> {
     if status == 401 {
         return Err(GqlError::Unauthorized);
+    }
+    if (200..300).contains(&status) {
+        if let Some(d) = body.get("data").and_then(|d| d.as_object()).filter(|o| o.values().any(|v| !v.is_null())) {
+            let mut d = Value::Object(d.clone());
+            if let Some(errs) = body["errors"].as_array().filter(|a| !a.is_empty()) {
+                d["__errors"] = Value::Array(errs.clone());
+            }
+            return Ok(d);
+        }
     }
     let first_error = |b: &Value| -> Option<String> {
         if let Some(a) = b.as_array() {
@@ -184,6 +196,25 @@ pub fn parse_gql(status: u16, body: &Value) -> Result<Value, GqlError> {
     match body.get("data") {
         Some(d) if !d.is_null() => Ok(d.clone()),
         _ => Err(GqlError::Other("Twitch sent no data".into())),
+    }
+}
+
+/// Why the top-level `field` of a partial answer is missing (None when it is there).
+pub fn field_error(data: &Value, field: &str) -> Option<GqlError> {
+    if !data[field].is_null() {
+        return None;
+    }
+    let errs = data["__errors"].as_array().cloned().unwrap_or_default();
+    let mine = errs.iter().find(|e| e["path"].get(0).and_then(|p| p.as_str()) == Some(field));
+    let Some(e) = mine.or(errs.first()) else { return Some(GqlError::Other("Twitch sent nothing for this".into())) };
+    let code = e.pointer("/extensions/code").and_then(|c| c.as_str()).unwrap_or("");
+    let msg = e["message"].as_str().unwrap_or("").to_string();
+    if code == "IntegrityCheckFailed" || msg.to_lowercase().contains("integrity") {
+        Some(GqlError::Integrity)
+    } else if code == "Unauthenticated" {
+        Some(GqlError::Unauthorized)
+    } else {
+        Some(GqlError::Other(if msg.is_empty() { "Twitch refused this".into() } else { msg }))
     }
 }
 
@@ -622,6 +653,12 @@ async fn card(req: RouteReq) -> Result<RouteRes, RouteError> {
         Ok(d) => d,
         Err(e) => return err_res(&e),
     };
+    if let Some(e) = field_error(&data, "currentUser") {
+        if e == GqlError::Unauthorized {
+            mark_expired();
+        }
+        return err_res(&e);
+    }
     let mut out = parse_viewer_card(&data);
     out["channelId"] = json!(cid);
     let tid = out.pointer("/user/id").and_then(|i| i.as_str()).map(String::from).filter(|s| !s.is_empty()).unwrap_or(target_id);
@@ -631,6 +668,14 @@ async fn card(req: RouteReq) -> Result<RouteRes, RouteError> {
     out["sameUser"] = json!(app_login.is_empty() || app_login.eq_ignore_ascii_case(&me_login));
     if out["canAccessModLogs"] == json!(true) && !tid.is_empty() {
         match gql("ViewerCardModLogs", MOD_LOGS_QUERY, json!({"channelID": cid, "targetID": tid})).await {
+            Ok(d) if field_error(&d, "viewerCardModLogs").is_some() => {
+                out["logsError"] = match field_error(&d, "viewerCardModLogs") {
+                    Some(GqlError::Integrity) => json!({"code": "integrity", "message": INTEGRITY_MESSAGE}),
+                    Some(e) => json!({"code": "error", "message": e.message()}),
+                    None => Value::Null,
+                };
+                out["ban"] = parse_mod_logs(&d)["ban"].clone();
+            }
             Ok(d) => {
                 let logs = parse_mod_logs(&d);
                 out["ban"] = logs["ban"].clone();
@@ -656,7 +701,10 @@ async fn card_messages(req: RouteReq) -> Result<RouteRes, RouteError> {
     };
     let cursor = req.query_get("cursor").filter(|c| !c.is_empty()).map(|c| json!(c)).unwrap_or(Value::Null);
     match gql("ViewerCardModLogsMessagesBySender", MESSAGES_QUERY, json!({"channelID": cid, "senderID": id, "cursor": cursor})).await {
-        Ok(d) => res(200, parse_messages(&d)),
+        Ok(d) => match field_error(&d, "logs") {
+            Some(e) => err_res(&e),
+            None => res(200, parse_messages(&d)),
+        },
         Err(e) => err_res(&e),
     }
 }
@@ -673,7 +721,10 @@ async fn comment_add(req: RouteReq) -> Result<RouteRes, RouteError> {
         Err(e) => return err_res(&e),
     };
     match gql("createModComment", CREATE_COMMENT, json!({"input": {"channelID": cid, "targetID": target, "text": text}})).await {
-        Ok(d) => res(200, json!({"comment": parse_comment(&d["createModeratorComment"]["comment"])})),
+        Ok(d) => match field_error(&d, "createModeratorComment") {
+            Some(e) => err_res(&e),
+            None => res(200, json!({"comment": parse_comment(&d["createModeratorComment"]["comment"])})),
+        },
         Err(e) => err_res(&e),
     }
 }
@@ -689,7 +740,10 @@ async fn comment_delete(req: RouteReq) -> Result<RouteRes, RouteError> {
         Err(e) => return err_res(&e),
     };
     match gql("deleteModeratorComment", DELETE_COMMENT, json!({"input": {"ID": id, "channelID": cid}})).await {
-        Ok(_) => res(200, json!({"ok": true})),
+        Ok(d) => match field_error(&d, "deleteModeratorComment") {
+            Some(e) => err_res(&e),
+            None => res(200, json!({"ok": true})),
+        },
         Err(e) => err_res(&e),
     }
 }
@@ -808,6 +862,15 @@ mod tests {
         assert_eq!(parse_gql(200, &json!({"errors": [{"message": "service error"}]})), Err(GqlError::Other("service error".into())));
         assert_eq!(parse_gql(200, &json!({"data": {"a": 1}})), Ok(json!({"a": 1})));
         assert!(parse_gql(200, &json!({"data": null})).is_err());
+        // a partial answer: the refused field is null, the rest is kept
+        let part = parse_gql(200, &json!({"data": {"targetUser": {"id": "1", "relationship": null}, "logs": null}, "errors": [
+            {"message": "failed integrity check", "path": ["targetUser", "relationship"], "extensions": {"code": "IntegrityCheckFailed"}},
+            {"message": "unauthenticated", "path": ["logs"], "extensions": {"code": "Unauthenticated"}}]})).unwrap();
+        assert_eq!(part["targetUser"]["id"], "1");
+        assert_eq!(field_error(&part, "targetUser"), None);
+        assert_eq!(field_error(&part, "logs"), Some(GqlError::Unauthorized));
+        let part = parse_gql(200, &json!({"data": {"a": 1, "m": null}, "errors": [{"message": "failed integrity check", "path": ["m"]}]})).unwrap();
+        assert_eq!(field_error(&part, "m"), Some(GqlError::Integrity));
     }
 
     #[test]

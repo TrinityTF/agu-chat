@@ -296,6 +296,8 @@ pub struct UserCardView {
     /// Twitch's own viewer card (twitch.tv sign-in), when it answered
     web: Option<WebCard>,
     web_status: WebStatus,
+    /// why Twitch's own card (badges, mod logs) did not load, shown under the account info
+    web_error: Option<String>,
     /// the logged messages (Twitch, first 50, then more on request)
     msgs: Option<MsgPage>,
     msgs_loading: bool,
@@ -373,6 +375,7 @@ impl UserCardView {
             comment_in,
             web: None,
             web_status: WebStatus::Unknown,
+            web_error: None,
             msgs: None,
             msgs_loading: false,
             signin_busy: false,
@@ -544,19 +547,24 @@ impl UserCardView {
             // Twitch's own viewer card first (a twitch.tv sign-in); a whisper has no channel to ask about
             let mut web: Option<WebCard> = None;
             let mut status = WebStatus::Unknown;
+            let mut web_error: Option<String> = None;
             if !whisper && !login.is_empty() {
                 let r = relay_api(&bridge, &ctx.source, &format!("/api/twitch/card?login={login}&id={}", id.chars().filter(|c| c.is_ascii_digit()).collect::<String>()), None, None).await;
                 status = WebStatus::from_answer(r.status, &r.body);
                 if r.ok {
                     web = Some(parse_card(&r.body));
+                } else if !matches!(status, WebStatus::SignedOut | WebStatus::Expired) && r.status != 404 {
+                    web_error = Some(format!("Twitch's mod view didn't load: {}", r.text()));
                 }
             }
             // Helix: the account itself, and (for a broadcaster) the ban, when Twitch's card has no mod logs
-            let helix = if web.as_ref().map(|w| w.logs.is_some()).unwrap_or(false) { None } else { Some(relay_api(&bridge, &ctx.source, &format!("/api/mod/user?id={}", id.replace('%', "%25").replace('&', "%26")), None, None).await) };
+            // (also when Twitch's card left out the follow date: that part of it is behind Twitch's integrity check)
+            let helix = if web.as_ref().map(|w| w.logs.is_some() && w.followed_at.is_some()).unwrap_or(false) { None } else { Some(relay_api(&bridge, &ctx.source, &format!("/api/mod/user?id={}", id.replace('%', "%25").replace('&', "%26")), None, None).await) };
             let _ = this.update(cx, |v, cx| {
                 v.loading = false;
                 v.web_status = status;
                 v.web = web;
+                v.web_error = web_error;
                 if let Some(w) = &v.web {
                     let mut d = ModUser {
                         login: w.login.clone(),
@@ -570,6 +578,11 @@ impl UserCardView {
                     if let Some(r) = helix.as_ref().filter(|r| r.ok) {
                         let h = parse_mod_user(&r.body);
                         d.ban = d.ban.or(h.ban);
+                        d.followed_at = d.followed_at.or(h.followed_at);
+                        d.follow_error = h.follow_error;
+                        if d.created_at.is_empty() {
+                            d.created_at = h.created_at;
+                        }
                         d.ban_error = h.ban_error;
                     }
                     v.data = Some(d);
@@ -987,6 +1000,10 @@ impl Render for UserCardView {
             info_rows += 1;
         } else if let Some(e) = self.data.as_ref().and_then(|d| d.ban_error.as_ref()) {
             info = info.child(div().text_color(c(theme::FAINT)).child(SharedString::from(format!("Ban status unknown: {e}"))));
+            info_rows += 1;
+        }
+        if let Some(e) = &self.web_error {
+            info = info.child(div().text_color(c(theme::FAINT)).child(SharedString::from(e.clone())));
             info_rows += 1;
         }
         if let Some(w) = &self.web {
