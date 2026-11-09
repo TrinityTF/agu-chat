@@ -36,6 +36,22 @@ fn route_stderr_to_log() {
     eprintln!("[ui] agu-chat-gpui {} started, stderr routed here", env!("CARGO_PKG_VERSION"));
 }
 
+/// Every panic's message and place go to `agu-chat.log` as well: one inside a window callback aborts the app
+/// (it cannot unwind into Windows), and the windows-subsystem exe has no stderr to show it.
+fn log_panics() {
+    let path = agu_chat_core::default_data_dir().join("agu-chat.log");
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(f, "{at} [ui] PANIC: {info}\n{bt}");
+        }
+        prev(info);
+    }));
+}
+
 #[cfg(feature = "alloc-stats")]
 mod alloc_stats;
 #[cfg(feature = "alloc-stats")]
@@ -44,6 +60,7 @@ static GLOBAL: alloc_stats::Counting = alloc_stats::Counting;
 
 fn main() {
     route_stderr_to_log();
+    log_panics();
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         text_input::bind_keys(cx);
 

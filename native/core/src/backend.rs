@@ -188,16 +188,26 @@ impl Drop for Backend {
     }
 }
 
+/// Open `url` in the default browser. ShellExecute runs on a thread of its own: on the UI thread it can pump
+/// window messages while the UI is in the middle of an update (a click on a link), and the re-entered UI aborts
+/// the app. The thread sets COM up first, as ShellExecute asks.
 pub(crate) fn shell_open(url: &str) {
     #[cfg(windows)]
     {
-        use windows::core::{w, PCWSTR};
-        use windows::Win32::UI::Shell::ShellExecuteW;
-        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
         let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe {
-            ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-        }
+        let _ = std::thread::Builder::new().name("agu-open-url".into()).spawn(move || {
+            use windows::core::{w, PCWSTR};
+            use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+            use windows::Win32::UI::Shell::ShellExecuteW;
+            use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+            unsafe {
+                let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).is_ok();
+                ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+                if com {
+                    CoUninitialize();
+                }
+            }
+        });
     }
     #[cfg(not(windows))]
     {
