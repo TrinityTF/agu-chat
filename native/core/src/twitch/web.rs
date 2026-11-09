@@ -126,7 +126,7 @@ const DELETE_COMMENT: &str = "mutation deleteModeratorComment($input: DeleteMode
   deleteModeratorComment(input: $input) { comment { id } }
 }";
 
-const VERIFY_QUERY: &str = "query { currentUser { id login displayName } }";
+const VERIFY_QUERY: &str = "query VerifyLogin { currentUser { id login displayName } }";
 
 /// The body of one GQL call (raw query text, no persisted hashes).
 pub fn gql_body(operation: &str, query: &str, variables: Value) -> Value {

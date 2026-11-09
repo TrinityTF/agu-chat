@@ -21,7 +21,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use gpui::App;
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
-use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2CookieList, ICoreWebView2_2};
+use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2CookieList, ICoreWebView2_2, ICoreWebView2_8};
 use webview2_com::{take_pwstr, GetCookiesCompletedHandler};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -246,6 +246,13 @@ fn open(reply: Reply) {
             return;
         }
     };
+    // twitch.tv sends a signed-in user to its front page, which autoplays a stream: nothing in this window
+    // ever needs sound
+    unsafe {
+        if let Ok(w8) = webview.webview().cast::<ICoreWebView2_8>() {
+            let _ = w8.SetIsMuted(true);
+        }
+    }
     CUR.with(|c| *c.borrow_mut() = Some(Login { webview: Some(webview), web_ctx: Some(web_ctx), reply: Some(reply), closed: None, shown: false, ticks: 0, slot: Default::default(), inflight: Default::default() }));
     HWND_OPEN.store(hwnd.0 as isize, Ordering::SeqCst);
     unsafe {
@@ -332,7 +339,16 @@ fn tick(hwnd: HWND) {
     let Some(inflight) = inflight else { return };
     let token = answer.as_ref().and_then(|list| list.iter().find(|(k, v)| k == "auth-token" && !v.is_empty()).map(|(_, v)| v.clone()));
     if let Some(auth_token) = token {
-        let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
+        // leave twitch.tv's front page (autoplaying stream) at once; core sends the window on to the authorize
+        // page next
+        let reply = CUR.with(|c| {
+            c.borrow_mut().as_mut().and_then(|l| {
+                if let Some(wv) = &l.webview {
+                    let _ = wv.load_url("about:blank");
+                }
+                l.reply.take()
+            })
+        });
         if let Some(r) = reply {
             let _ = r.send(Ok(Cookies { auth_token }));
         }

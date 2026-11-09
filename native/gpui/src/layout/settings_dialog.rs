@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use super::channel_dialog::DialogEvent;
 use super::hotkeys::{action_label, event_to_binding, find_conflicts, hotkey_actions, is_usable_binding, resolve_hotkeys, to_overrides, HotkeyAction, HotkeyTable, HOTKEY_RECORDING};
-use super::settings_widgets::{checkbox, eid, select_button, select_list, select_row, slider, txt};
+use super::settings_widgets::{eid, select_button, select_list, select_row, slider, txt};
 use super::ui::{btn, modal, toggle, BtnOpts, CloseFn};
 use crate::chat::ignores::{ignore_login, phrase_error, toggle_ignored_user};
 use crate::chat::mod_buttons::{
