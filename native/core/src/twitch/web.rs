@@ -98,7 +98,10 @@ fragment actions on ModLogsTargetedActionsResult {
   ... on ModLogsTargetedActionsConnection {
     count
     pageInfo { hasNextPage }
-    edges { cursor node { id localizedLabel { fallbackString } timestamp type } }
+    edges { cursor node { id timestamp type localizedLabel {
+      fallbackString
+      localizedStringFragments { token { __typename ... on ModActionsLocalizedTextToken { text } ... on User { id login displayName } } }
+    } } }
   }
 }";
 
@@ -293,6 +296,27 @@ pub fn count_label(count: u64, has_more: bool) -> String {
     if has_more { format!("{count}+") } else { count.to_string() }
 }
 
+/// A mod action's sentence ("streamelements timed out cooldude for 30 seconds, with reason: ..."): its pieces
+/// joined, users by login, as 7TV does; Twitch's short fallback ("Timed out") when there are none.
+fn label_text(l: &Value) -> String {
+    let joined: String = l["localizedStringFragments"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|f| {
+                    let t = &f["token"];
+                    t["text"].as_str().or_else(|| t["login"].as_str()).unwrap_or("").to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if joined.trim().is_empty() {
+        l["fallbackString"].as_str().unwrap_or("").to_string()
+    } else {
+        joined.trim().to_string()
+    }
+}
+
 fn actions_json(v: &Value) -> Value {
     // an error result (no access, ...) shows as nothing
     let edges = v["edges"].as_array().cloned().unwrap_or_default();
@@ -300,7 +324,7 @@ fn actions_json(v: &Value) -> Value {
         .iter()
         .map(|e| {
             let n = &e["node"];
-            json!({"id": n["id"], "ts": n["timestamp"].as_str().unwrap_or(""), "text": n.pointer("/localizedLabel/fallbackString").and_then(|x| x.as_str()).unwrap_or(""), "type": n["type"].as_str().unwrap_or("")})
+            json!({"id": n["id"], "ts": n["timestamp"].as_str().unwrap_or(""), "text": label_text(&n["localizedLabel"]), "type": n["type"].as_str().unwrap_or("")})
         })
         .collect();
     let more = v.pointer("/pageInfo/hasNextPage").and_then(|x| x.as_bool()).unwrap_or(false);
@@ -766,6 +790,17 @@ mod tests {
                 {"id": "b", "setID": "bits", "version": "100", "title": "cheer 100", "image1x": "https://b/3"}]},
             "channel": {"id": "7", "moderationSettings": {"canAccessViewerCardModLogs": true}}
         })
+    }
+
+    #[test]
+    fn action_label_joins_fragments() {
+        let l = json!({"fallbackString": "Timed out", "localizedStringFragments": [
+            {"token": {"__typename": "User", "login": "streamelements", "displayName": "StreamElements"}},
+            {"token": {"__typename": "ModActionsLocalizedTextToken", "text": " timed out "}},
+            {"token": {"__typename": "User", "login": "cooldude"}},
+            {"token": {"__typename": "ModActionsLocalizedTextToken", "text": " for 30 seconds, with reason: caps"}}]});
+        assert_eq!(label_text(&l), "streamelements timed out cooldude for 30 seconds, with reason: caps");
+        assert_eq!(label_text(&json!({"fallbackString": "Banned", "localizedStringFragments": []})), "Banned");
     }
 
     #[test]

@@ -298,6 +298,8 @@ pub struct UserCardView {
     web_status: WebStatus,
     /// why Twitch's own card (badges, mod logs) did not load, shown under the account info
     web_error: Option<String>,
+    /// every badge shown, not just the first row
+    badges_open: bool,
     /// the logged messages (Twitch, first 50, then more on request)
     msgs: Option<MsgPage>,
     msgs_loading: bool,
@@ -376,6 +378,7 @@ impl UserCardView {
             web: None,
             web_status: WebStatus::Unknown,
             web_error: None,
+            badges_open: false,
             msgs: None,
             msgs_loading: false,
             signin_busy: false,
@@ -927,8 +930,12 @@ impl Render for UserCardView {
             _ => &ctx.badges,
         };
         if !badge_list.is_empty() {
+            // one row (20px badges, 6px apart, 10px padding) unless opened; the toggle takes the row's last spot
+            let per_row = (((window.viewport_size().width.to_f64() as f32 - 22.0 + 6.0) / (BADGE_SIDE + 6.0)).floor() as usize).max(2);
+            let overflow = badge_list.len() > per_row;
+            let shown = if overflow && !self.badges_open { per_row - 1 } else { badge_list.len() };
             let mut grid = div().flex().flex_wrap().gap(px(6.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
-            for (i, b) in badge_list.iter().enumerate() {
+            for (i, b) in badge_list.iter().take(shown).enumerate() {
                 let face: AnyElement = match &b.url {
                     Some(u) => ImageBox { url: u.clone().into(), side: BADGE_SIDE, radius: 3.0 }.into_any_element(),
                     None => div()
@@ -947,6 +954,35 @@ impl Render for UserCardView {
                         .into_any_element(),
                 };
                 grid = grid.child(div().id(("badge", i)).flex_none().child(face).tooltip(crate::layout::ui::tip(b.title.clone())));
+            }
+            if overflow {
+                let open = self.badges_open;
+                let label = if open { String::new() } else { format!("+{}", badge_list.len() - shown) };
+                grid = grid.child(
+                    div()
+                        .id("badges-toggle")
+                        .flex_none()
+                        .h(px(BADGE_SIDE))
+                        .min_w(px(BADGE_SIDE))
+                        .px(px(4.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .bg(c(theme::LINE))
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(theme::MUTED))
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(c(theme::TEXT)))
+                        .when(open, |d| d.child(icon(icons::CHEVRON_UP, 12.)))
+                        .when(!open, |d| d.child(SharedString::from(label)))
+                        .tooltip(crate::layout::ui::tip(if open { "Show fewer badges".to_string() } else { "Show all badges".to_string() }))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.badges_open = !this.badges_open;
+                            cx.notify();
+                        })),
+                );
             }
             card = card.child(grid);
         }
