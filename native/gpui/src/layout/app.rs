@@ -974,7 +974,7 @@ impl AguApp {
     /// Keeps the window as big as the active tab's splits need: the minimum size follows the layout, and when
     /// the content is smaller the window grows toward the side a split was just added on (right / down for
     /// anything else). Runs from `render`, so it sees every layout or tab change.
-    fn fit_window(&mut self, window: &mut Window) {
+    fn fit_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.fit_hooked {
             self.fit_hooked = true;
             window_fit::install(window);
@@ -991,8 +991,16 @@ impl AguApp {
         let (w, h) = (w.max(window_state::MIN_W), (h + chrome).max(window_state::MIN_H));
         window_fit::set_min_client(window, w, h);
         // while a divider is being dragged only the minimum follows (the drag keeps every split above it)
+        // The resize runs after this frame: a SetWindowPos inside render lands while gpui is drawing, which drops
+        // the new size and leaves the grown part blank until something else repaints.
         if self.sv.resize.is_none() {
-            window_fit::grow_to_fit(window, w, h, edge);
+            cx.spawn_in(window, async move |_, cx| {
+                let _ = cx.update(|window, _| {
+                    window_fit::grow_to_fit(window, w, h, edge);
+                    window.refresh();
+                });
+            })
+            .detach();
         }
     }
 
@@ -1097,7 +1105,7 @@ impl Render for AguApp {
             self.tabs.clear_drag();
             self.sv.clear_drag();
         }
-        self.fit_window(window);
+        self.fit_window(window, cx);
         let tabs_bar = self.render_tabs(window, cx);
         let update_bar = self.render_update_bar(cx);
         let content = self.render_split_view(window, cx);
