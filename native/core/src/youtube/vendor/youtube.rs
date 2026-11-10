@@ -354,6 +354,8 @@ pub struct PollResult {
     pub actions: Vec<Value>,
     pub continuation: String,
     pub timeout_ms: u64,
+    /// the "Live chat" view (every message) when this answer is still on "Top chat": the next poll should use it
+    pub live_chat: Option<String>,
 }
 
 /// One poll. Returns the next continuation, or None when the chat has ended.
@@ -378,7 +380,19 @@ pub fn poll_from_json(j: &Value) -> Option<PollResult> {
         actions: cc["actions"].as_array().cloned().unwrap_or_default(),
         continuation: next.as_ref().map(|n| js_string(&n["continuation"])).unwrap_or_default(),
         timeout_ms: next.as_ref().map(timeout_of).unwrap_or(0),
+        live_chat: live_chat_switch(cc),
     })
+}
+
+/// The "Live chat" view's continuation from a chat answer's view selector, when that view isn't the one shown.
+/// Only get_live_chat's own answer offers a token it accepts (the watch page's selector tokens are refused).
+fn live_chat_switch(cc: &Value) -> Option<String> {
+    let items = cc["header"]["liveChatHeaderRenderer"]["viewSelector"]["sortFilterSubMenuRenderer"]["subMenuItems"].as_array()?;
+    let live = items.iter().find(|it| it["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case("live chat"))).or_else(|| items.get(1))?;
+    if truthy(&live["selected"]) {
+        return None;
+    }
+    Some(js_string(&live["continuation"]["reloadContinuationData"]["continuation"])).filter(|c| !c.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +598,12 @@ mod tests {
     #[test]
     fn poll_metadata_and_rows() {
         let poll = poll_from_json(&json!({"continuationContents": {"liveChatContinuation": {"actions": [{}, {}], "continuations": [{"invalidationContinuationData": {"continuation": "N", "timeoutMs": 3000}}]}}})).unwrap();
+        assert_eq!(poll.live_chat, None);
+        let sel = |top: bool| json!({"continuationContents": {"liveChatContinuation": {"continuations": [], "header": {"liveChatHeaderRenderer": {"viewSelector": {"sortFilterSubMenuRenderer": {"subMenuItems": [
+            {"title": "Top chat", "selected": top, "continuation": {"reloadContinuationData": {"continuation": "TOP"}}},
+            {"title": "Live chat", "selected": !top, "continuation": {"reloadContinuationData": {"continuation": "ALL"}}}]}}}}}}});
+        assert_eq!(poll_from_json(&sel(true)).unwrap().live_chat.as_deref(), Some("ALL"));
+        assert_eq!(poll_from_json(&sel(false)).unwrap().live_chat, None);
         assert_eq!((poll.actions.len(), poll.continuation.as_str(), poll.timeout_ms), (2, "N", 3000));
         assert!(poll_from_json(&json!({})).is_none());
         let end = poll_from_json(&json!({"continuationContents": {"liveChatContinuation": {}}})).unwrap();

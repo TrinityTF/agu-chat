@@ -397,7 +397,8 @@ impl YoutubeSource {
             return Ok(self.recheck_delay());
         };
         if let Some(c) = self.st.lock().unwrap().chat.as_mut() {
-            c.continuation = res.continuation.clone();
+            // still on "Top chat": move to "Live chat" (every message); the overlap is de-duplicated
+            c.continuation = res.live_chat.clone().unwrap_or_else(|| res.continuation.clone());
         }
         let fresh = self.ingest(&res.actions);
         // The very first poll is the history: one chatlog instead of ~75 chat frames.
