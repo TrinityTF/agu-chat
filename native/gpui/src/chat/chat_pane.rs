@@ -1669,7 +1669,10 @@ impl ChatPane {
             BuiltRow::Notice(n) => {
                 // 3px left bar, px-2, py-1, the icon column of a sub / gift
                 let w = Self::notice_lines_w(width, n);
-                let lines = n.head.as_ref().map(|h| h.height_at(w, window, cx)).unwrap_or(0.0) + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
+                let lines = n.head.as_ref().map(|h| h.height_at(w, window, cx)).unwrap_or(0.0)
+                    + n.system.height_at(w, window, cx)
+                    + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0)
+                    + if n.reply.is_some() { super::pane_render::NOTICE_BUTTON_H + super::pane_render::NOTICE_BUTTON_GAP } else { 0.0 };
                 let h = 8.0 + lines.max(n.icon.map(|(_, s)| s + 2.0).unwrap_or(0.0));
                 ItemMetrics { h, mt: 0.0, mb: 0.0 }
             }

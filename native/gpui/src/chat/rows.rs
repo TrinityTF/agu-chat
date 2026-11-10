@@ -177,6 +177,10 @@ pub struct NoticeSpec {
     /// a sub / gift: the name line above the sentence, opening the user's card
     pub head: Option<Rc<InlineContent>>,
     pub card: Option<(String, CardUser)>,
+    /// the left bar's colour when not the accent (a Super Chat's tier colour)
+    pub bar: Option<Hsla>,
+    /// a Reply button under it, putting @name in the message box
+    pub reply: Option<CardUser>,
 }
 
 #[derive(Clone)]
@@ -783,7 +787,7 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
         message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::MUTED), false, rs.readable_colors, None);
         Some(f.finish())
     };
-    BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card })
+    BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card, bar: None, reply: None })
 }
 
 /// A sub / gift notice's sentence without the name it starts with, and the byte range to bold in it (7TV bolds
@@ -1199,6 +1203,9 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
     let rs = ctx.rs;
     let base = rs.font_size;
     let paid = m.paid.as_ref().filter(|p| !p.amount.is_empty());
+    if let Some(p) = paid {
+        return super_chat_row(row, m, p, rs);
+    }
     let can_mod = youtube_can_mod(m, env);
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
@@ -1261,6 +1268,41 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
     }
     spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), ..Default::default() };
     BuiltRow::Frame(spec)
+}
+
+/// A Super Chat / Super Sticker drawn like a sub notice: the name, "Sent a Super Chat for $5", the message, a
+/// Reply button; the left bar takes the Super Chat's own tier colour.
+fn super_chat_row(row: &Row, m: &YouTubeMsg, p: &YouTubePaid, rs: &Settings) -> BuiltRow {
+    let base = rs.font_size;
+    let name = if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() };
+    let user = CardUser { id: m.user.id.clone(), login: String::new(), name: name.clone(), avatar: m.user.avatar.clone() };
+    let mut h = Flow::new(base);
+    h.push(Item::Text(TextItem::new(name, base, token(theme::TEXT)).weight(FontWeight::BOLD)));
+    let mut sys = Flow::new(base);
+    sys.push(Item::Text(TextItem::new(if p.sticker { "Sent a Super Sticker for " } else { "Sent a Super Chat for " }, base, token(theme::TEXT))));
+    sys.push(Item::Text(TextItem::new(p.amount.clone(), base, token(theme::TEXT)).weight(FontWeight::BOLD)));
+    let text = (!m.parts.is_empty()).then(|| {
+        let mut f = Flow::new(base);
+        for part in &m.parts {
+            if part.t == "emoji" {
+                plain_emote(&mut f, part.u.clone(), &part.a, if part.custom { "YouTube member emote" } else { "YouTube" }, rs);
+            } else {
+                f.text(&part.v, token(theme::MUTED));
+            }
+        }
+        f.finish()
+    });
+    let colour = [&p.bg, &p.header_bg].into_iter().find(|c| !c.is_empty()).map(|c| css_color(c));
+    BuiltRow::Notice(NoticeSpec {
+        system: sys.finish(),
+        text,
+        raid: false,
+        icon: Some((crate::icons::COINS, 16.0)),
+        head: Some(h.finish()),
+        card: Some((row.sk.clone(), user.clone())),
+        bar: colour,
+        reply: Some(user),
+    })
 }
 
 /// Whether a YouTube row gets mod buttons: a login, the message's menu params, not the channel's owner and not

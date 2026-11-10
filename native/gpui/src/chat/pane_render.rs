@@ -30,6 +30,9 @@ use crate::theme::{self, c};
 pub(super) const NOTICE_ICON_GAP: f32 = 8.0;
 /// the bar on sub / gift notices: the app's accent
 const NOTICE_SUB_BAR: u32 = theme::ACCENT;
+/// a notice's Reply button: its height and the space above it
+pub(super) const NOTICE_BUTTON_H: f32 = 22.0;
+pub(super) const NOTICE_BUTTON_GAP: f32 = 4.0;
 
 fn eid(prefix: &str, key: &str) -> ElementId {
     ElementId::from(SharedString::from(format!("{prefix}{key}")))
@@ -297,6 +300,28 @@ impl ChatPane {
             if let Some(t) = &n.text {
                 lines = lines.child(self.flow(t, Rc::new(vec![]), cx));
             }
+            if let Some(user) = n.reply.clone() {
+                lines = lines.child(
+                    div().flex().mt(px(NOTICE_BUTTON_GAP)).child(
+                        div()
+                            .id(eid("notice-reply-", key))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .h(px(NOTICE_BUTTON_H))
+                            .px(px(8.))
+                            .rounded_full()
+                            .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.08 })
+                            .hover(|s| s.bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.14 }))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(c(theme::TEXT))
+                            .child(icon(icons::REPLY, 12.0))
+                            .child("Reply")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| this.mention_user(&user, w, cx))),
+                    ),
+                );
+            }
             return div()
                 .id(eid("notice-", key))
                 .w_full()
@@ -304,7 +329,7 @@ impl ChatPane {
                 .flex()
                 .gap(px(NOTICE_ICON_GAP))
                 .border_l_3()
-                .border_color(gpui::rgb(NOTICE_SUB_BAR))
+                .border_color(n.bar.unwrap_or_else(|| gpui::rgb(NOTICE_SUB_BAR).into()))
                 .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.035 })
                 .px(px(8.))
                 .py(px(4.))
