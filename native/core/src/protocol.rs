@@ -57,6 +57,9 @@ pub struct ConnFrame {
     pub can_send: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
+    /// true when sending is blocked because no account is logged in for this platform
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logged_out: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
 }

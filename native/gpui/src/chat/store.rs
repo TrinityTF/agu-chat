@@ -585,6 +585,7 @@ fn parse_conn(f: &Value) -> ConnFrame {
         title: s("title"),
         can_send: f.get("canSend").and_then(|v| v.as_bool()),
         read_only_reason: s("readOnlyReason"),
+        logged_out: f.get("loggedOut").and_then(|v| v.as_bool()),
         channel_id: f.get("channelId").filter(|v| !v.is_null()).map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())),
     }
 }

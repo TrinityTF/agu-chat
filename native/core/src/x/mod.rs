@@ -246,6 +246,9 @@ fn conn_frame(st: &St, pinned: bool) -> Value {
     if !can_send {
         f["readOnlyReason"] = json!(if logged_in { NOT_LIVE_REASON } else { auth::LOGGED_OUT_REASON });
     }
+    if !logged_in {
+        f["loggedOut"] = json!(true);
+    }
     f
 }
 

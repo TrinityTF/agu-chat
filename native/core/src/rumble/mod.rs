@@ -438,6 +438,9 @@ fn conn_frame(st: &St, connected: bool) -> Value {
     }
     f["canSend"] = json!(can_send);
     if !can_send {
+        if !connected {
+            f["loggedOut"] = json!(true);
+        }
         f["readOnlyReason"] = json!(if !connected { "Connect your Rumble account to chat.".to_string() } else if st.chat_disabled { js_str_or_empty(s.get("error")) } else { "Not live".to_string() });
     }
     f

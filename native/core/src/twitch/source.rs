@@ -188,7 +188,7 @@ impl TwitchSource {
         match auth::current() {
             None => {
                 let err = auth::state().error;
-                json!({"canSend": false, "readOnlyReason": err.unwrap_or_else(|| "Log in to Twitch in Settings to send messages.".into())})
+                json!({"canSend": false, "loggedOut": true, "readOnlyReason": err.unwrap_or_else(|| "Log in to Twitch in Settings to send messages.".into())})
             }
             Some(rec) if !rec.scopes.iter().any(|s| s == "user:write:chat") => json!({"canSend": false, "readOnlyReason": "Log in to Twitch again to allow sending messages."}),
             Some(_) => json!({"canSend": true}),

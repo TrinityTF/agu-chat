@@ -319,7 +319,7 @@ pub async fn send(login: &str, text: &str) -> Result<(), HttpError> {
 
 fn sendability() -> Value {
     match auth::current() {
-        None => json!({"canSend": false, "readOnlyReason": auth::state().error.unwrap_or_else(|| "Log in to Twitch in Settings to send whispers.".into())}),
+        None => json!({"canSend": false, "loggedOut": true, "readOnlyReason": auth::state().error.unwrap_or_else(|| "Log in to Twitch in Settings to send whispers.".into())}),
         Some(rec) if !has_scopes(&rec.scopes) => json!({"canSend": false, "readOnlyReason": RELOGIN}),
         Some(_) => json!({"canSend": true}),
     }

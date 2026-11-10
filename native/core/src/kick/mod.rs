@@ -365,6 +365,7 @@ fn conn_frame(st: &St) -> Value {
     f["canSend"] = json!(can_send);
     if !can_send {
         f["readOnlyReason"] = json!(auth::LOGGED_OUT_REASON);
+        f["loggedOut"] = json!(true);
     }
     f
 }

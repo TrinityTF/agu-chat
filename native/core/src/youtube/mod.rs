@@ -209,7 +209,11 @@ fn conn_frame(st: &St) -> Value {
     if !title.is_empty() {
         f["title"] = json!(title);
     }
-    let (can_send, reason) = send_gate(auth::is_logged_in(), &st.phase);
+    let logged_in = auth::is_logged_in();
+    let (can_send, reason) = send_gate(logged_in, &st.phase);
+    if !logged_in {
+        f["loggedOut"] = json!(true);
+    }
     f["canSend"] = json!(can_send);
     if let Some(r) = reason {
         f["readOnlyReason"] = json!(r);
