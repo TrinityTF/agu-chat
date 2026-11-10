@@ -438,6 +438,14 @@ impl TextInput {
         }
     }
 
+    /// The word being typed stays text (no image) while the caret stays in it: Backspace / Left through a
+    /// half-typed emote name. Elsewhere it is done and may show as its image.
+    fn leave_typing(&mut self, offset: usize) {
+        if !self.typing.is_some_and(|p| atoms::in_word(&self.content, p, offset)) {
+            self.typing = None;
+        }
+    }
+
     /// `offset`, moved out of an image to its nearer side.
     fn snap_near(&self, offset: usize) -> usize {
         atoms::snap_near(&self.atoms(), offset)
@@ -712,8 +720,8 @@ impl TextInput {
     // ---- selection helpers ------------------------------------------------------------------------------
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.typing = None;
         let offset = self.snap_near(offset);
+        self.leave_typing(offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.want_x = None;
@@ -752,8 +760,8 @@ impl TextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.typing = None;
         let offset = self.snap_near(offset);
+        self.leave_typing(offset);
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -1407,6 +1415,14 @@ mod atoms {
         out
     }
 
+    /// Whether `at` is inside, or at the end of, the whitespace-delimited word that ends at or contains `p`.
+    pub fn in_word(text: &str, p: usize, at: usize) -> bool {
+        let p = p.min(text.len());
+        let start = text[..p].rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, |c| c.len_utf8()));
+        let end = text[p..].find(char::is_whitespace).map_or(text.len(), |i| p + i);
+        start < at && at <= end
+    }
+
     /// Where Left / Backspace go from `at`: the start of the image the caret is after (or in), else `prev`.
     pub fn step_left(atoms: &[Atom], at: usize, prev: usize) -> usize {
         atoms.iter().find(|a| a.range.start < at && at <= a.range.end).map_or(prev, |a| a.range.start)
@@ -1555,6 +1571,21 @@ mod atom_tests {
         assert_eq!(ranges("[emote:1:Hi]\nKappa", None, None), vec![0..12, 13..18]);
         assert_eq!(ranges("Kappa", None, None), vec![0..5]);
         assert!(ranges("", None, None).is_empty());
+    }
+
+    #[test]
+    fn backspace_through_a_typed_emote_name() {
+        // "Kappa" with the caret at its end is being typed: the caret moves inside it without it turning into
+        // an image again (which snapped the caret back to its end, and Backspace deleted nothing)
+        assert!(in_word("hi Kappa", 8, 7));
+        assert!(in_word("hi Kappa", 8, 4));
+        assert!(!in_word("hi Kappa", 8, 3));
+        assert!(!in_word("hi Kappa x", 8, 10));
+        assert!(in_word("Kappa", 5, 1));
+        assert!(!in_word("", 0, 0));
+        let typed = find("hi Kappa", &lookup, Some(8), None);
+        assert_eq!(step_left(&typed, 8, 7), 7);
+        assert_eq!(snap_near(&typed, 7), 7);
     }
 
     #[test]
