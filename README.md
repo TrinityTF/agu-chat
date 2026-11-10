@@ -23,9 +23,11 @@ Install it over the Electron version: your settings and logins carry over.
 
 ## Features
 
-- **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
+- **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange. The window grows to fit a new split and shrinks back when you take one away, and a split only goes beside another when your screen has room for both.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges. Animated emotes can be turned off in Settings, which takes most of the GPU load away.
+- **Subs, gifts and Super Chats:** subscriptions, resubs and gifted subs show as their own notices with who gave and who got them; YouTube Super Chats and Super Stickers show the same way, in the Super Chat's colour, with a Reply button.
+- **Removed messages:** a timed-out, banned or deleted message stays readable but greyed out, with the reason after it (for example "Timed out (10m)").
 - **Moderation:** mod mode adds mod buttons to every message: ban, timeout, warn and delete by default, or your own set (any timeout length, or a command such as `/announce …`) in **Settings → Mod buttons**. The shield in a split's header sets the channel's modes (Shield Mode, subscribers-only, emote-only, unique chat, followers-only, slow mode) and its blocked terms. Click a name for a user card with mod actions, and use slash commands such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
 - **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **AutoMod:** approve or deny held messages right in chat.
@@ -36,6 +38,7 @@ Install it over the Electron version: your settings and logins carry over.
   of them is a highlight.
 - **Ignores:** hide messages from users you don't want to see, and hide or rewrite messages containing words or patterns you choose (Settings → Ignores, or "Ignore user" on a user card).
 - **Search:** Ctrl+F in a split filters it to matching messages; `from:name` shows one person's messages.
+- **Choosing where to send:** in a merged split, the button next to the message box picks one chat or all of them. A chat you can't write in says why: "not logged in", "offline" (X, YouTube and Rumble chats only take messages while the stream is live) or "read-only".
 - **Typing:** Tab completes emotes and names; `:` searches emotes, `@` mentions people, `/` lists commands; there's an emote picker, and Up brings back what you sent.
 - **Recent history** loads when you open a Twitch channel, so a new split isn't empty.
 - **Automatic updates** on the Beta or Stable channel.
@@ -46,9 +49,9 @@ Install it over the Electron version: your settings and logins carry over.
 | --- | --- | --- | --- | --- |
 | Twitch | Yes | Yes | Yes, where you're the broadcaster or a moderator | Log in once (see below). |
 | Kick | Yes | Yes | Yes, where you're the broadcaster or a moderator | Log in in **Settings → Accounts → Kick**. |
-| YouTube | Yes | Not yet | Not yet | Read-only in this beta. |
-| Rumble | Yes | Yes | Yes, where Rumble allows your account | Log in with your Rumble account in Settings. Your password is only used to sign in and is never saved. |
-| X | Yes | Yes | Not yet | Log in in **Settings → Accounts → X** to see chat with names and to write in it. Paste the broadcast link to be sure the chat is found. |
+| YouTube | Yes | Yes, while live | Yes, where you're the channel owner or a moderator | Log in in **Settings → Accounts → YouTube**. Shows every message (YouTube's "Live chat" view, not "Top chat"). |
+| Rumble | Yes | Yes, while live | Yes, where Rumble allows your account | Log in with your Rumble account in Settings. Your password is only used to sign in and is never saved. |
+| X | Yes | Yes, while live | Not yet | Log in in **Settings → Accounts → X** to see chat with names and to write in it. Paste the broadcast link to be sure the chat is found. |
 
 ## Logging in to Twitch
 
@@ -103,9 +106,9 @@ update**. Switching from Beta to Stable keeps your current version until a newer
 
 Your logins are stored only on your PC, encrypted with Windows' own protection, and are never sent anywhere except
 to the platform they belong to. The one exception is Kick: its login and token refresh go through Agu Chat's
-sign-in service at api.agu.lol, which passes the tokens to your PC and keeps nothing. X login happens in a sign-in
-window inside Agu Chat (it shows x.com's own page, so your password goes to X only); only the resulting session is kept, encrypted
-on your PC like the others. Settings and logs are in `%APPDATA%\Agu Chat\`.
+sign-in service at api.agu.lol, which passes the tokens to your PC and keeps nothing. X and YouTube logins happen in a
+sign-in window inside Agu Chat (it shows x.com's or Google's own page, so your password goes to them only); only the
+resulting session is kept, encrypted on your PC like the others. Settings and logs are in `%APPDATA%\Agu Chat\`.
 
 ## Building from source
 
