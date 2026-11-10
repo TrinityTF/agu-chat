@@ -909,7 +909,7 @@ impl AguApp {
         let this = cx.entity().downgrade();
         gpui::canvas(
             move |bounds, _w, cx| {
-                let changed = anchors.borrow().get(&key).map(|old| (old.origin.x - bounds.origin.x).abs() > px(0.5) || (old.size.width - bounds.size.width).abs() > px(0.5) || (old.origin.y - bounds.origin.y).abs() > px(0.5)).unwrap_or(true);
+                let changed = anchors.borrow().get(&key).map(|old| (old.origin.x - bounds.origin.x).abs() > px(0.5) || (old.size.width - bounds.size.width).abs() > px(0.5) || (old.origin.y - bounds.origin.y).abs() > px(0.5) || (old.size.height - bounds.size.height).abs() > px(0.5)).unwrap_or(true);
                 if changed {
                     anchors.borrow_mut().insert(key.clone(), bounds);
                     let this = this.clone();
