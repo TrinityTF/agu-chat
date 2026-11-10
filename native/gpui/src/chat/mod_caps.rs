@@ -130,8 +130,8 @@ pub fn badge_names(tag: &str) -> HashSet<&str> {
 }
 
 /// What the viewer may do to a chatter, by Twitch's rules: nobody acts on the broadcaster; a mod can't act on
-/// another mod, but the broadcaster can, and a lead moderator can on ordinary mods. Nobody bans themselves,
-/// but they can time out or warn themselves. The viewer's mod rights (ModCaps) are checked separately.
+/// another mod, but the broadcaster can, and a lead moderator can on ordinary mods. Nobody times out, warns or
+/// bans themselves (deleting their own lines is fine). The viewer's mod rights (ModCaps) are checked separately.
 pub fn mod_reach(viewer: &ModViewer, target_id: &str, target_badges: &str) -> ModReach {
     let b = badge_names(target_badges);
     let is_self = !viewer.id.is_empty() && viewer.id == target_id;
@@ -139,7 +139,7 @@ pub fn mod_reach(viewer: &ModViewer, target_id: &str, target_badges: &str) -> Mo
         return ModReach { ban: false, timeout: false, warn: false, delete: is_self };
     }
     if is_self {
-        return ModReach { ban: false, timeout: true, warn: true, delete: true };
+        return ModReach { ban: false, timeout: false, warn: false, delete: true };
     }
     let lead = b.contains("lead_moderator");
     let ok = !(lead || b.contains("moderator")) || viewer.broadcaster || (viewer.lead && !lead);
@@ -212,9 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn self_can_timeout_but_not_ban() {
+    fn no_mod_actions_on_yourself() {
         let r = mod_reach(&viewer("1", false, false), "1", "");
-        assert_eq!((r.ban, r.timeout, r.warn, r.delete), (false, true, true, true));
+        assert_eq!((r.ban, r.timeout, r.warn, r.delete), (false, false, false, true));
     }
 
     #[test]

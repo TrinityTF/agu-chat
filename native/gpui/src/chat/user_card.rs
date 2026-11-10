@@ -929,10 +929,13 @@ impl Render for UserCardView {
             _ => &ctx.badges,
         };
         if !badge_list.is_empty() {
-            // one row (20px badges, 6px apart, 10px padding) unless opened; the toggle takes the row's last spot
-            let per_row = (((window.viewport_size().width.to_f64() as f32 - 22.0 + 6.0) / (BADGE_SIDE + 6.0)).floor() as usize).max(2);
+            // one row (20px badges, 6px apart, 10px padding + border) unless opened; when they don't all fit, the
+            // "+N" toggle (up to ~32px wide) ends the row
+            let row_w = window.viewport_size().width.to_f64() as f32 - 22.0;
+            let per_row = (((row_w + 6.0) / (BADGE_SIDE + 6.0)).floor() as usize).max(1);
             let overflow = badge_list.len() > per_row;
-            let shown = if overflow && !self.badges_open { per_row - 1 } else { badge_list.len() };
+            let with_toggle = (((row_w - 32.0) / (BADGE_SIDE + 6.0)).floor() as usize).max(1);
+            let shown = if overflow && !self.badges_open { with_toggle } else { badge_list.len() };
             let mut grid = div().flex().flex_wrap().gap(px(6.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
             for (i, b) in badge_list.iter().take(shown).enumerate() {
                 let face: AnyElement = match &b.url {

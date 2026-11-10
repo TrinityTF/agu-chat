@@ -1487,7 +1487,7 @@ impl ChatPane {
             });
             match badges {
                 Some(b) => mod_reach(&env.viewer, &user.id, &b),
-                None if user.id == me_id => ModReach { ban: false, ..REACH_ALL },
+                None if user.id == me_id => ModReach { ban: false, timeout: false, warn: false, delete: true },
                 None => REACH_ALL,
             }
         } else {
