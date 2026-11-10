@@ -54,6 +54,16 @@ pub struct SourcesDrag {
 
 /// A tab dragged in the tab bar: "application/x-agu-tab".
 #[derive(Clone)]
+/// What a drop would put at a split's edge, for the room check.
+pub enum Adding<'a> {
+    /// an existing split moves there
+    Move(&'a str),
+    /// a new split
+    New,
+    /// another tab's whole layout
+    Tab(&'a str),
+}
+
 pub struct TabDrag {
     pub tab_id: String,
     pub label: SharedString,
@@ -168,6 +178,8 @@ pub struct AguApp {
     /// what `fit_window` last saw of the active tab
     fit_prev: Option<FitPrev>,
     fit_hooked: bool,
+    /// the biggest content area (logical px) the screen leaves for the splits
+    fit_max: Option<(f32, f32)>,
     _subs: Vec<Subscription>,
     _unsubs: Vec<Unsub>,
 }
@@ -222,6 +234,7 @@ impl AguApp {
             fit_edge: None,
             fit_prev: None,
             fit_hooked: false,
+            fit_max: None,
             _subs: subs,
             _unsubs: Vec::new(),
         };
@@ -587,6 +600,35 @@ impl AguApp {
         self.update_root(cx, tab_id, |r| set_sizes(r, container_id, sizes));
     }
 
+    /// Whether `tab_id`'s layout still fits on the screen with `adding` put at `edge` of `target`: every chat keeps
+    /// its minimum size inside the biggest window the screen allows.
+    pub fn edge_fits(&self, tab_id: &str, target: &str, edge: Edge, adding: Adding) -> bool {
+        let Some((mw, mh)) = self.fit_max else { return true };
+        let Some(tab) = self.layout.tabs.iter().find(|t| t.id == tab_id) else { return true };
+        let root = tab.root.as_ref();
+        let cand = match adding {
+            Adding::Move(src) => move_leaf(root, src, target, edge),
+            Adding::New => insert_at(root, target, new_leaf(vec![]).into(), edge),
+            Adding::Tab(t) => match self.layout.tabs.iter().find(|x| x.id == t).and_then(|x| x.root.clone()) {
+                Some(add) => insert_at(root, target, add, edge),
+                None => return true,
+            },
+        };
+        let Some(c) = cand else { return true };
+        let (w, h) = window_fit::tree_min_size(&c);
+        w <= mw + 0.5 && h <= mh + 0.5
+    }
+
+    /// `want` at `target`, or the other direction when only that one fits (right <-> below).
+    fn roomy_edge(&self, tab_id: &str, target: &str, want: Edge) -> Edge {
+        let other = if matches!(want, Edge::Left | Edge::Right) { Edge::Bottom } else { Edge::Right };
+        if !self.edge_fits(tab_id, target, want, Adding::New) && self.edge_fits(tab_id, target, other, Adding::New) {
+            other
+        } else {
+            want
+        }
+    }
+
     pub fn move_split(&mut self, tab_id: &str, src_id: &str, target_id: &str, edge: Edge, cx: &mut Context<Self>) {
         self.fit_edge = Some(edge);
         self.update_root(cx, tab_id, |r| move_leaf(r, src_id, target_id, edge));
@@ -768,11 +810,13 @@ impl AguApp {
         match d {
             Dialog::Settings | Dialog::CloseTab { .. } => {}
             Dialog::Add { tab_id } | Dialog::Whisper { tab_id } => {
-                self.fit_edge = Some(Edge::Right);
+                let first = self.layout.tabs.iter().find(|t| t.id == tab_id).and_then(|t| leaves(t.root.as_ref()).first().map(|l| l.id.clone()));
+                let edge = first.as_deref().map(|f| self.roomy_edge(&tab_id, f, Edge::Right)).unwrap_or(Edge::Right);
+                self.fit_edge = Some(edge);
                 self.update_root(cx, &tab_id, |r| match r {
                     Some(root) => {
                         let first = leaves(Some(root))[0].id.clone();
-                        insert_at(Some(root), &first, leaf.into(), Edge::Right)
+                        insert_at(Some(root), &first, leaf.into(), edge)
                     }
                     None => Some(leaf.into()),
                 });
@@ -782,8 +826,9 @@ impl AguApp {
                 self.update_root(cx, &tab_id, |r| map_leaf(r, &target, &|l| tree::Leaf { sources: sources.clone(), ..l }));
             }
             Dialog::Split { tab_id, leaf_id: target, below } => {
-                self.fit_edge = Some(if below { Edge::Bottom } else { Edge::Right });
-                self.update_root(cx, &tab_id, |r| insert_at(r, &target, leaf.into(), if below { Edge::Bottom } else { Edge::Right }));
+                let edge = self.roomy_edge(&tab_id, &target, if below { Edge::Bottom } else { Edge::Right });
+                self.fit_edge = Some(edge);
+                self.update_root(cx, &tab_id, |r| insert_at(r, &target, leaf.into(), edge));
                 self.focus_leaf(&tab_id, &leaf_id, cx);
             }
         }
@@ -1009,6 +1054,7 @@ impl AguApp {
         }
         let edge = self.fit_edge.take();
         let chrome = 28.0 + if self.updater.status == "ready" && self.bar_dismissed != self.updater.version { 24.0 } else { 0.0 };
+        self.fit_max = window_fit::max_client(window).map(|(w, h)| (w, (h - chrome).max(0.0)));
         let tab_id = self.active_tab().id.clone();
         let mut root = self.active_tab().root.clone();
         let (cw, ch) = self.fit_content(window, chrome);
@@ -1030,7 +1076,7 @@ impl AguApp {
         if let (Some(prev), Some(cur)) = (&prev, &root) {
             if prev.tab_id == tab_id && prev.shape != window_fit::shape(cur) {
                 let old_px = window_fit::leaf_px(&prev.root, prev.w, prev.h);
-                let (new_tree, tw, th) = window_fit::replan(cur, &old_px);
+                let (new_tree, tw, _) = window_fit::replan(cur, &old_px);
                 if new_tree != *cur {
                     let t = new_tree.clone();
                     self.update_root(cx, &tab_id, move |_| Some(t));
@@ -1041,7 +1087,10 @@ impl AguApp {
                     (edge == Some(Edge::Left), edge == Some(Edge::Top))
                 };
                 let new_root = Some(new_tree);
-                set_min(window, min_of(&new_root));
+                let need = min_of(&new_root);
+                set_min(window, need);
+                // the height stays as it is unless the stacked chats need more (they share it)
+                let th = prev.h.max(need.1);
                 let (rw, rh) = (tw.max(window_state::MIN_W), (th + chrome).max(window_state::MIN_H));
                 // The resize runs after this frame: a SetWindowPos inside render lands while gpui is drawing, which
                 // drops the new size and leaves the changed part blank until something else repaints.

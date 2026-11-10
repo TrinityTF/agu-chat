@@ -360,6 +360,15 @@ mod win {
         }
     }
 
+    /// The biggest client area (logical px) this window can have on its screen: the work area less the frame.
+    pub fn max_client(window: &Window) -> Option<(f32, f32)> {
+        let hwnd = hwnd_of(window)?;
+        let wa = work_area(hwnd)?;
+        let scale = scale_of(hwnd);
+        let (fw, fh) = frame_of(hwnd);
+        Some(((wa.width - fw).max(0.0) / scale, (wa.height - fh).max(0.0) / scale))
+    }
+
     pub fn apply_grow(hwnd: isize, to: Rect) {
         unsafe {
             let _ = SetWindowPos(HWND(hwnd as *mut core::ffi::c_void), None, to.x as i32, to.y as i32, to.width as i32, to.height as i32, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -368,7 +377,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{apply_grow, install, plan_grow, plan_resize, set_min_client};
+pub use win::{apply_grow, install, max_client, plan_grow, plan_resize, set_min_client};
 
 #[cfg(not(windows))]
 pub fn install(_: &gpui::Window) {}
@@ -384,6 +393,10 @@ pub fn plan_resize(_: &gpui::Window, _: f32, _: f32, _: bool, _: bool) -> Option
 }
 #[cfg(not(windows))]
 pub fn apply_grow(_: isize, _: Rect) {}
+#[cfg(not(windows))]
+pub fn max_client(_: &gpui::Window) -> Option<(f32, f32)> {
+    None
+}
 
 #[cfg(test)]
 mod tests {

@@ -10,8 +10,8 @@ use gpui::{
     SharedString, Window,
 };
 
-use crate::layout::app::{AguApp, SourcesDrag, SplitDrag, TabDrag};
-use crate::layout::tree::{source_key, Axis, Edge, Leaf};
+use crate::layout::app::{Adding, AguApp, SourcesDrag, SplitDrag, TabDrag};
+use crate::layout::tree::{find_leaf, source_key, Axis, Edge, Leaf};
 use crate::layout::ui::{btn, BtnOpts};
 use crate::theme::{self, a, c};
 
@@ -86,6 +86,14 @@ pub enum Dragging {
 pub enum Zone {
     Edge(Edge),
     Center,
+}
+
+/// What a drag over a split would add (owned, for the drag-move handlers).
+#[derive(Clone)]
+enum DropWhat {
+    Move(String),
+    New,
+    Tab(String),
 }
 
 fn zone_at(bounds: Bounds<Pixels>, pos: Point<Pixels>, can_merge: bool) -> Zone {
@@ -319,8 +327,21 @@ impl AguApp {
             let hover = self.sv.hover.clone().filter(|(l, _)| *l == leaf_id).map(|(_, z)| z);
             let tid = tab_id.to_string();
             let lid = leaf_id.clone();
-            let over = move |this: &mut AguApp, bounds: Bounds<Pixels>, pos: Point<Pixels>, cx: &mut Context<AguApp>| {
+            let tid_o = tid.clone();
+            // `what`: what the drop would add (`Adding` as owned data): an edge without room for it shows no zone
+            let over = move |this: &mut AguApp, bounds: Bounds<Pixels>, pos: Point<Pixels>, what: DropWhat, cx: &mut Context<AguApp>| {
                 let z = if bounds.contains(&pos) { Some((lid.clone(), zone_at(bounds, pos, can_merge))) } else { None };
+                let z = z.filter(|(_, zone)| match zone {
+                    Zone::Edge(e) => {
+                        let adding = match &what {
+                            DropWhat::Move(src) => Adding::Move(src),
+                            DropWhat::New => Adding::New,
+                            DropWhat::Tab(t) => Adding::Tab(t),
+                        };
+                        this.edge_fits(&tid_o, &lid, *e, adding)
+                    }
+                    Zone::Center => true,
+                });
                 let mine = this.sv.hover.as_ref().map(|(l, _)| *l == lid).unwrap_or(false);
                 if z.is_some() && this.sv.hover != z {
                     this.sv.hover = z;
@@ -338,30 +359,42 @@ impl AguApp {
                 .top_0()
                 .left_0()
                 .size_full()
-                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<SplitDrag>, _w, cx| over(this, ev.bounds, ev.event.position, cx)))
-                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<SourcesDrag>, _w, cx| over2(this, ev.bounds, ev.event.position, cx)))
-                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _w, cx| over3(this, ev.bounds, ev.event.position, cx)));
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<SplitDrag>, _w, cx| {
+                    let what = DropWhat::Move(ev.drag(cx).leaf_id.clone());
+                    over(this, ev.bounds, ev.event.position, what, cx)
+                }))
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<SourcesDrag>, _w, cx| {
+                    let d = ev.drag(cx);
+                    let (leaf, keys) = (d.leaf_id.clone(), d.keys.clone());
+                    // every channel of the split: that is moving the split
+                    let all = find_leaf(this.active_tab().root.as_ref(), &leaf).is_some_and(|l| l.sources.iter().all(|s| keys.contains(&source_key(s))));
+                    let what = if all { DropWhat::Move(leaf) } else { DropWhat::New };
+                    over2(this, ev.bounds, ev.event.position, what, cx)
+                }))
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _w, cx| {
+                    let what = DropWhat::Tab(ev.drag(cx).tab_id.clone());
+                    over3(this, ev.bounds, ev.event.position, what, cx)
+                }));
             let (t1, t2, t3, l1, l2, l3) = (tid.clone(), tid.clone(), tid, leaf_id.clone(), leaf_id.clone(), leaf_id.clone());
             overlay = overlay
                 .on_drop(cx.listener(move |this, d: &SplitDrag, _w, cx| {
-                    let zone = this.take_zone(&l1);
-                    match zone {
-                        Zone::Center => this.merge(&t1, &d.leaf_id, None, &l1, cx),
-                        Zone::Edge(e) => this.move_split(&t1, &d.leaf_id, &l1, e, cx),
+                    match this.take_zone(&l1) {
+                        Some(Zone::Center) => this.merge(&t1, &d.leaf_id, None, &l1, cx),
+                        Some(Zone::Edge(e)) => this.move_split(&t1, &d.leaf_id, &l1, e, cx),
+                        None => {}
                     }
                     cx.notify();
                 }))
                 .on_drop(cx.listener(move |this, d: &SourcesDrag, _w, cx| {
-                    let zone = this.take_zone(&l2);
-                    match zone {
-                        Zone::Center => this.merge(&t2, &d.leaf_id, Some(&d.keys), &l2, cx),
-                        Zone::Edge(e) => this.split_out(&t2, &d.leaf_id, &d.keys, &l2, e, cx),
+                    match this.take_zone(&l2) {
+                        Some(Zone::Center) => this.merge(&t2, &d.leaf_id, Some(&d.keys), &l2, cx),
+                        Some(Zone::Edge(e)) => this.split_out(&t2, &d.leaf_id, &d.keys, &l2, e, cx),
+                        None => {}
                     }
                     cx.notify();
                 }))
                 .on_drop(cx.listener(move |this, d: &TabDrag, _w, cx| {
-                    let zone = this.take_zone(&l3);
-                    if let Zone::Edge(e) = zone {
+                    if let Some(Zone::Edge(e)) = this.take_zone(&l3) {
                         this.take_tab(&t3, &d.tab_id, Some(&l3), e, cx);
                     }
                     cx.notify();
@@ -407,14 +440,15 @@ impl AguApp {
         el.into_any_element()
     }
 
-    /// The zone the pointer was last over on this split's drop overlay (the drop event carries no position).
-    fn take_zone(&mut self, leaf_id: &str) -> Zone {
+    /// The zone the pointer was last over on this split's drop overlay (the drop event carries no position); None
+    /// when it showed none (an edge without room on the screen).
+    fn take_zone(&mut self, leaf_id: &str) -> Option<Zone> {
         let z = self.sv.hover.take();
         self.sv.dragging = None;
         self.tab_drag = None;
         match z {
-            Some((l, z)) if l == leaf_id => z,
-            _ => Zone::Edge(Edge::Right),
+            Some((l, z)) if l == leaf_id => Some(z),
+            _ => None,
         }
     }
 }
