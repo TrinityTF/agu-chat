@@ -16,4 +16,5 @@ pub mod window_fit;
 pub mod tree;
 pub mod twitch_login;
 pub mod x_login;
+pub mod youtube_login;
 pub mod ui;

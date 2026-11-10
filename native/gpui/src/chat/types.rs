@@ -164,6 +164,8 @@ lenient! {
         pub text: String,
         pub paid: Option<YouTubePaid>,
         pub notice: Option<String>,
+        /// YouTube's context-menu params for this message: what moderation asks with
+        pub menu: Option<String>,
     }
 }
 

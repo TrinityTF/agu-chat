@@ -1391,6 +1391,20 @@ impl ChatPane {
                 })
                 .detach();
             }
+            RowAction::YoutubeMod { sk, action, msg } => {
+                if action == "ban" && self.confirm.is_none() {
+                    self.confirm = Some(Confirm { text: format!("Ban {} from the YouTube chat?", if msg.user.name.is_empty() { "this user" } else { &msg.user.name }), run: Some(RowAction::YoutubeMod { sk, action: "ban!", msg }) });
+                    cx.notify();
+                    return;
+                }
+                let action = if action == "ban!" { "ban" } else { action };
+                let Some(src) = self.ref_of(&sk) else { return };
+                cx.spawn(async move |this, cx| {
+                    let t = mod_actions::youtube_mod_action(&bridge, &src, action, &msg).await;
+                    let _ = this.update(cx, |p, cx| p.toast_msg(t, cx));
+                })
+                .detach();
+            }
             RowAction::KickMod { sk, action, msg, seconds } => {
                 if action == "ban" && self.confirm.is_none() {
                     self.confirm = Some(Confirm { text: format!("Ban {} from the Kick chat?", if msg.user.name.is_empty() { "this user" } else { &msg.user.name }), run: Some(RowAction::KickMod { sk, action: "ban!", msg, seconds }) });
@@ -1720,15 +1734,29 @@ impl ChatPane {
             RowBody::Automod(h) => Some(automod_row(row, h, &ctx, self.envs.get(&row.sk)?)),
             RowBody::Rumble(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble) };
+                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble), viewer_id: String::new() };
                 Some(rumble_row(row, m, &ctx, &env, rule.as_ref()))
             }
             RowBody::Kick(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick) };
+                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new() };
                 Some(kick_row(row, m, &ctx, &env, rule.as_ref()))
             }
-            RowBody::YouTube(m) => Some(youtube_row(row, m, &ctx, rule.as_ref())),
+            RowBody::YouTube(m) => {
+                let st = st?;
+                let yt = self.accounts.get(&Platform::Youtube);
+                let connected = yt.map(|a| a.connected).unwrap_or(false);
+                let env = CoEnv {
+                    source: st.source.clone(),
+                    caps: CoCaps { connected, can_moderate: connected, can_delete: connected },
+                    can_send: false,
+                    rumble_badges: Default::default(),
+                    rumble_emotes: Default::default(),
+                    viewer_login: self.co_login(Platform::Youtube),
+                    viewer_id: yt.and_then(|a| a.user.as_ref()).map(|u| u.id.clone()).unwrap_or_default(),
+                };
+                Some(youtube_row(row, m, &ctx, &env, rule.as_ref()))
+            }
             RowBody::X(m) => Some(x_row(row, m, &ctx, rule.as_ref())),
         }
     }

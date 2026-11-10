@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::mod_buttons::format_duration;
 use super::mod_caps::{relay_api, RelayResponse};
-use super::types::{KickMsg, RumbleMsg};
+use super::types::{KickMsg, RumbleMsg, YouTubeMsg};
 
 /// A toast to show: (text, warn).
 pub type ToastMsg = Option<(String, bool)>;
@@ -119,5 +119,22 @@ pub async fn kick_mod_action(bridge: &Arc<dyn AguBridge>, source: &SourceRef, ac
         "ban" => format!("Banned {who} on Kick"),
         "unban" => format!("Unbanned {who} on Kick"),
         _ => "Message deleted on Kick".to_string(),
+    })
+}
+
+/// YouTube moderation asks YouTube's own context menu for the message (`msg.menu`), so it only works for an
+/// owner or moderator of that channel; the timeout length is YouTube's.
+pub async fn youtube_mod_action(bridge: &Arc<dyn AguBridge>, source: &SourceRef, action: &str, msg: &YouTubeMsg) -> ToastMsg {
+    let body = json!({"action": action, "menu": msg.menu});
+    let r = relay_api(bridge, source, "/api/youtube/action", Some("POST"), Some(body)).await;
+    if !r.ok {
+        let t = r.text();
+        return warn(format!("YouTube: {}", if t.is_empty() { "action failed".to_string() } else { t }));
+    }
+    let who = if msg.user.name.is_empty() { "user".to_string() } else { msg.user.name.clone() };
+    ok_toast(match action {
+        "timeout" => format!("Timed out {who} on YouTube"),
+        "ban" => format!("Banned {who} on YouTube"),
+        _ => "Message deleted on YouTube".to_string(),
     })
 }

@@ -84,6 +84,8 @@ pub struct CoEnv {
     pub rumble_emotes: RumbleEmotes,
     /// the logged-in account on this platform, for who the mod buttons may act on
     pub viewer_login: String,
+    /// the logged-in account's id on this platform (YouTube: its channel id)
+    pub viewer_id: String,
 }
 
 pub struct RowCtx<'a> {
@@ -127,6 +129,7 @@ pub enum RowAction {
     Automod { sk: String, id: String, allow: bool },
     RumbleMod { sk: String, action: &'static str, msg: Box<RumbleMsg>, seconds: u32 },
     KickMod { sk: String, action: &'static str, msg: Box<KickMsg>, seconds: Option<u32> },
+    YoutubeMod { sk: String, action: &'static str, msg: Box<YouTubeMsg> },
 }
 
 // ---- built rows -------------------------------------------------------------------------------------
@@ -1192,12 +1195,19 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     BuiltRow::Frame(spec)
 }
 
-pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, rule: Option<&HighlightRule>) -> BuiltRow {
+pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>) -> BuiltRow {
     let rs = ctx.rs;
     let base = rs.font_size;
     let paid = m.paid.as_ref().filter(|p| !p.amount.is_empty());
+    let can_mod = youtube_can_mod(m, env);
+    let sk = row.sk.clone();
     let mut f = Flow::new(base);
     let mut actions = Vec::new();
+    if ctx.mod_buttons && can_mod {
+        let can = |b: &ModButton| b.action != "command" && b.action != "warn";
+        let run = |b: &ModButton| RowAction::YoutubeMod { sk: sk.clone(), action: match b.action.as_str() { "ban" => "ban", "timeout" => "timeout", _ => "delete" }, msg: Box::new(m.clone()) };
+        mod_button_items(&mut f, ctx.mod_list, &can, &run, &mut actions);
+    }
     frame_prefix(&mut f, ctx, m.ts, Platform::Youtube);
     if rs.show_badges {
         for b in &m.badges {
@@ -1249,8 +1259,23 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, rule: Option<&Highli
     } else {
         co_frame_style(&mut spec, rule);
     }
-    spec.hover = Hover { copy: Some(m.text.clone()), ..Default::default() };
+    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), ..Default::default() };
     BuiltRow::Frame(spec)
+}
+
+/// Whether a YouTube row gets mod buttons: a login, the message's menu params, not the channel's owner and not
+/// the account's own message. Whether the account may moderate is YouTube's answer when a button is used.
+fn youtube_can_mod(m: &YouTubeMsg, env: &CoEnv) -> bool {
+    if !env.caps.connected || m.menu.as_deref().unwrap_or("").is_empty() || m.badges.iter().any(|b| b.icon == "OWNER") {
+        return false;
+    }
+    let mine = if !env.viewer_id.is_empty() && !m.user.id.is_empty() {
+        env.viewer_id == m.user.id
+    } else {
+        let me = env.viewer_login.trim().trim_start_matches('@').to_lowercase();
+        !me.is_empty() && m.user.name.trim().trim_start_matches('@').to_lowercase() == me
+    };
+    !mine
 }
 
 pub fn x_row(row: &Row, m: &XMsg, ctx: &RowCtx, rule: Option<&HighlightRule>) -> BuiltRow {

@@ -46,7 +46,7 @@ fn kick_token_url(token: &str) -> Option<SharedString> {
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && !name.is_empty()).then(|| kick_emote_url(id).into())
 }
 
-const SENDABLE: [Platform; 4] = [Platform::Twitch, Platform::Rumble, Platform::Kick, Platform::X];
+const SENDABLE: [Platform; 5] = [Platform::Twitch, Platform::Rumble, Platform::Kick, Platform::X, Platform::Youtube];
 const ALL: &str = "*";
 const HISTORY_MAX: usize = 100;
 
@@ -143,7 +143,7 @@ fn send_path(p: Platform) -> Option<&'static str> {
         Platform::Rumble => Some("/api/rumble/send"),
         Platform::Kick => Some("/api/kick/send"),
         Platform::X => Some("/api/x/send"),
-        _ => None,
+        Platform::Youtube => Some("/api/youtube/send"),
     }
 }
 

@@ -486,6 +486,8 @@ pub fn to_youtube_chat_msg(action: &Value) -> Option<Value> {
             "avatar": last_thumb(&r["authorPhoto"]["thumbnails"]),
         },
         "badges": parse_badges(&r["authorBadges"]),
+        // what moderation asks YouTube's context menu with; null when the item has none
+        "menu": r["contextMenuEndpoint"]["liveChatItemContextMenuEndpoint"]["params"].as_str().filter(|p| !p.is_empty()).map(|p| json!(p)).unwrap_or(Value::Null),
         "parts": parts,
         "text": plain,
         // Super Chats and Super Stickers carry their own tier colour, passed through rather than re-derived.
@@ -595,12 +597,14 @@ mod tests {
             "id": "m1", "timestampUsec": "1794052800123456", "authorExternalChannelId": "UCx", "authorName": {"simpleText": "@bob"},
             "authorPhoto": {"thumbnails": [{"url": "a"}, {"url": "b"}]},
             "message": {"runs": [{"text": "hi "}, {"emoji": {"emojiId": "e", "shortcuts": [":smile:"], "isCustomEmoji": true, "image": {"thumbnails": [{"url": "e1"}, {"url": "e2"}]}}}]},
+            "contextMenuEndpoint": {"liveChatItemContextMenuEndpoint": {"params": "MENU"}},
             "authorBadges": [{"liveChatAuthorBadgeRenderer": {"tooltip": "Moderator", "icon": {"iconType": "MODERATOR"}}}]}}}});
         let row = to_youtube_chat_msg(&action).unwrap();
         assert_eq!(row["id"], "m1");
         assert_eq!(row["ts"], 1794052800123i64);
         assert_eq!(row["user"], json!({"id": "UCx", "name": "bob", "avatar": "b"}));
         assert_eq!(row["text"], "hi :smile:");
+        assert_eq!(row["menu"], "MENU");
         assert_eq!(row["parts"], json!([{"t": "text", "v": "hi "}, {"t": "emoji", "u": "e2", "a": ":smile:", "custom": true}]));
         assert_eq!(row["badges"], json!([{"label": "Moderator", "icon": "MODERATOR", "url": ""}]));
         assert_eq!((&row["paid"], &row["notice"]), (&Value::Null, &Value::Null));
@@ -609,6 +613,7 @@ mod tests {
         assert_eq!(paid["paid"], json!({"amount": "$5.00", "bg": "rgba(0, 229, 255, 1.000)", "headerBg": "rgba(0, 184, 212, 1.000)", "sticker": false}));
         let member = to_youtube_chat_msg(&json!({"addChatItemAction": {"item": {"liveChatMembershipItemRenderer": {"id": "g", "headerSubtext": {"runs": [{"text": "Welcome"}]}}}}})).unwrap();
         assert_eq!((&member["notice"], &member["text"]), (&json!("membership"), &json!("Welcome")));
+        assert_eq!(paid["menu"], Value::Null);
         assert!(to_youtube_chat_msg(&json!({"removeChatItemAction": {}})).is_none());
         assert!(to_youtube_chat_msg(&json!({"addChatItemAction": {"item": {"liveChatViewerEngagementMessageRenderer": {}}}})).is_none());
         assert_eq!(strip_handle("@"), "@");

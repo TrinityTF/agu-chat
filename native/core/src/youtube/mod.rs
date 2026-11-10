@@ -5,21 +5,27 @@
 //! plus the uniform {type:"conn"} frame.
 //!
 //! One poll loop per source, paced by YouTube's own timeoutMs; repeated failure backs off exponentially so a
-//! deleted channel or a YouTube outage cannot become a fetch loop. Sending is not supported.
+//! deleted channel or a YouTube outage cannot become a fetch loop. Reading is anonymous; sending and moderation
+//! use the user's own youtube.com session (auth.rs, moderate.rs) through POST /api/youtube/send and
+//! POST /api/youtube/action.
 //!
 //! Differences from the JS: the poll timer is a `util::Timer`, and `stop()` aborts the source's tasks
 //! (`net::Jobs`) instead of an `AbortController`.
+pub mod auth;
+pub mod moderate;
 pub mod vendor;
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use serde_json::{json, Map, Value};
 
 use crate::net::Jobs;
-use crate::platforms::{Ctx, Emit, PlatformModule, Source};
-use crate::protocol::{Frame, Platform};
+use crate::platforms::{Accounts, Ctx, Emit, PlatformModule, Source};
+use crate::protocol::{AccountState, Frame, Platform};
+use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, now_ms, truthy, Timer};
 use vendor::youtube::{fetch_metadata, parse_youtube_source, poll_chat, read_watch_page, source_string, to_youtube_chat_msg, youtube_source_url, ChatState, YtSource};
 
@@ -36,7 +42,29 @@ const METADATA_TTL_MS: i64 = 60_000;
 const RECHECK_MS: u64 = 12_000;
 const MAX_RECHECK_MS: u64 = 2 * 60_000;
 
-const READ_ONLY_REASON: &str = "YouTube is read-only in this beta";
+const NOT_LIVE_REASON: &str = "Not live";
+
+/// normalized channel -> (video id, channel id) of the broadcast its source reads right now (what sending needs).
+static BROADCASTS: LazyLock<Mutex<HashMap<String, (String, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn set_broadcast(channel: &str, ids: Option<(String, String)>) {
+    let mut m = BROADCASTS.lock().unwrap();
+    match ids {
+        Some(v) => m.insert(channel.to_string(), v),
+        None => m.remove(channel),
+    };
+}
+
+/// Whether a column can send, and why not: needs a login and a running chat.
+fn send_gate(logged_in: bool, phase: &str) -> (bool, Option<&'static str>) {
+    if !logged_in {
+        (false, Some(auth::logged_out_reason()))
+    } else if phase != "open" {
+        (false, Some(NOT_LIVE_REASON))
+    } else {
+        (true, None)
+    }
+}
 
 pub struct Youtube;
 
@@ -50,9 +78,78 @@ impl PlatformModule for Youtube {
     }
 
     fn create_source(&self, channel: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<dyn Source> {
+        auth::ensure_ctx(&ctx); // sources can be created before init() in tests
         // JS throws "Not a YouTube source" here; the relay has already normalized, so this only guards a stray input.
         let src = parse_youtube_source(&channel).unwrap_or(YtSource { kind: "handle", id: channel.clone() });
         YoutubeSource::new(channel, src, emit, ctx)
+    }
+
+    fn routes(&self) -> Vec<(String, Handler)> {
+        vec![("POST /api/youtube/send".into(), Arc::new(|req| Box::pin(route_send(req)))), ("POST /api/youtube/action".into(), Arc::new(|req| Box::pin(route_action(req))))]
+    }
+
+    fn accounts(&self) -> Option<Arc<dyn Accounts>> {
+        Some(Arc::new(YoutubeAccounts))
+    }
+
+    fn init(&self, ctx: Arc<Ctx>) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            auth::init(ctx);
+            Ok(())
+        })
+    }
+}
+
+struct YoutubeAccounts;
+
+impl Accounts for YoutubeAccounts {
+    fn state(&self) -> AccountState {
+        auth::state()
+    }
+    fn login(&self, _args: Value) -> BoxFuture<'static, Result<Value, String>> {
+        Box::pin(auth::login())
+    }
+    fn cancel(&self) {
+        auth::cancel();
+    }
+    fn logout(&self) -> BoxFuture<'static, ()> {
+        Box::pin(auth::logout())
+    }
+}
+
+fn route_err(status: u16, msg: &str) -> RouteRes {
+    RouteRes { status, body: json!({"error": msg}) }
+}
+
+/// POST /api/youtube/send {text}: the message goes to the broadcast this column is reading. YouTube's error text
+/// comes back as the toast.
+async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let text = js_str_or_empty(Some(&req.body["text"])).trim().to_string();
+    if text.is_empty() {
+        return Ok(route_err(400, "empty message"));
+    }
+    if !auth::is_logged_in() {
+        return Ok(route_err(401, auth::logged_out_reason()));
+    }
+    let key = parse_youtube_source(&req.source.channel).map(|s| source_string(&s)).unwrap_or_else(|| req.source.channel.clone());
+    let Some((video_id, channel_id)) = BROADCASTS.lock().unwrap().get(&key).cloned() else { return Ok(route_err(409, NOT_LIVE_REASON)) };
+    match auth::send_chat(&video_id, &channel_id, &text).await {
+        Ok(()) => Ok(RouteRes { status: 200, body: json!({"ok": true}) }),
+        Err(e) => Ok(route_err(e.status, &e.message)),
+    }
+}
+
+/// POST /api/youtube/action {action: delete|timeout|ban, menu}: `menu` is the message's context-menu params
+/// (the row's `menu`). YouTube fixes the timeout length itself.
+async fn route_action(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let Some(kind) = moderate::Kind::parse(&js_str_or_empty(Some(&req.body["action"]))) else { return Ok(route_err(400, "unknown action")) };
+    let menu = js_str_or_empty(Some(&req.body["menu"]));
+    if menu.is_empty() {
+        return Ok(route_err(400, "missing menu"));
+    }
+    match moderate::moderate(&menu, kind).await {
+        Ok(()) => Ok(RouteRes { status: 200, body: json!({"ok": true}) }),
+        Err(m) => Ok(route_err(if m == moderate::NOT_MODERATOR { 403 } else { 502 }, &m)),
     }
 }
 
@@ -70,6 +167,7 @@ struct St {
     polling: bool,
     stopped: bool,
     last_conn_json: String,
+    auth_listener: Option<u64>,
 }
 
 pub struct YoutubeSource {
@@ -97,8 +195,11 @@ fn conn_frame(st: &St) -> Value {
     if !title.is_empty() {
         f["title"] = json!(title);
     }
-    f["canSend"] = json!(false);
-    f["readOnlyReason"] = json!(READ_ONLY_REASON);
+    let (can_send, reason) = send_gate(auth::is_logged_in(), &st.phase);
+    f["canSend"] = json!(can_send);
+    if let Some(r) = reason {
+        f["readOnlyReason"] = json!(r);
+    }
     f
 }
 
@@ -139,6 +240,7 @@ impl YoutubeSource {
                 polling: false,
                 stopped: false,
                 last_conn_json: String::new(),
+                auth_listener: None,
             }),
         })
     }
@@ -184,6 +286,11 @@ impl YoutubeSource {
             if let Some(p) = next_phase {
                 st.phase = p.to_string();
             }
+            let ids = match (truthy(&st.status["live"]), st.status["videoId"].as_str(), st.status["channelId"].as_str()) {
+                (true, Some(v), Some(c)) if !v.is_empty() && !c.is_empty() => Some((v.to_string(), c.to_string())),
+                _ => None,
+            };
+            set_broadcast(&self.channel, ids);
             changed.then(|| Value::Object(st.status.clone()))
         };
         if let Some(status) = changed {
@@ -374,6 +481,7 @@ impl YoutubeSource {
             st.chat = Some(ChatState { key: res.key.clone(), client_version: res.client_version.clone(), continuation: res.continuation.clone(), video_id: res.video_id.clone() });
             st.meta_at = 0;
         }
+        auth::set_client_info(&res.client_version, &res.key);
         let mut next = base;
         next.extend([("title", title), ("notice", Value::Null), ("error", Value::Null)]);
         self.set_status(next, None);
@@ -433,6 +541,14 @@ impl Source for YoutubeSource {
             f
         };
         self.emit(f);
+        // canSend and its reason follow the login
+        let me: Weak<YoutubeSource> = Arc::downgrade(&self);
+        let id = auth::EVENTS.on(Arc::new(move |_| {
+            if let Some(s) = me.upgrade() {
+                s.publish_conn();
+            }
+        }));
+        self.st.lock().unwrap().auth_listener = Some(id);
         let s = self.clone();
         self.jobs.spawn(s.tick());
     }
@@ -442,12 +558,32 @@ impl Source for YoutubeSource {
             let mut st = self.st.lock().unwrap();
             st.stopped = true;
             st.timer.clear();
+            if let Some(id) = st.auth_listener.take() {
+                auth::EVENTS.off(id);
+            }
         }
+        set_broadcast(&self.channel, None);
         self.jobs.abort_all();
     }
 
     fn snapshot(&self) -> Vec<Frame> {
         let st = self.st.lock().unwrap();
         vec![chatlog_of(&self.src, &st), conn_frame(&st)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_needs_a_login_and_a_running_chat() {
+        assert_eq!(send_gate(true, "open"), (true, None));
+        assert_eq!(send_gate(true, "offline"), (false, Some("Not live")));
+        assert_eq!(send_gate(true, "unavailable"), (false, Some("Not live")));
+        assert_eq!(send_gate(true, "connecting"), (false, Some("Not live")));
+        let (can, why) = send_gate(false, "open");
+        assert!(!can);
+        assert_eq!(why, Some("Log in to YouTube in Settings to chat"));
     }
 }
