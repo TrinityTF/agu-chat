@@ -111,8 +111,8 @@ const MESSAGES_QUERY: &str = "query ViewerCardModLogsMessagesBySender($channelID
       ... on ViewerCardModLogsMessagesError { code }
       ... on ViewerCardModLogsMessagesConnection {
         edges { cursor node { __typename
-          ... on ViewerCardModLogsChatMessage { id sentAt content { text } }
-          ... on ViewerCardModLogsCaughtMessage { id status category sentAt content { text } }
+          ... on ViewerCardModLogsChatMessage { id sentAt content { text fragments { text content { __typename ... on Emote { id } } } } }
+          ... on ViewerCardModLogsCaughtMessage { id status category sentAt content { text fragments { text content { __typename ... on Emote { id } } } } }
           ... on ViewerCardModLogsModActionsMessage { timestamp content { fallbackString } }
         } }
         pageInfo { hasNextPage }
@@ -364,6 +364,35 @@ pub fn parse_mod_logs(data: &Value) -> Value {
     })
 }
 
+/// A logged line's Twitch emotes in chat's IRC `emotes` tag form ("id:start-end/...", inclusive char offsets
+/// into `content.text`), from the content's fragments; "" when it has none or the fragments don't add up.
+fn emotes_tag(content: &Value) -> String {
+    let text = content["text"].as_str().unwrap_or("");
+    let Some(frags) = content["fragments"].as_array() else { return String::new() };
+    let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
+    let mut at = 0usize; // char offset
+    let mut joined = String::new();
+    for f in frags {
+        let t = f["text"].as_str().unwrap_or("");
+        let n = t.chars().count();
+        if f["content"]["__typename"] == "Emote" && n > 0 {
+            if let Some(id) = f["content"]["id"].as_str().filter(|i| !i.is_empty()) {
+                let range = format!("{}-{}", at, at + n - 1);
+                match by_id.iter_mut().find(|(i, _)| i == id) {
+                    Some((_, r)) => r.push(range),
+                    None => by_id.push((id.to_string(), vec![range])),
+                }
+            }
+        }
+        joined.push_str(t);
+        at += n;
+    }
+    if by_id.is_empty() || joined != text {
+        return String::new();
+    }
+    by_id.into_iter().map(|(id, r)| format!("{id}:{}", r.join(","))).collect::<Vec<_>>().join("/")
+}
+
 /// `ViewerCardModLogsMessagesBySender` data -> {items, more, cursor}.
 pub fn parse_messages(data: &Value) -> Value {
     let m = &data["logs"]["messages"];
@@ -375,8 +404,8 @@ pub fn parse_messages(data: &Value) -> Value {
             cursor = e["cursor"].clone();
             let n = &e["node"];
             match n["__typename"].as_str().unwrap_or("") {
-                "ViewerCardModLogsChatMessage" => Some(json!({"kind": "chat", "id": n["id"], "ts": n["sentAt"].as_str().unwrap_or(""), "text": s(n, "/content/text")})),
-                "ViewerCardModLogsCaughtMessage" => Some(json!({"kind": "caught", "id": n["id"], "ts": n["sentAt"].as_str().unwrap_or(""), "text": s(n, "/content/text"), "status": n["status"].as_str().unwrap_or("")})),
+                "ViewerCardModLogsChatMessage" => Some(json!({"kind": "chat", "id": n["id"], "ts": n["sentAt"].as_str().unwrap_or(""), "text": s(n, "/content/text"), "emotes": emotes_tag(&n["content"])})),
+                "ViewerCardModLogsCaughtMessage" => Some(json!({"kind": "caught", "id": n["id"], "ts": n["sentAt"].as_str().unwrap_or(""), "text": s(n, "/content/text"), "status": n["status"].as_str().unwrap_or(""), "emotes": emotes_tag(&n["content"])})),
                 "ViewerCardModLogsModActionsMessage" => Some(json!({"kind": "action", "ts": n["timestamp"].as_str().unwrap_or(""), "text": s(n, "/content/fallbackString")})),
                 _ => None,
             }
@@ -790,6 +819,18 @@ mod tests {
                 {"id": "b", "setID": "bits", "version": "100", "title": "cheer 100", "image1x": "https://b/3"}]},
             "channel": {"id": "7", "moderationSettings": {"canAccessViewerCardModLogs": true}}
         })
+    }
+
+    #[test]
+    fn logged_line_emotes_become_a_tag() {
+        let c = json!({"text": "hi Kappa ok Kappa", "fragments": [
+            {"text": "hi ", "content": null},
+            {"text": "Kappa", "content": {"__typename": "Emote", "id": "25"}},
+            {"text": " ok ", "content": null},
+            {"text": "Kappa", "content": {"__typename": "Emote", "id": "25"}}]});
+        assert_eq!(emotes_tag(&c), "25:3-7,12-16");
+        assert_eq!(emotes_tag(&json!({"text": "plain", "fragments": [{"text": "plain"}]})), "");
+        assert_eq!(emotes_tag(&json!({"text": "x"})), "");
     }
 
     #[test]

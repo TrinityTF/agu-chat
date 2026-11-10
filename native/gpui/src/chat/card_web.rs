@@ -252,6 +252,8 @@ pub struct MsgItem {
     pub ts: String,
     pub text: String,
     pub status: String,
+    /// Twitch emotes, IRC `emotes` tag form
+    pub emotes: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -264,7 +266,7 @@ pub struct MsgPage {
 /// The `/api/twitch/card/messages` answer.
 pub fn parse_messages(v: &Value) -> MsgPage {
     MsgPage {
-        items: v.get("items").and_then(|i| i.as_array()).map(|a| a.iter().map(|m| MsgItem { kind: s(m, "kind"), ts: s(m, "ts"), text: s(m, "text"), status: s(m, "status") }).collect()).unwrap_or_default(),
+        items: v.get("items").and_then(|i| i.as_array()).map(|a| a.iter().map(|m| MsgItem { kind: s(m, "kind"), ts: s(m, "ts"), text: s(m, "text"), status: s(m, "status"), emotes: s(m, "emotes") }).collect()).unwrap_or_default(),
         more: v.get("more").and_then(|m| m.as_bool()).unwrap_or(false),
         cursor: opt(v, "cursor"),
     }

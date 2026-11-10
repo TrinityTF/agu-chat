@@ -752,15 +752,29 @@ impl UserCardView {
             .into_any_element()
     }
 
-    fn recent_text(&self, r: &Row, ctx: &CardCtx) -> AnyElement {
+    /// A Twitch line drawn like chat: emotes as pictures, links that open on click.
+    fn chat_text(&self, text: &str, emotes_tag: &str, ctx: &CardCtx, color: u32, cx: &mut Context<Self>) -> AnyElement {
+        self.twitch_line(text, emotes_tag, "", ctx, color, cx)
+    }
+
+    fn twitch_line(&self, text: &str, emotes_tag: &str, gifs: &str, ctx: &CardCtx, color: u32, cx: &mut Context<Self>) -> AnyElement {
+        let parts = build_parts(text, emotes_tag, ctx.emotes.as_deref(), None, gifs);
+        let mut b = InlineContentBuilder::new(12.0).ratio(16.0 / 12.0);
+        b.message(&parts, SizeOpt::Small, ctx.emotes.as_deref(), token(color), FontWeight::NORMAL);
+        let content: Rc<InlineContent> = b.finish();
+        let pane = self.pane.clone();
+        inline_flow(content)
+            .on_act(Rc::new(move |act, _rect, _w, cx| {
+                if let super::inline::Act::Url(u) = act {
+                    let _ = pane.update(cx, |p, _| p.open_url(u));
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn recent_text(&self, r: &Row, ctx: &CardCtx, cx: &mut Context<Self>) -> AnyElement {
         match &r.body {
-            RowBody::Msg(m) => {
-                let parts = build_parts(&m.text, &m.emotes, ctx.emotes.as_deref(), None, m.gifs.as_deref().unwrap_or(""));
-                let mut b = InlineContentBuilder::new(12.0).ratio(16.0 / 12.0);
-                b.message(&parts, SizeOpt::Small, ctx.emotes.as_deref(), token(theme::MUTED), FontWeight::NORMAL);
-                let content: Rc<InlineContent> = b.finish();
-                inline_flow(content).into_any_element()
-            }
+            RowBody::Msg(m) => self.twitch_line(&m.text, &m.emotes, m.gifs.as_deref().unwrap_or(""), ctx, theme::MUTED, cx),
             RowBody::Kick(m) => div().child(SharedString::from(kick_plain(&m.text))).into_any_element(),
             RowBody::Rumble(m) => div().child(SharedString::from(rumble_plain(&m.text))).into_any_element(),
             RowBody::YouTube(m) => div().child(SharedString::from(m.text.clone())).into_any_element(),
@@ -1379,10 +1393,18 @@ impl Render for UserCardView {
                         let mut list = div().flex().flex_col().gap(px(4.)).text_color(c(theme::MUTED));
                         for (i, it) in m.items.iter().enumerate() {
                             let stamp = fmt_stamp(ts_ms(&it.ts));
-                            let (txt_color, text) = match it.kind.as_str() {
-                                "action" => (theme::FAINT, it.text.clone()),
-                                "caught" => (theme::ORANGE_300, format!("{} (held by AutoMod{})", it.text, if it.status.is_empty() { String::new() } else { format!(", {}", it.status.to_lowercase()) })),
-                                _ => (theme::MUTED, it.text.clone()),
+                            let line: AnyElement = match it.kind.as_str() {
+                                "action" => div().text_color(c(theme::FAINT)).child(SharedString::from(it.text.clone())).into_any_element(),
+                                kind => {
+                                    let caught = kind == "caught";
+                                    let el = self.chat_text(&it.text, &it.emotes, &ctx, if caught { theme::ORANGE_300 } else { theme::MUTED }, cx);
+                                    if caught {
+                                        let note = format!("(held by AutoMod{})", if it.status.is_empty() { String::new() } else { format!(", {}", it.status.to_lowercase()) });
+                                        div().flex().flex_col().child(el).child(div().text_size(px(11.)).text_color(c(theme::ORANGE_300)).child(SharedString::from(note))).into_any_element()
+                                    } else {
+                                        el
+                                    }
+                                }
                             };
                             list = list.child(
                                 div()
@@ -1391,7 +1413,7 @@ impl Render for UserCardView {
                                     .items_start()
                                     .gap(px(6.))
                                     .child(div().flex_none().text_size(px(11.)).text_color(c(theme::FAINT)).child(SharedString::from(stamp)))
-                                    .child(div().min_w_0().flex_1().text_color(c(txt_color)).child(SharedString::from(text))),
+                                    .child(div().min_w_0().flex_1().child(line)),
                             );
                         }
                         if m.more {
@@ -1424,7 +1446,7 @@ impl Render for UserCardView {
                             .gap(px(6.))
                             .when(deleted, |d| d.opacity(0.5))
                             .child(div().flex_none().text_color(c(theme::FAINT)).child(SharedString::from(fmt_time(r.ts, false))))
-                            .child(div().min_w_0().flex_1().child(self.recent_text(r, &ctx)));
+                            .child(div().min_w_0().flex_1().child(self.recent_text(r, &ctx, cx)));
                         if can_del {
                             if let RowBody::Msg(m) = &r.body {
                                 let (sk, mid) = (self.sk.clone(), m.id.clone());
