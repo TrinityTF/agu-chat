@@ -108,11 +108,10 @@ pub fn badges_of(row: &Row, twitch: Option<&super::twitch::badges::BadgeMap>, ru
         }
         RowBody::Kick(m) => {
             for b in &m.badges {
-                let name = if b.text.is_empty() { &b.r#type } else { &b.text };
-                let title = if b.count > 0.0 { format!("{name} ({})", b.count as i64) } else { name.clone() };
+                let title = super::rows::kick_badge_label(b);
                 let (glyph, color) = super::rows::kick_badge_style(&b.r#type);
                 let glyph = if glyph.is_empty() { b.text.chars().chain(b.r#type.chars()).take(3).collect() } else { glyph.to_string() };
-                out.push(CardBadge { url: b.url.clone().filter(|u| !u.is_empty()), title, glyph, color });
+                out.push(CardBadge { url: super::rows::kick_badge_url(b), title, glyph, color });
             }
         }
         RowBody::Rumble(m) => {

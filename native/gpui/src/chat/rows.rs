@@ -1041,6 +1041,7 @@ fn split_kick(text: &str) -> Vec<(bool, String, String)> {
     out
 }
 
+/// Glyph chip for Kick badge types without bundled art.
 pub(super) fn kick_badge_style(t: &str) -> (&'static str, u32) {
     match t {
         "broadcaster" => ("◉", 0xfb2c36),
@@ -1056,6 +1057,16 @@ pub(super) fn kick_badge_style(t: &str) -> (&'static str, u32) {
         "bot" => ("⌬", 0x9f9fa9),
         _ => ("", 0xffffff),
     }
+}
+
+/// The picture for a Kick badge: the channel's own art when it has some, else Kick's bundled art for the type.
+pub(super) fn kick_badge_url(b: &KickBadge) -> Option<String> {
+    agu_chat_core::kick::badges::badge_url(&b.r#type, b.count, b.url.as_deref())
+}
+
+/// Tooltip text of a Kick badge.
+pub(super) fn kick_badge_label(b: &KickBadge) -> String {
+    agu_chat_core::kick::badges::badge_label(&b.r#type, &b.text, b.count)
 }
 
 pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>) -> BuiltRow {
@@ -1075,9 +1086,9 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     frame_prefix(&mut f, ctx, m.ts, Platform::Kick);
     if rs.show_badges {
         for b in &m.badges {
-            let label = if b.count > 0.0 { format!("{} ({})", if b.text.is_empty() { &b.r#type } else { &b.text }, b.count as i64) } else if b.text.is_empty() { b.r#type.clone() } else { b.text.clone() };
-            if let Some(u) = b.url.as_ref().filter(|u| !u.is_empty()) {
-                f.push(co_badge_img(u, &label, base));
+            let label = kick_badge_label(b);
+            if let Some(u) = kick_badge_url(b) {
+                f.push(co_badge_img(&u, &label, base));
                 f.push(Item::Gap(4.0));
             } else {
                 let (glyph, col) = kick_badge_style(&b.r#type);

@@ -18,6 +18,7 @@
 //! by hand for the same reason, and `stop()` aborts the source's tasks (`net::Jobs`) instead of an
 //! `AbortController`.
 pub mod auth;
+pub mod badges;
 pub mod vendor;
 
 use std::collections::HashMap;

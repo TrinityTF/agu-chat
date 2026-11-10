@@ -192,8 +192,52 @@ impl Acc {
     }
 }
 
+/// SVG art is drawn from its vector source: the natural size is this many times the SVG's own size, and the
+/// single frame is rasterised straight at the wanted box, so it stays sharp at any scale.
+const SVG_NATURAL_SCALE: f32 = 4.0;
+
+fn is_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(256)];
+    let t = String::from_utf8_lossy(head);
+    let t = t.trim_start_matches('\u{feff}').trim_start();
+    t.starts_with("<svg") || ((t.starts_with("<?xml") || t.starts_with("<!--")) && t.contains("<svg"))
+}
+
+/// Rasterises an SVG into one RGBA frame at the stored size for `want`.
+fn decode_svg(bytes: &[u8], want: Want) -> Result<Decoded, String> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(|e| e.to_string())?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return Err("empty image".into());
+    }
+    let w = ((size.width() * SVG_NATURAL_SCALE).round() as u32).max(1);
+    let h = ((size.height() * SVG_NATURAL_SCALE).round() as u32).max(1);
+    if (w as u64) * (h as u64) > MAX_PIXELS {
+        return Err("image too large".into());
+    }
+    let (fw, fh) = stored_size(w, h, want);
+    let mut pm = tiny_skia::Pixmap::new(fw, fh).ok_or("empty image")?;
+    let ts = tiny_skia::Transform::from_scale(fw as f32 / size.width(), fh as f32 / size.height());
+    resvg::render(&tree, ts, &mut pm.as_mut());
+    // tiny-skia is premultiplied; frames are straight alpha
+    let mut rgba = pm.take();
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a != 0 && a != 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    Ok(Decoded { w, h, fw, fh, frames: vec![(rgba, 100)], source_bytes: (w as u64) * (h as u64) * 4, cut: false })
+}
+
 pub fn decode(bytes: &[u8], want: Want, one_frame: bool) -> Result<Decoded, String> {
     use image::AnimationDecoder;
+    if is_svg(bytes) {
+        return decode_svg(bytes, want);
+    }
     let fmt = image::guess_format(bytes).map_err(|e| e.to_string())?;
     let mut acc = Acc { want, frames: Vec::new(), w: 0, h: 0, fw: 0, fh: 0, source_bytes: 0 };
     match fmt {
@@ -276,6 +320,9 @@ impl<T> ImageCache<T> {
         self.rt.spawn(async move {
             let _permit = sem.acquire().await;
             let res: Result<Decoded, String> = async {
+                if let Some(bytes) = crate::kick::badges::asset_bytes(&u) {
+                    return tokio::task::spawn_blocking(move || decode(bytes, want, one_frame)).await.map_err(|e| e.to_string())?;
+                }
                 let bytes = client
                     .get(&u)
                     .send()
