@@ -87,12 +87,38 @@ fn hsl_to_hex(h: f32, s: f32, l: f32) -> String {
     format!("#{:02x}{:02x}{:02x}", t(r), t(g), t(b))
 }
 
+/// The dark chat background 7TV checks names against.
+const READABLE_BG: &str = "#0f0e11";
+
+fn contrast(a: &str, b: &str) -> f32 {
+    let (la, lb) = (rel_luminance(a), rel_luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// 7TV's "readable colors" (its `normalizeUsername` on the dark theme): a name colour that misses WCAG AA
+/// contrast (4.5:1) against the chat background is lightened in 10% HSL-lightness steps until it passes; a
+/// near-black one becomes grey. Colours that already pass stay exactly as the user picked them.
 pub fn readable_color(hex: &str) -> String {
-    if rel_luminance(hex) >= 0.3 {
-        return hex.to_string();
+    let hex = hex.to_lowercase();
+    if contrast(&hex, READABLE_BG) >= 4.5 {
+        return hex;
     }
-    let (h, s, l) = hex_to_hsl(hex);
-    hsl_to_hex(h, s, l.max(0.65))
+    let (r, g, b) = hex_to_rgb(&hex);
+    if r < 36 && g < 36 && b < 36 {
+        return "#7a7a7a".into();
+    }
+    // like color2k, which 7TV uses: hsla with whole degrees and percents between steps
+    let (h, s, l) = hex_to_hsl(&hex);
+    let (h, s, mut l) = (h.round(), (s * 100.0).round() / 100.0, (l * 100.0).round() / 100.0);
+    let mut out = hex.clone();
+    for _ in 0..50 {
+        if contrast(&out, READABLE_BG) >= 4.5 {
+            break;
+        }
+        l = ((l + 0.1).min(1.0) * 100.0).round() / 100.0;
+        out = hsl_to_hex(h, s, l);
+    }
+    out
 }
 
 pub fn name_color(user: &ChatUser, readable: bool) -> String {
@@ -107,9 +133,14 @@ mod tests {
     #[test]
     fn dark_colours_are_lifted_light_ones_kept() {
         assert_eq!(readable_color("#ffffff"), "#ffffff");
+        // colours that already read well on the dark background stay as picked (7TV leaves them too)
+        assert_eq!(readable_color("#FF0000"), "#ff0000");
+        assert_eq!(readable_color("#1E90FF"), "#1e90ff");
+        // pure blue is lifted only until it passes AA
         let lifted = readable_color("#0000ff");
         assert_ne!(lifted, "#0000ff");
-        assert!(rel_luminance(&lifted) > 0.1);
+        assert!(contrast(&lifted, READABLE_BG) >= 4.5);
+        assert_eq!(readable_color("#101010"), "#7a7a7a");
     }
 
     #[test]
