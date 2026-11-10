@@ -33,7 +33,8 @@ pub struct Divider {
     pub sizes: Vec<f32>,
 }
 
-const MIN_W: f32 = 140.0;
+/// a side-by-side split is never dragged narrower than a chat window may be
+const MIN_W: f32 = crate::window_state::MIN_W;
 const MIN_H: f32 = 70.0;
 
 pub fn compute_layout(root: Option<&SplitNode>) -> (Vec<(Leaf, Rect)>, Vec<Divider>) {

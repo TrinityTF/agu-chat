@@ -103,7 +103,8 @@ pub fn set_card_size(s: CardSize) {
 
 const TITLE_BAR: f32 = 28.0; // the tab bar, which is also the drag area
 const GRAB_W: f32 = 120.0; // this much of the title bar must be on a screen to count as reachable
-pub const MIN_W: f32 = 280.0;
+/// the narrowest a chat window gets (a chat reads well down to this)
+pub const MIN_W: f32 = 335.0;
 pub const MIN_H: f32 = 300.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
