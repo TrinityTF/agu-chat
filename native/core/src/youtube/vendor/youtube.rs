@@ -289,13 +289,23 @@ pub fn parse_watch_page(html: &str) -> WatchPage {
     let Some(cont) = first_continuation(&lc["continuations"]) else {
         return WatchPage { live: true, notice: Some(none), ..base };
     };
+    // "Live chat" (every message, what moderators read) over the default "Top chat", which holds some back
+    let all = live_chat_continuation(lc);
     WatchPage {
         live: true,
-        continuation: js_string(&cont["continuation"]),
+        continuation: all.unwrap_or_else(|| js_string(&cont["continuation"])),
         timeout_ms: timeout_of(&cont),
         notice: None,
         ..base
     }
+}
+
+/// The "Live chat" view's continuation from the chat header's view selector: the second item (the first is
+/// "Top chat"), or one titled "Live chat".
+fn live_chat_continuation(lc: &Value) -> Option<String> {
+    let items = lc["header"]["liveChatHeaderRenderer"]["viewSelector"]["sortFilterSubMenuRenderer"]["subMenuItems"].as_array()?;
+    let cont = |it: &Value| Some(js_string(&it["continuation"]["reloadContinuationData"]["continuation"])).filter(|c| !c.is_empty());
+    items.iter().find(|it| it["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case("live chat"))).and_then(cont).or_else(|| items.get(1).and_then(cont))
 }
 
 fn timeout_of(cont: &Value) -> u64 {
@@ -550,6 +560,15 @@ mod tests {
         assert_eq!(json_after(html, "var a = "), Some(json!({"k": "} {", "n": {"z": 1}})));
         assert_eq!(json_after(html, "var nope = "), None);
         assert_eq!(json_after("var a = {\"k\":", "var a = "), None);
+    }
+
+    #[test]
+    fn prefers_the_live_chat_view() {
+        let lc = json!({"header": {"liveChatHeaderRenderer": {"viewSelector": {"sortFilterSubMenuRenderer": {"subMenuItems": [
+            {"title": "Top chat", "continuation": {"reloadContinuationData": {"continuation": "TOP"}}},
+            {"title": "Live chat", "continuation": {"reloadContinuationData": {"continuation": "ALL"}}}]}}}}});
+        assert_eq!(live_chat_continuation(&lc).as_deref(), Some("ALL"));
+        assert_eq!(live_chat_continuation(&json!({})), None);
     }
 
     #[test]

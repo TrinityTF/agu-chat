@@ -32,8 +32,8 @@ use vendor::youtube::{fetch_metadata, parse_youtube_source, poll_chat, read_watc
 const MAX_BACKLOG: usize = 300;
 // How often to re-check an offline channel for a new broadcast: a ~1 MB page fetch, so deliberately slow.
 const OFFLINE_POLL_MS: u64 = 60_000;
-// Only used when YouTube declines to tell us; its own timeoutMs is always preferred.
-const FALLBACK_POLL_MS: u64 = 10_000;
+// The longest wait between two polls of a running chat, so new messages show about as soon as on youtube.com.
+const LIVE_POLL_MS: u64 = 1_500;
 const MAX_BACKOFF_MS: u64 = 5 * 60_000;
 // The title/viewer count is decoration; a minute is roughly right for a viewer counter.
 const METADATA_TTL_MS: i64 = 60_000;
@@ -46,6 +46,10 @@ const NOT_LIVE_REASON: &str = "Not live";
 
 /// normalized channel -> (video id, channel id) of the broadcast its source reads right now (what sending needs).
 static BROADCASTS: LazyLock<Mutex<HashMap<String, (String, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// normalized channel -> its live source, so a sent message shows at once (from the send's own answer)
+/// instead of with the next poll.
+static SOURCES: LazyLock<Mutex<HashMap<String, std::sync::Weak<YoutubeSource>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn set_broadcast(channel: &str, ids: Option<(String, String)>) {
     let mut m = BROADCASTS.lock().unwrap();
@@ -134,7 +138,17 @@ async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
     let key = parse_youtube_source(&req.source.channel).map(|s| source_string(&s)).unwrap_or_else(|| req.source.channel.clone());
     let Some((video_id, channel_id)) = BROADCASTS.lock().unwrap().get(&key).cloned() else { return Ok(route_err(409, NOT_LIVE_REASON)) };
     match auth::send_chat(&video_id, &channel_id, &text).await {
-        Ok(()) => Ok(RouteRes { status: 200, body: json!({"ok": true}) }),
+        Ok(v) => {
+            // the posted message is in the answer: show it now; the poll that brings it again is de-duplicated
+            let src = SOURCES.lock().unwrap().get(&key).and_then(|w| w.upgrade());
+            if let (Some(src), Some(actions)) = (src, v["actions"].as_array()) {
+                let fresh = src.ingest(actions);
+                if !fresh.is_empty() {
+                    src.emit(json!({"type": "chat", "messages": fresh}));
+                }
+            }
+            Ok(RouteRes { status: 200, body: json!({"ok": true}) })
+        }
         Err(e) => Ok(route_err(e.status, &e.message)),
     }
 }
@@ -220,8 +234,8 @@ impl YoutubeSource {
         status.insert("url".into(), json!(youtube_source_url(&src)));
         status.insert("notice".into(), Value::Null);
         status.insert("error".into(), Value::Null);
-        Arc::new(YoutubeSource {
-            channel,
+        let me = Arc::new(YoutubeSource {
+            channel: channel.clone(),
             src,
             emit_fn: emit,
             ctx,
@@ -242,7 +256,9 @@ impl YoutubeSource {
                 last_conn_json: String::new(),
                 auth_listener: None,
             }),
-        })
+        });
+        SOURCES.lock().unwrap().insert(channel, Arc::downgrade(&me));
+        me
     }
 
     fn emit(&self, f: Frame) {
@@ -398,7 +414,9 @@ impl YoutubeSource {
             st.failures = 0;
             st.soft_misses = 0;
         }
-        Ok(if res.timeout_ms > 0 { res.timeout_ms } else { FALLBACK_POLL_MS })
+        // YouTube's own page is pushed new messages; a polling reader keeps close to that by never waiting longer
+        // than LIVE_POLL_MS while the chat runs (YouTube's hint is often 5-10 s)
+        Ok(if res.timeout_ms > 0 { res.timeout_ms.min(LIVE_POLL_MS) } else { LIVE_POLL_MS })
     }
 
     async fn resolve_step(&self) -> Result<u64, String> {

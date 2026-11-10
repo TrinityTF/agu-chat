@@ -605,7 +605,8 @@ async fn fetch_identity(cookies: &BTreeMap<String, String>) -> Result<Identity, 
 
 /// Post one chat message to a live broadcast as the logged-in user. YouTube's own error text comes back verbatim.
 /// `video_id` and `channel_id` (UC...) are the broadcast's.
-pub async fn send_chat(video_id: &str, channel_id: &str, text: &str) -> Result<(), SendError> {
+/// Ok carries YouTube's answer, which holds the posted message (`actions[].addChatItemAction`).
+pub async fn send_chat(video_id: &str, channel_id: &str, text: &str) -> Result<Value, SendError> {
     if !is_logged_in() {
         return Err(SendError { status: 401, message: logged_out_reason().into() });
     }
@@ -619,7 +620,7 @@ pub async fn send_chat(video_id: &str, channel_id: &str, text: &str) -> Result<(
             return Err(SendError { status: 401, message: EXPIRED_MESSAGE.into() });
         }
         match parse_send_response(status, &v) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(v),
             Err(e) if status == 400 => last = e,
             Err(e) => return Err(e),
         }
