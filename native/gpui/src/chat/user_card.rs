@@ -1023,7 +1023,8 @@ impl Render for UserCardView {
                 info = info.child(info_line(icons::TAG, sub_line(sb.tier, sb.months, sb.gift, sb.prime)));
                 info_rows += 1;
             }
-            (None, Some(sb)) => {
+            // Twitch's card leaves the subscription out (its integrity check): the chat badge's months then
+            (_, Some(sb)) => {
                 info = info.child(info_line(icons::TAG, sub_line(sb.tier, sb.months, false, false)));
                 info_rows += 1;
             }
