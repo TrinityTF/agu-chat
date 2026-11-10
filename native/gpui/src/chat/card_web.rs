@@ -206,7 +206,8 @@ pub fn parse_card(v: &Value) -> WebCard {
                 .map(|b| {
                     let title = s(b, "title");
                     let desc = s(b, "description");
-                    CardBadge { url: opt(b, "url"), title: if desc.is_empty() || desc == title { title } else { format!("{title} - {desc}") }, glyph: String::new(), color: 0 }
+                    // the badge's name only; Twitch's description is the fallback for a nameless one
+                    CardBadge { url: opt(b, "url"), title: if title.is_empty() { desc } else { title }, glyph: String::new(), color: 0 }
                 })
                 .collect()
         })
@@ -310,7 +311,7 @@ mod tests {
         assert_eq!(sub_line(1, Some(14), true, false), "Tier 1 - Subscribed for 14 months (gift)");
         assert_eq!(sub_line(2, None, false, false), "Tier 2 - Subscribed");
         assert_eq!(c.badges.len(), 2);
-        assert_eq!(c.badges[0].title, "Subscriber - Subscriber for 14 months");
+        assert_eq!(c.badges[0].title, "Subscriber");
         assert_eq!(c.badges[1].title, "Moderator");
         assert!(c.badges[1].url.is_none());
         assert_eq!(c.ban, Some(WebBan { permanent: false, expires_at: Some("2026-11-02T00:00:00Z".into()), reason: "spam".into(), by: "Mod".into() }));
