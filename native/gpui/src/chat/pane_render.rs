@@ -28,8 +28,8 @@ use crate::theme::{self, c};
 
 /// the gap between a sub / gift notice's icon and its lines
 pub(super) const NOTICE_ICON_GAP: f32 = 8.0;
-/// 7TV's dark red bar on sub / gift notices
-const NOTICE_SUB_BAR: u32 = 0x8b1a2b;
+/// the bar on sub / gift notices: the app's accent
+const NOTICE_SUB_BAR: u32 = theme::ACCENT;
 
 fn eid(prefix: &str, key: &str) -> ElementId {
     ElementId::from(SharedString::from(format!("{prefix}{key}")))

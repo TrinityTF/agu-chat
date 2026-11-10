@@ -28,7 +28,7 @@ pub const DEFAULT_EVENTS: ChatEventSettings = ChatEventSettings {
     charity: false,
     combos: false,
     shared_rewards: false,
-    group_gifts: true,
+    group_gifts: false, // like 7TV: every recipient of a gift bomb gets its own line
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
