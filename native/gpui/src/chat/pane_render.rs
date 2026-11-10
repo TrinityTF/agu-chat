@@ -26,6 +26,11 @@ use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 pub(super) const LABEL_LINE: f32 = 13.0;
 use crate::theme::{self, c};
 
+/// the gap between a sub / gift notice's icon and its lines
+pub(super) const NOTICE_ICON_GAP: f32 = 8.0;
+/// 7TV's dark red bar on sub / gift notices
+const NOTICE_SUB_BAR: u32 = 0x8b1a2b;
+
 fn eid(prefix: &str, key: &str) -> ElementId {
     ElementId::from(SharedString::from(format!("{prefix}{key}")))
 }
@@ -275,8 +280,38 @@ impl ChatPane {
         d.into_any_element()
     }
 
+    pub(super) fn notice_lines_w(width: f32, n: &NoticeSpec) -> f32 {
+        width - 3.0 - 16.0 - n.icon.map(|(_, s)| s + NOTICE_ICON_GAP).unwrap_or(0.0)
+    }
+
     fn notice_el(&mut self, key: &str, n: &NoticeSpec, cx: &mut Context<Self>) -> AnyElement {
         // like 7TV: a coloured bar on the left, a soft tint, Twitch's sentence in plain light text
+        if let Some((ic, size)) = n.icon {
+            // a sub / gift, as 7TV draws it: a dark red bar, a faint lift, the icon left of the name and sentence
+            let mut lines = div().flex().flex_col().flex_1().min_w_0();
+            if let Some(h) = &n.head {
+                let acts = n.card.clone().map(|(sk, user)| vec![RowAction::Card { sk, user }]).unwrap_or_default();
+                lines = lines.child(self.flow(h, Rc::new(acts), cx));
+            }
+            lines = lines.child(self.flow(&n.system, Rc::new(vec![]), cx));
+            if let Some(t) = &n.text {
+                lines = lines.child(self.flow(t, Rc::new(vec![]), cx));
+            }
+            return div()
+                .id(eid("notice-", key))
+                .w_full()
+                .flex_none()
+                .flex()
+                .gap(px(NOTICE_ICON_GAP))
+                .border_l_3()
+                .border_color(gpui::rgb(NOTICE_SUB_BAR))
+                .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.035 })
+                .px(px(8.))
+                .py(px(4.))
+                .child(div().flex_none().w(px(size)).mt(px(2.)).text_color(c(theme::TEXT)).child(icon(ic, size)))
+                .child(lines)
+                .into_any_element();
+        }
         let (bar, bg) = if n.raid { (token_a(theme::ORANGE_500, 0.9), token_a(theme::ORANGE_500, 0.12)) } else { (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12)) };
         let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_3().border_color(bar).bg(bg).px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
         if let Some(t) = &n.text {

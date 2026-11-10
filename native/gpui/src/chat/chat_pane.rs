@@ -1653,9 +1653,10 @@ impl ChatPane {
                 ItemMetrics { h: header + inner, mt: 1.0, mb: 1.0 }
             }
             BuiltRow::Notice(n) => {
-                // 3px left bar, px-2, py-1
-                let w = width - 3.0 - 16.0;
-                let h = 8.0 + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
+                // 3px left bar, px-2, py-1, the icon column of a sub / gift
+                let w = Self::notice_lines_w(width, n);
+                let lines = n.head.as_ref().map(|h| h.height_at(w, window, cx)).unwrap_or(0.0) + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
+                let h = 8.0 + lines.max(n.icon.map(|(_, s)| s + 2.0).unwrap_or(0.0));
                 ItemMetrics { h, mt: 0.0, mb: 0.0 }
             }
             BuiltRow::Feed(f) => ItemMetrics { h: 2.0 + fl(f.base * 0.9 * LINE_HEIGHT), mt: 0.0, mb: 0.0 },
@@ -1744,7 +1745,8 @@ fn b_contents(b: &BuiltRow) -> Vec<Rc<super::inline::InlineContent>> {
             v
         }
         BuiltRow::Notice(n) => {
-            let mut v = vec![n.system.clone()];
+            let mut v: Vec<_> = n.head.iter().cloned().collect();
+            v.push(n.system.clone());
             if let Some(t) = &n.text {
                 v.push(t.clone());
             }

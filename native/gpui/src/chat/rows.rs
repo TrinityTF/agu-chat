@@ -169,6 +169,11 @@ pub struct NoticeSpec {
     pub system: Rc<InlineContent>,
     pub text: Option<Rc<InlineContent>>,
     pub raid: bool,
+    /// a sub / gift: its icon (and its size), drawn left of the lines
+    pub icon: Option<(&'static str, f32)>,
+    /// a sub / gift: the name line above the sentence, opening the user's card
+    pub head: Option<Rc<InlineContent>>,
+    pub card: Option<(String, CardUser)>,
 }
 
 #[derive(Clone)]
@@ -279,7 +284,7 @@ impl WithTitle for Item {
 }
 
 fn link_item(href: &str, text: &str, base: f32) -> Item {
-    Item::Text(TextItem::new(text.to_string(), base, token(theme::SKY_400)).act(Act::Url(href.to_string().into()), true))
+    Item::Text(TextItem::new(text.to_string(), base, token(theme::ACCENT_SOFT)).act(Act::Url(href.to_string().into()), true))
 }
 
 /// MessageText: the message's parts as inline items.
@@ -733,9 +738,35 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
         let color = hex(&name_color(&n.user, rs.readable_colors));
         return BuiltRow::Event(event_frame(&n.user.name, color, "redeemed", Some(r.title.clone()), amount, bits, if bits { "cheer" } else { "redeem" }, None, base));
     }
-    let raid = notice_kind(&n.msg_id, n.source_msg_id.as_deref()) == Some(ChatEventKind::Raids);
+    let kind = notice_kind(&n.msg_id, n.source_msg_id.as_deref());
+    let raid = kind == Some(ChatEventKind::Raids);
+    let id = crate::chat::twitch::events::notice_id(&n.msg_id, n.source_msg_id.as_deref());
     let mut sys = Flow::new(base);
-    sys.push(Item::Text(TextItem::new(n.system.clone(), base, token(if raid { theme::ORANGE_200 } else { theme::TEXT }))));
+    let mut icon = None;
+    let mut head = None;
+    let mut card = None;
+    match (matches!(kind, Some(ChatEventKind::Subs | ChatEventKind::Gifts)), sub_split(&n.system, &n.user)) {
+        (true, Some((rest, bold))) => {
+            // like 7TV: an icon, the name on its own line, then Twitch's sentence without it
+            let mystery = id.ends_with("submysterygift");
+            icon = Some(match kind {
+                Some(ChatEventKind::Gifts) => (crate::icons::GIFT, if mystery { 24.0 } else { 16.0 }),
+                _ => (if n.system.contains("with Prime") { crate::icons::CROWN } else { crate::icons::STAR }, 16.0),
+            });
+            let color = if mystery { token(theme::TEXT) } else { hex(&name_color(&n.user, rs.readable_colors)) };
+            let mut h = Flow::new(base);
+            h.push(Item::Text(TextItem::new(n.user.name.clone(), base, color).weight(FontWeight::BOLD)));
+            head = Some(h.finish());
+            card = Some((row.sk.clone(), CardUser { id: n.user.id.clone(), login: n.user.login.clone(), name: n.user.name.clone(), avatar: String::new() }));
+            for (t, b) in [(&rest[..bold.0], false), (&rest[bold.0..bold.1], true), (&rest[bold.1..], false)] {
+                if !t.is_empty() {
+                    let it = TextItem::new(t.to_string(), base, token(theme::TEXT));
+                    sys.push(Item::Text(if b { it.weight(FontWeight::BOLD) } else { it }));
+                }
+            }
+        }
+        _ => sys.push(Item::Text(TextItem::new(n.system.clone(), base, token(if raid { theme::ORANGE_200 } else { theme::TEXT })))),
+    }
     let text = if n.text.is_empty() {
         None
     } else {
@@ -744,8 +775,36 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
         message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::MUTED), false, rs.readable_colors, None);
         Some(f.finish())
     };
-    let _ = row;
-    BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid })
+    BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card })
+}
+
+/// A sub / gift notice's sentence without the name it starts with, and the byte range to bold in it (7TV bolds
+/// "Subscribed" and the gift's recipient): "Popo_Master subscribed with Prime." -> ("Subscribed with Prime.",
+/// 0..10). None when the sentence doesn't start with the user's name (an anonymous gift).
+fn sub_split(system: &str, user: &ChatUser) -> Option<(String, (usize, usize))> {
+    let sys = system.trim();
+    let lower = sys.to_lowercase();
+    let name = [&user.name, &user.login].into_iter().map(|n| n.trim().to_lowercase()).find(|n| !n.is_empty() && lower.starts_with(n.as_str()))?;
+    let rest = sys[name.len()..].trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    // "is gifting ..." reads on from the name; a past tense starts its own sentence
+    let rest = if rest.starts_with("is ") || rest.starts_with("has ") {
+        rest.to_string()
+    } else {
+        let mut c = rest.chars();
+        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    };
+    let bold = if rest.starts_with("Subscribed") {
+        (0, "Subscribed".len())
+    } else if let Some(i) = rest.find(" sub to ").map(|i| i + " sub to ".len()).or_else(|| rest.find(" Sub to ").map(|i| i + " Sub to ".len())) {
+        let end = rest[i..].find(|c: char| c.is_whitespace() || c == '!').map_or(rest.len(), |e| i + e);
+        (i, end)
+    } else {
+        (0, 0)
+    };
+    Some((rest, bold))
 }
 
 pub fn feed_row(f: &ModFeedEntry, ctx: &RowCtx) -> BuiltRow {
@@ -1210,6 +1269,29 @@ pub fn has_badge(tag: &str, name: &str) -> bool {
 #[allow(dead_code)]
 fn _unused() -> (u8, u8, u8) {
     parse_hex("#000000")
+}
+
+#[cfg(test)]
+mod sub_split_tests {
+    use super::*;
+
+    fn user(name: &str) -> ChatUser {
+        serde_json::from_value(serde_json::json!({"name": name, "login": name.to_lowercase()})).unwrap()
+    }
+
+    #[test]
+    fn splits_the_name_off_and_bolds_like_7tv() {
+        let (r, b) = sub_split("Popo_Master subscribed with Prime.", &user("Popo_Master")).unwrap();
+        assert_eq!(r, "Subscribed with Prime.");
+        assert_eq!(&r[b.0..b.1], "Subscribed");
+        let (r, b) = sub_split("KnubbeTV gifted a Tier 1 sub to necix7135i!", &user("KnubbeTV")).unwrap();
+        assert_eq!(r, "Gifted a Tier 1 sub to necix7135i!");
+        assert_eq!(&r[b.0..b.1], "necix7135i");
+        let (r, b) = sub_split("KnubbeTV is gifting 1 Tier 1 Subs to EsfandTV's community!", &user("KnubbeTV")).unwrap();
+        assert!(r.starts_with("is gifting"));
+        assert_eq!(b, (0, 0));
+        assert!(sub_split("An anonymous user gifted a Tier 1 sub to x!", &user("AnAnonymousGifter")).is_none());
+    }
 }
 
 #[cfg(test)]
