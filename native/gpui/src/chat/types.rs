@@ -48,6 +48,8 @@ lenient! {
         pub reward: Option<RewardInfo>,
         pub bits: Option<f64>,
         pub deleted: bool,
+        /// why it went, shown after it: "Timed out (30s)", "Banned", "Deleted"
+        pub deleted_note: Option<String>,
         pub returning: bool,
         pub pin: Option<PinInfo>,
     }

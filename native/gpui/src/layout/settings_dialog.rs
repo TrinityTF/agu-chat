@@ -898,7 +898,7 @@ impl SettingsDialog {
         let s = self.settings.clone();
         let pause = self.select("pauseChat", &s.pause_chat, &[("scroll", "Scroll only"), ("hover", "While the mouse is over it"), ("alt", "While Alt is held")], false, cx);
         let emote = self.select("emoteSize", &s.emote_size, &[("small", "Small"), ("medium", "Medium"), ("large", "Large")], false, cx);
-        let deleted = self.select("deletedMessages", &s.deleted_messages, &[("strike", "Strike through"), ("hide", "Hide"), ("show", "Show normally")], false, cx);
+        let deleted = self.select("deletedMessages", &s.deleted_messages, &[("strike", "Grey out"), ("hide", "Hide"), ("show", "Show normally")], false, cx);
         let font = self.slider_row("fontSize", s.font_size, 10., 22., 1., "px", cx);
         div()
             .child(Self::h("Window"))

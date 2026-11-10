@@ -284,7 +284,7 @@ impl WithTitle for Item {
 }
 
 fn link_item(href: &str, text: &str, base: f32) -> Item {
-    Item::Text(TextItem::new(text.to_string(), base, token(theme::ACCENT_SOFT)).act(Act::Url(href.to_string().into()), true))
+    Item::Text(TextItem::new(text.to_string(), base, token(theme::ACCENT_SOFT)).act(Act::Url(href.to_string().into()), false))
 }
 
 /// MessageText: the message's parts as inline items.
@@ -293,15 +293,16 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
     for p in parts {
         match p {
             MsgPart::Text(t) => {
-                let mut ti = TextItem::new(t.clone(), base, text_color).strike(strike);
+                // a removed message: greyed out, like 7TV (not struck through, which hides ASCII art)
+                let mut ti = TextItem::new(t.clone(), base, text_color);
                 if strike {
-                    ti.color = with_alpha(text_color, 0.5);
+                    ti.color = with_alpha(text_color, 0.45);
                 }
                 f.push(Item::Text(ti));
             }
             MsgPart::Mention { name, color, login, user_id } => {
                 let c = if color.is_empty() { text_color } else if readable_mentions { hex(&readable_color(color)) } else { hex(color) };
-                let mut t = TextItem::new(format!("@{name}"), base, c).weight(FontWeight::SEMIBOLD).strike(strike);
+                let mut t = TextItem::new(format!("@{name}"), base, if strike { with_alpha(c, 0.45) } else { c }).weight(FontWeight::SEMIBOLD);
                 // clickable only on the live message rows: it opens the card of who is mentioned
                 if let Some((acts, sk)) = mention_acts.as_mut() {
                     acts.push(RowAction::Card { sk: sk.to_string(), user: CardUser { id: user_id.clone(), login: login.clone(), name: name.clone(), avatar: String::new() } });
@@ -315,7 +316,7 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                 let tip = Rc::new(Tip { img: url.clone().into(), name: name.clone().into(), label: format!("{prefix} cheermote").into() });
                 f.push(emote_item(url.clone(), tip, vec![], base, size));
                 let c = if color.is_empty() { text_color } else { hex(color) };
-                f.push(Item::Text(TextItem::new(format!("{amount}"), base, c).weight(FontWeight::BOLD).strike(strike)));
+                f.push(Item::Text(TextItem::new(format!("{amount}"), base, if strike { with_alpha(c, 0.45) } else { c }).weight(FontWeight::BOLD)));
             }
             MsgPart::Link { href, text } => f.push(link_item(href, text, base)),
             MsgPart::Emote { source, id, name, overlays } => {
@@ -674,6 +675,10 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
         }
     } else {
         message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::TEXT), struck, rs.readable_colors, Some((&mut actions, &sk)));
+    }
+    if struck {
+        let note = msg.deleted_note.clone().unwrap_or_else(|| "Deleted".into());
+        f.push(Item::Text(TextItem::new(format!("\u{2014}{note}"), base * 0.9, token(theme::FAINT)).italic(true)));
     }
 
     let content = f.finish();

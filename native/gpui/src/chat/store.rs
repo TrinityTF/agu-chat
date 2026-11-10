@@ -149,7 +149,7 @@ impl ChatStore {
     /// Local edits (e.g. a delete the user just did): mark a Twitch message deleted.
     pub fn mark_deleted(&mut self, sk: &str, id: &str) {
         self.map_rows(|r| match &r.body {
-            RowBody::Msg(m) if r.sk == sk && m.id == id && !m.deleted => Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, ..m.clone() }))),
+            RowBody::Msg(m) if r.sk == sk && m.id == id && !m.deleted => Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, deleted_note: Some("Deleted".into()), ..m.clone() }))),
             _ => None,
         });
     }
@@ -348,10 +348,16 @@ impl ChatStore {
             "clearchat" => {
                 let user_id = f.get("userId").filter(|u| !u.is_null()).map(|u| u.as_str().map(|s| s.to_string()).unwrap_or_else(|| u.to_string()));
                 let login = val_str(f, "login");
+                let secs = f.get("duration").and_then(|d| d.as_f64().or_else(|| d.as_str().and_then(|s| s.parse().ok()))).filter(|d| *d > 0.0);
+                let note = match (&user_id, secs) {
+                    (None, _) => "Chat cleared".to_string(),
+                    (Some(_), Some(d)) => format!("Timed out ({})", short_secs(d as u64)),
+                    (Some(_), None) => "Banned".to_string(),
+                };
                 return self.map_rows(|r| match &r.body {
                     // Same test as the site: no user = the whole chat was cleared.
                     RowBody::Msg(m) if r.sk == sk && !m.deleted && (user_id.is_none() || user_id.as_deref() == Some(m.user.id.as_str()) || (!login.is_empty() && m.user.login == login)) => {
-                        Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, ..m.clone() })))
+                        Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, deleted_note: Some(note.clone()), ..m.clone() })))
                     }
                     _ => None,
                 });
@@ -359,7 +365,7 @@ impl ChatStore {
             "clearmsg" => {
                 let id = val_str(f, "id");
                 return self.map_rows(|r| match &r.body {
-                    RowBody::Msg(m) if r.sk == sk && m.id == id && !m.deleted => Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, ..m.clone() }))),
+                    RowBody::Msg(m) if r.sk == sk && m.id == id && !m.deleted => Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, deleted_note: Some("Deleted".into()), ..m.clone() }))),
                     _ => None,
                 });
             }
@@ -634,6 +640,22 @@ fn pick(a: &str, b: &str) -> String {
     if a.is_empty() { b.to_string() } else { a.to_string() }
 }
 
+/// 30 -> "30s", 600 -> "10m", 5400 -> "1h30m", 86400 -> "1d" (7TV's timeout note).
+fn short_secs(s: u64) -> String {
+    let (d, h, m, sec) = (s / 86400, s % 86400 / 3600, s % 3600 / 60, s % 60);
+    let mut out = String::new();
+    for (v, u) in [(d, "d"), (h, "h"), (m, "m"), (sec, "s")] {
+        if v > 0 {
+            out.push_str(&format!("{v}{u}"));
+        }
+    }
+    if out.is_empty() {
+        "0s".into()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +691,14 @@ mod tests {
         s.apply(&sk, &json!({"type": "clearmsg", "id": "1"}));
         assert!(!Arc::ptr_eq(&before, &s.rows()[0]));
         assert!(matches!(&s.rows()[0].body, RowBody::Msg(m) if m.deleted));
+    }
+
+    #[test]
+    fn timeout_notes() {
+        assert_eq!(short_secs(30), "30s");
+        assert_eq!(short_secs(600), "10m");
+        assert_eq!(short_secs(5400), "1h30m");
+        assert_eq!(short_secs(86400), "1d");
     }
 
     #[test]
