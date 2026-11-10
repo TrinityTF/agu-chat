@@ -58,6 +58,8 @@ pub struct SendSource {
     /// The conn frame says this account can post here.
     pub can_send: bool,
     pub read_only_reason: Option<String>,
+    /// The conn frame's live flag (X, YouTube and Rumble only have chat while live).
+    pub live: Option<bool>,
     /// Connection still being established (no conn frame yet, or "connecting").
     pub pending: bool,
     pub caps: ModCaps,
@@ -69,6 +71,7 @@ impl PartialEq for SendSource {
         self.sk == o.sk
             && self.can_send == o.can_send
             && self.read_only_reason == o.read_only_reason
+            && self.live == o.live
             && self.pending == o.pending
             && self.caps == o.caps
             && Arc::ptr_eq(&self.inventory, &o.inventory)
@@ -859,6 +862,8 @@ impl SendBox {
             let sk = s.sk.clone();
             let can = s.can_send;
             let sel = eff == s.sk;
+            // Twitch and Kick chats are always open; the others only while the stream is live
+            let off = !matches!(s.source.platform, Platform::Twitch | Platform::Kick) && s.live == Some(false);
             menu = menu.child(
                 div()
                     .id(ElementId::from(SharedString::from(format!("tgt-{}", s.sk))))
@@ -873,7 +878,7 @@ impl SendBox {
                     .when(!can, |d| d.opacity(0.5))
                     .child(icons::source_icon(&s.source, 14., true))
                     .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(if is_whisper(&s.source) { short_name(&s.source) } else { s.source.channel.clone() })))
-                    .when(!can, |d| d.child(div().text_size(px(10.)).text_color(c(theme::FAINT)).child("read-only")))
+                    .when(!can, |d| d.child(div().text_size(px(10.)).text_color(c(theme::FAINT)).child(if off { "offline" } else { "read-only" })))
                     .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
                         if can {
                             this.target = sk.clone();

@@ -672,6 +672,7 @@ impl ChatPane {
                 source: st.source.clone(),
                 can_send: conn.and_then(|c| c.can_send).unwrap_or(false),
                 read_only_reason: conn.and_then(|c| c.read_only_reason.clone()),
+                live: conn.and_then(|c| c.live),
                 pending: conn.map(|c| c.state == "connecting").unwrap_or(true),
                 caps: self.twitch.get(&st.sk).map(|d| d.caps.clone()).unwrap_or_default(),
                 inventory: inv,
