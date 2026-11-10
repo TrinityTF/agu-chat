@@ -735,7 +735,7 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
     }
     let raid = notice_kind(&n.msg_id, n.source_msg_id.as_deref()) == Some(ChatEventKind::Raids);
     let mut sys = Flow::new(base);
-    sys.push(Item::Text(TextItem::new(n.system.clone(), base, token(if raid { theme::ORANGE_200 } else { theme::PURPLE_200 })).weight(FontWeight::SEMIBOLD)));
+    sys.push(Item::Text(TextItem::new(n.system.clone(), base, token(if raid { theme::ORANGE_200 } else { theme::TEXT }))));
     let text = if n.text.is_empty() {
         None
     } else {

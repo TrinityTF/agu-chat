@@ -267,7 +267,8 @@ impl ChatPane {
             right = right.child(SharedString::from(thousands(a)));
         }
         head = head.child(left).child(right);
-        let mut d = div().id(eid("ev-", key)).mx(px(4.)).rounded(px(4.)).border_1().border_color(token_a(theme::PURPLE_500, 0.4)).bg(token_a(theme::PURPLE_500, 0.07)).flex_none().child(head);
+        // like 7TV: a coloured bar on the left and a soft tint, no box
+        let mut d = div().id(eid("ev-", key)).w_full().border_l_3().border_color(token_a(theme::PURPLE_500, 0.9)).bg(token_a(theme::PURPLE_500, 0.12)).flex_none().child(head);
         if let Some(inner) = &e.inner {
             d = d.child(self.frame_el(key, inner, true, cx));
         }
@@ -275,8 +276,9 @@ impl ChatPane {
     }
 
     fn notice_el(&mut self, key: &str, n: &NoticeSpec, cx: &mut Context<Self>) -> AnyElement {
-        let (bar, bg) = if n.raid { (token_a(theme::ORANGE_500, 0.7), token_a(theme::ORANGE_500, 0.10)) } else { (token_a(theme::PURPLE_500, 0.7), token_a(theme::PURPLE_500, 0.05)) };
-        let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_2().border_color(bar).bg(bg).px(px(8.)).py(px(2.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
+        // like 7TV: a coloured bar on the left, a soft tint, Twitch's sentence in plain light text
+        let (bar, bg) = if n.raid { (token_a(theme::ORANGE_500, 0.9), token_a(theme::ORANGE_500, 0.12)) } else { (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12)) };
+        let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_3().border_color(bar).bg(bg).px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
         if let Some(t) = &n.text {
             d = d.child(self.flow(t, Rc::new(vec![]), cx));
         }

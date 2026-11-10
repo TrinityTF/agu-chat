@@ -1646,15 +1646,16 @@ impl ChatPane {
                 ItemMetrics { h, mt: f.margin_y, mb: f.margin_y }
             }
             BuiltRow::Event(e) => {
-                // my-px mx-1 border; header `pt-0.5` + a 19.5 px line (+ pb-0.5 when nothing follows)
-                let inner_w = width - 10.0;
+                // my-px, a 3px left bar; header `pt-0.5` + a 19.5 px line (+ pb-0.5 when nothing follows)
+                let inner_w = width - 3.0;
                 let header = 2.0 + 19.5 + if e.inner.is_some() { 0.0 } else { 2.0 };
                 let inner = e.inner.as_ref().map(|f| frame_h(f, inner_w, window, cx)).unwrap_or(0.0);
-                ItemMetrics { h: 2.0 + header + inner, mt: 1.0, mb: 1.0 }
+                ItemMetrics { h: header + inner, mt: 1.0, mb: 1.0 }
             }
             BuiltRow::Notice(n) => {
-                let w = width - 2.0 - 16.0;
-                let h = 4.0 + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
+                // 3px left bar, px-2, py-1
+                let w = width - 3.0 - 16.0;
+                let h = 8.0 + n.system.height_at(w, window, cx) + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0);
                 ItemMetrics { h, mt: 0.0, mb: 0.0 }
             }
             BuiltRow::Feed(f) => ItemMetrics { h: 2.0 + fl(f.base * 0.9 * LINE_HEIGHT), mt: 0.0, mb: 0.0 },
