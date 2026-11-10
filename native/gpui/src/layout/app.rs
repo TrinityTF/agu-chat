@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agu_chat_core::protocol::{AguBridge, Layout, Platform, Settings, SourceRef, SplitNode, Tab, Unsubscribe, UpdaterState};
 use agu_chat_core::twitch::whisper;
@@ -120,6 +120,21 @@ pub(crate) fn stream<T: Clone + Send + 'static>(register: impl FnOnce(Arc<dyn Fn
     (rx, Unsub(Some(unsub)))
 }
 
+/// What `fit_window` last saw of the active tab: its tree and the content size (px) that tree was drawn at, so a
+/// structure change can keep every chat's pixel size.
+struct FitPrev {
+    tab_id: String,
+    shape: String,
+    root: SplitNode,
+    w: f32,
+    h: f32,
+    chrome: i32,
+    /// the layout's minimum content size, rounded up
+    min: (i32, i32),
+    /// when a window resize was ordered, until the host has taken the new size
+    pending: Option<Instant>,
+}
+
 pub struct AguApp {
     pub bridge: Arc<dyn AguBridge>,
     pub layout: Layout,
@@ -150,8 +165,8 @@ pub struct AguApp {
     win_task: Option<Task<()>>,
     /// the side a split was just added on (consumed by `fit_window`, which grows the window toward it)
     fit_edge: Option<Edge>,
-    /// what `fit_window` last applied: active tab, needed content size, chrome height
-    fit_last: Option<(String, i32, i32, i32)>,
+    /// what `fit_window` last saw of the active tab
+    fit_prev: Option<FitPrev>,
     fit_hooked: bool,
     _subs: Vec<Subscription>,
     _unsubs: Vec<Unsub>,
@@ -205,7 +220,7 @@ impl AguApp {
             save_task: None,
             win_task: None,
             fit_edge: None,
-            fit_last: None,
+            fit_prev: None,
             fit_hooked: false,
             _subs: subs,
             _unsubs: Vec::new(),
@@ -971,9 +986,22 @@ impl AguApp {
         }
     }
 
-    /// Keeps the window as big as the active tab's splits need: the minimum size follows the layout, and when
-    /// the content is smaller the window grows toward the side a split was just added on (right / down for
-    /// anything else). Runs from `render`, so it sees every layout or tab change.
+    /// The content area (the split host) in px: its size from the last frame, else the window minus the chrome.
+    fn fit_content(&self, window: &Window, chrome: f32) -> (f32, f32) {
+        match self.anchor("split-host") {
+            Some(b) => (f32::from(b.size.width), f32::from(b.size.height)),
+            None => {
+                let v = window.viewport_size();
+                (f32::from(v.width), (f32::from(v.height) - chrome).max(0.0))
+            }
+        }
+    }
+
+    /// Keeps the window as big as the active tab's splits need. When a split is added, removed or moved the
+    /// chats that were there keep their pixel size, new ones get their neighbours' size, and the window is
+    /// resized to match (growing or shrinking, on the side the split went / came from). Otherwise the splits are
+    /// kept above their minimum, the minimum window size follows the layout, and a tab switch grows the window
+    /// when needed. Runs from `render`, so it sees every layout or tab change.
     fn fit_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.fit_hooked {
             self.fit_hooked = true;
@@ -981,19 +1009,86 @@ impl AguApp {
         }
         let edge = self.fit_edge.take();
         let chrome = 28.0 + if self.updater.status == "ready" && self.bar_dismissed != self.updater.version { 24.0 } else { 0.0 };
-        let tab = self.active_tab();
-        let (w, h) = tab.root.as_ref().map(window_fit::tree_min_size).unwrap_or((0.0, 0.0));
-        let key = (tab.id.clone(), w.ceil() as i32, h.ceil() as i32, chrome as i32);
-        if self.fit_last.as_ref() == Some(&key) {
+        let tab_id = self.active_tab().id.clone();
+        let mut root = self.active_tab().root.clone();
+        let (cw, ch) = self.fit_content(window, chrome);
+        let min_of = |r: &Option<SplitNode>| r.as_ref().map(window_fit::tree_min_size).unwrap_or((0.0, 0.0));
+        let set_min = |window: &Window, m: (f32, f32)| window_fit::set_min_client(window, m.0.max(window_state::MIN_W), (m.1 + chrome).max(window_state::MIN_H));
+        let make_prev = |tab_id: &str, root: &Option<SplitNode>, w: f32, h: f32, pending: Option<Instant>| {
+            let m = min_of(root);
+            root.as_ref().map(|r| FitPrev { tab_id: tab_id.to_string(), shape: window_fit::shape(r), root: r.clone(), w, h, chrome: chrome as i32, min: (m.0.ceil() as i32, m.1.ceil() as i32), pending })
+        };
+
+        // while a divider is being dragged only the minimum follows (the drag keeps every split above it)
+        if self.sv.resize.is_some() {
+            set_min(window, min_of(&root));
+            self.fit_prev = make_prev(&tab_id, &root, cw, ch, None);
             return;
         }
-        self.fit_last = Some(key);
-        let (w, h) = (w.max(window_state::MIN_W), (h + chrome).max(window_state::MIN_H));
-        window_fit::set_min_client(window, w, h);
-        // while a divider is being dragged only the minimum follows (the drag keeps every split above it)
-        // The resize runs after this frame: a SetWindowPos inside render lands while gpui is drawing, which drops
-        // the new size and leaves the grown part blank until something else repaints.
-        if self.sv.resize.is_none() {
+
+        let prev = self.fit_prev.take();
+        if let (Some(prev), Some(cur)) = (&prev, &root) {
+            if prev.tab_id == tab_id && prev.shape != window_fit::shape(cur) {
+                let old_px = window_fit::leaf_px(&prev.root, prev.w, prev.h);
+                let (new_tree, tw, th) = window_fit::replan(cur, &old_px);
+                if new_tree != *cur {
+                    let t = new_tree.clone();
+                    self.update_root(cx, &tab_id, move |_| Some(t));
+                }
+                let (from_left, from_top) = if window_fit::leaf_px(cur, 1.0, 1.0).len() < window_fit::leaf_px(&prev.root, 1.0, 1.0).len() {
+                    window_fit::removed_side(&prev.root, cur)
+                } else {
+                    (edge == Some(Edge::Left), edge == Some(Edge::Top))
+                };
+                let new_root = Some(new_tree);
+                set_min(window, min_of(&new_root));
+                let (rw, rh) = (tw.max(window_state::MIN_W), (th + chrome).max(window_state::MIN_H));
+                // The resize runs after this frame: a SetWindowPos inside render lands while gpui is drawing, which
+                // drops the new size and leaves the changed part blank until something else repaints.
+                cx.spawn_in(window, async move |_, cx| {
+                    let plan = cx.update(|window, _| window_fit::plan_resize(window, rw, rh, from_left, from_top)).ok().flatten();
+                    if let Some((hwnd, to)) = plan {
+                        // outside the update: gpui takes the WM_SIZE this sends
+                        window_fit::apply_grow(hwnd, to);
+                        let _ = cx.update(|window, _| window.refresh());
+                        cx.background_executor().timer(Duration::from_millis(400)).await;
+                        let _ = cx.update(|window, _| window.refresh());
+                    }
+                })
+                .detach();
+                self.fit_prev = make_prev(&tab_id, &new_root, tw, th, Some(Instant::now()));
+                return;
+            }
+        }
+
+        // a resize just ordered is still on its way: the host size is the old one, so keep the sizes as they are
+        let settling = prev.as_ref().and_then(|p| p.pending).is_some_and(|t| {
+            let p = prev.as_ref().unwrap();
+            t.elapsed() < Duration::from_millis(350) && ((cw - p.w).abs() > 1.5 || (ch - p.h).abs() > 1.5) && !window.is_maximized() && !window.is_fullscreen()
+        });
+        if settling {
+            let p = prev.unwrap();
+            set_min(window, min_of(&root));
+            self.fit_prev = Some(p);
+            return;
+        }
+        let known = self.anchor("split-host").is_some();
+        if known {
+            if let Some(fixed) = root.as_ref().and_then(|r| window_fit::enforce_min(r, cw, ch)) {
+                let t = fixed.clone();
+                self.update_root(cx, &tab_id, move |_| Some(t));
+                root = Some(fixed);
+            }
+        }
+        let m = min_of(&root);
+        set_min(window, m);
+        let next = make_prev(&tab_id, &root, cw, ch, None);
+        let changed = match (&prev, &next) {
+            (Some(p), Some(n)) => p.tab_id != n.tab_id || p.min != n.min || p.chrome != n.chrome,
+            _ => true,
+        };
+        if changed {
+            let (w, h) = (m.0.max(window_state::MIN_W), (m.1 + chrome).max(window_state::MIN_H));
             cx.spawn_in(window, async move |_, cx| {
                 let plan = cx.update(|window, _| window_fit::plan_grow(window, w, h, edge)).ok().flatten();
                 if let Some((hwnd, to)) = plan {
@@ -1004,6 +1099,7 @@ impl AguApp {
             })
             .detach();
         }
+        self.fit_prev = next;
     }
 
     fn render_update_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
