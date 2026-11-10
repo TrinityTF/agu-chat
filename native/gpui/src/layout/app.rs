@@ -995,10 +995,12 @@ impl AguApp {
         // the new size and leaves the grown part blank until something else repaints.
         if self.sv.resize.is_none() {
             cx.spawn_in(window, async move |_, cx| {
-                let _ = cx.update(|window, _| {
-                    window_fit::grow_to_fit(window, w, h, edge);
-                    window.refresh();
-                });
+                let plan = cx.update(|window, _| window_fit::plan_grow(window, w, h, edge)).ok().flatten();
+                if let Some((hwnd, to)) = plan {
+                    // outside the update: gpui takes the WM_SIZE this sends
+                    window_fit::apply_grow(hwnd, to);
+                    let _ = cx.update(|window, _| window.refresh());
+                }
             })
             .detach();
         }

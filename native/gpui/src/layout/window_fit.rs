@@ -166,40 +166,49 @@ mod win {
         }
     }
 
-    /// Grows the window so its client area is at least `w` x `h` logical px, toward `edge`. Does nothing when it is
-    /// maximized or already big enough.
-    pub fn grow_to_fit(window: &Window, w: f32, h: f32, edge: Option<Edge>) {
-        let Some(hwnd) = hwnd_of(window) else { return };
+    /// Where the window has to go so its client area is at least `w` x `h` logical px, grown toward `edge`: the
+    /// HWND and the new outer rect, or None when it is maximized or already big enough. Apply it with
+    /// `apply_grow` OUTSIDE any gpui update of this window: SetWindowPos delivers WM_SIZE at once, and gpui
+    /// drops a size change for a window that is being updated (the grown part then stays blank).
+    pub fn plan_grow(window: &Window, w: f32, h: f32, edge: Option<Edge>) -> Option<(isize, Rect)> {
+        let hwnd = hwnd_of(window)?;
         unsafe {
             if IsZoomed(hwnd).as_bool() || window.is_fullscreen() {
-                return;
+                return None;
             }
             let mut wr = RECT::default();
             if GetWindowRect(hwnd, &mut wr).is_err() {
-                return;
+                return None;
             }
             let scale = scale_of(hwnd);
             let (fw, fh) = frame_of(hwnd);
-            let Some(work) = work_area(hwnd) else { return };
+            let work = work_area(hwnd)?;
             let cur = Rect { x: wr.left as f32, y: wr.top as f32, width: (wr.right - wr.left) as f32, height: (wr.bottom - wr.top) as f32 };
             let to = grown_rect(cur, (w * scale + fw).ceil(), (h * scale + fh).ceil(), edge, work);
-            if to == cur {
-                return;
-            }
-            let _ = SetWindowPos(hwnd, None, to.x as i32, to.y as i32, to.width as i32, to.height as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+            (to != cur).then_some((hwnd.0 as isize, to))
+        }
+    }
+
+    pub fn apply_grow(hwnd: isize, to: Rect) {
+        unsafe {
+            let _ = SetWindowPos(HWND(hwnd as *mut core::ffi::c_void), None, to.x as i32, to.y as i32, to.width as i32, to.height as i32, SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
 }
 
 #[cfg(windows)]
-pub use win::{grow_to_fit, install, set_min_client};
+pub use win::{apply_grow, install, plan_grow, set_min_client};
 
 #[cfg(not(windows))]
 pub fn install(_: &gpui::Window) {}
 #[cfg(not(windows))]
 pub fn set_min_client(_: &gpui::Window, _: f32, _: f32) {}
 #[cfg(not(windows))]
-pub fn grow_to_fit(_: &gpui::Window, _: f32, _: f32, _: Option<Edge>) {}
+pub fn plan_grow(_: &gpui::Window, _: f32, _: f32, _: Option<Edge>) -> Option<(isize, Rect)> {
+    None
+}
+#[cfg(not(windows))]
+pub fn apply_grow(_: isize, _: Rect) {}
 
 #[cfg(test)]
 mod tests {
