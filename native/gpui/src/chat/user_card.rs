@@ -1209,7 +1209,7 @@ impl Render for UserCardView {
 
         // ---- Rumble / Kick mod
         let last = ctx.recent.first().cloned();
-        if self.platform == Platform::Rumble && ctx.co_can_moderate {
+        if self.platform == Platform::Rumble && ctx.co_can_moderate && ctx.reach.ban {
             if let Some(Row { body: RowBody::Rumble(m), .. }) = last.as_deref() {
                 let (sk1, m1, sk2, m2) = (self.sk.clone(), m.clone(), self.sk.clone(), m.clone());
                 card = card.child(
@@ -1232,7 +1232,7 @@ impl Render for UserCardView {
                 );
             }
         }
-        if self.platform == Platform::Kick && ctx.co_can_moderate && !self.user.id.is_empty() {
+        if self.platform == Platform::Kick && ctx.co_can_moderate && ctx.reach.ban && !self.user.id.is_empty() {
             if let Some(Row { body: RowBody::Kick(m), .. }) = last.as_deref() {
                 // ban state from the card lookup: None free (or unknown), Some(true) banned, Some(false) timed out
                 let state = self.data.as_ref().and_then(|d| d.ban.as_ref().map(|b| b.0));

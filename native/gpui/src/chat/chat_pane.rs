@@ -470,6 +470,11 @@ impl ChatPane {
         cx.notify();
     }
 
+    /// The logged-in account's login on Kick / Rumble ("" when logged out).
+    pub(super) fn co_login(&self, platform: Platform) -> String {
+        self.accounts.get(&platform).and_then(|a| a.user.as_ref()).map(|u| if u.login.is_empty() { u.name.clone() } else { u.login.clone() }).unwrap_or_default()
+    }
+
     pub(super) fn me_login_lower(&self) -> String {
         self.accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.login.to_lowercase()).unwrap_or_default()
     }
@@ -1454,8 +1459,26 @@ impl ChatPane {
         let env = self.envs.get(sk);
         let caps = env.map(|e| e.caps.clone()).unwrap_or_default();
         let me_id = self.me_id();
-        let reach: ModReach = if platform != Platform::Twitch {
+        let reach: ModReach = if matches!(platform, Platform::Kick | Platform::Rumble) {
+            let badges: Vec<String> = self
+                .store
+                .rows()
+                .iter()
+                .rev()
+                .find_map(|r| match &r.body {
+                    RowBody::Kick(m) if r.sk == sk && m.user.id == user.id => Some(m.badges.iter().map(|b| b.r#type.clone()).collect()),
+                    RowBody::Rumble(m) if r.sk == sk && m.user.id == user.id => Some(m.badges.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let names: Vec<&str> = badges.iter().map(|b| b.as_str()).collect();
+            let target = if user.login.is_empty() { &user.name } else { &user.login };
+            super::mod_caps::co_reach(platform, &self.co_login(platform), &st.source.channel, target, &names)
+        } else if platform != Platform::Twitch {
             REACH_ALL
+        } else if user.login.eq_ignore_ascii_case(&st.source.channel) {
+            // the channel's own account, whether or not it has said anything yet
+            ModReach { ban: false, timeout: false, warn: false, delete: false }
         } else if let Some(env) = env {
             // No line from them in chat = no badges to go on: nothing is ruled out except banning yourself.
             let badges = self.store.rows().iter().rev().find_map(|r| match &r.body {
@@ -1692,12 +1715,12 @@ impl ChatPane {
             RowBody::Automod(h) => Some(automod_row(row, h, &ctx, self.envs.get(&row.sk)?)),
             RowBody::Rumble(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone() };
+                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble) };
                 Some(rumble_row(row, m, &ctx, &env, rule.as_ref()))
             }
             RowBody::Kick(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default() };
+                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick) };
                 Some(kick_row(row, m, &ctx, &env, rule.as_ref()))
             }
             RowBody::YouTube(m) => Some(youtube_row(row, m, &ctx, rule.as_ref())),

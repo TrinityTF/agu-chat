@@ -146,9 +146,51 @@ pub fn mod_reach(viewer: &ModViewer, target_id: &str, target_badges: &str) -> Mo
     ModReach { ban: ok, timeout: ok, warn: ok, delete: ok }
 }
 
+/// Kick / Rumble: whether the viewer may time out or ban a chatter. Nobody acts on the channel's owner (by badge,
+/// or because the chatter's name is the channel's), on Kick staff, or on themselves; only the owner acts on a
+/// moderator. Names compare loosely (Kick's channel slug writes the username's `_` as `-`).
+pub fn co_reach(platform: Platform, viewer_login: &str, channel: &str, target_login: &str, target_badges: &[&str]) -> ModReach {
+    let norm = |s: &str| s.trim().to_lowercase().replace('_', "-");
+    let (viewer, channel, target) = (norm(viewer_login), norm(channel), norm(target_login));
+    let owner_badge = |b: &&str| match platform {
+        Platform::Rumble => matches!(*b, "admin" | "broadcaster" | "streamer"),
+        _ => matches!(*b, "broadcaster" | "staff" | "global_admin" | "global_moderator"),
+    };
+    let none = ModReach { ban: false, timeout: false, warn: false, delete: false };
+    let target_owner = target_badges.iter().any(owner_badge) || (!target.is_empty() && target == channel);
+    let is_self = !viewer.is_empty() && viewer == target;
+    if target_owner || is_self {
+        return none;
+    }
+    let viewer_owner = !viewer.is_empty() && viewer == channel;
+    if target_badges.iter().any(|b| *b == "moderator") && !viewer_owner {
+        return none;
+    }
+    REACH_ALL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kick_and_rumble_reach() {
+        let k = |viewer: &str, target: &str, badges: &[&str]| co_reach(Platform::Kick, viewer, "agu-tf", target, badges).ban;
+        // the channel owner: by badge, or by name (slug "agu-tf" is the user "Agu_TF")
+        assert!(!k("somemod", "Agu_TF", &[]));
+        assert!(!k("somemod", "whoever", &["broadcaster"]));
+        assert!(!k("somemod", "kickstaff", &["staff"]));
+        // a mod can't act on a mod, the owner can
+        assert!(!k("somemod", "othermod", &["moderator"]));
+        assert!(k("Agu_TF", "othermod", &["moderator"]));
+        // not on yourself; on an ordinary chatter yes
+        assert!(!k("somemod", "SomeMod", &[]));
+        assert!(k("somemod", "viewer1", &["subscriber", "og"]));
+        let r = |target: &str, badges: &[&str]| co_reach(Platform::Rumble, "me", "streamer", target, badges).timeout;
+        assert!(!r("x", &["admin"]));
+        assert!(!r("x", &["moderator"]));
+        assert!(r("x", &["premium"]));
+    }
 
     fn viewer(id: &str, broadcaster: bool, lead: bool) -> ModViewer {
         ModViewer { id: id.into(), broadcaster, lead }

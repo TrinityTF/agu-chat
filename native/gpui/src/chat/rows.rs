@@ -82,6 +82,8 @@ pub struct CoEnv {
     pub can_send: bool,
     pub rumble_badges: RumbleBadgeDefs,
     pub rumble_emotes: RumbleEmotes,
+    /// the logged-in account on this platform, for who the mod buttons may act on
+    pub viewer_login: String,
 }
 
 pub struct RowCtx<'a> {
@@ -889,7 +891,9 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     let base = rs.font_size;
     let rant = m.rant.as_ref().filter(|r| r.cents > 0.0);
     let striking = m.deleted && rs.deleted_messages == "strike";
-    let can_mod = env.caps.can_moderate && !m.deleted;
+    let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
+    let badges: Vec<&str> = m.badges.iter().map(|b| b.as_str()).collect();
+    let can_mod = env.caps.can_moderate && !m.deleted && super::mod_caps::co_reach(Platform::Rumble, &env.viewer_login, &env.source.channel, target, &badges).ban;
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
     let mut actions = Vec::new();
@@ -1073,7 +1077,9 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     let rs = ctx.rs;
     let base = rs.font_size;
     let striking = m.deleted && rs.deleted_messages == "strike";
-    let can_mod = env.caps.can_moderate && !m.user.id.is_empty() && !m.deleted;
+    let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
+    let badges: Vec<&str> = m.badges.iter().map(|b| b.r#type.as_str()).collect();
+    let can_mod = env.caps.can_moderate && !m.user.id.is_empty() && !m.deleted && super::mod_caps::co_reach(Platform::Kick, &env.viewer_login, &env.source.channel, target, &badges).ban;
     let can_delete = env.caps.can_delete && !m.deleted;
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
