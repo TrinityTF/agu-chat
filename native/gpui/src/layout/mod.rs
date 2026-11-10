@@ -12,6 +12,7 @@ pub mod notebook_tabs;
 pub mod split_header;
 pub mod split_view;
 pub mod tab_window;
+pub mod window_fit;
 pub mod tree;
 pub mod twitch_login;
 pub mod x_login;

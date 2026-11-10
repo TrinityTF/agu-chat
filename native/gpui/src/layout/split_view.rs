@@ -35,7 +35,7 @@ pub struct Divider {
 
 /// a side-by-side split is never dragged narrower than a chat window may be
 const MIN_W: f32 = crate::window_state::MIN_W;
-const MIN_H: f32 = 70.0;
+pub const MIN_H: f32 = 70.0;
 
 pub fn compute_layout(root: Option<&SplitNode>) -> (Vec<(Leaf, Rect)>, Vec<Divider>) {
     fn walk(n: &SplitNode, r: Rect, leaves: &mut Vec<(Leaf, Rect)>, dividers: &mut Vec<Divider>) {

@@ -27,6 +27,7 @@ use crate::layout::hotkeys::{
 };
 use crate::layout::notebook_tabs::TabsState;
 use crate::layout::split_view::SplitViewState;
+use crate::layout::window_fit;
 use crate::layout::tree::{
     self, default_layout, find_leaf, insert_at, leaves, map_leaf, move_leaf, new_leaf, new_tab, remove_leaf, sanitize_layout, set_sizes, source_key, tab_title, Edge,
 };
@@ -147,6 +148,11 @@ pub struct AguApp {
     pub focus: FocusHandle,
     save_task: Option<Task<()>>,
     win_task: Option<Task<()>>,
+    /// the side a split was just added on (consumed by `fit_window`, which grows the window toward it)
+    fit_edge: Option<Edge>,
+    /// what `fit_window` last applied: active tab, needed content size, chrome height
+    fit_last: Option<(String, i32, i32, i32)>,
+    fit_hooked: bool,
     _subs: Vec<Subscription>,
     _unsubs: Vec<Unsub>,
 }
@@ -198,6 +204,9 @@ impl AguApp {
             focus: cx.focus_handle(),
             save_task: None,
             win_task: None,
+            fit_edge: None,
+            fit_last: None,
+            fit_hooked: false,
             _subs: subs,
             _unsubs: Vec::new(),
         };
@@ -564,12 +573,14 @@ impl AguApp {
     }
 
     pub fn move_split(&mut self, tab_id: &str, src_id: &str, target_id: &str, edge: Edge, cx: &mut Context<Self>) {
+        self.fit_edge = Some(edge);
         self.update_root(cx, tab_id, |r| move_leaf(r, src_id, target_id, edge));
         self.focus_leaf(tab_id, src_id, cx);
     }
 
     /// Take these sources (`source_key`) out of `leaf_id` into a new split at `edge` of `target_id`.
     pub fn split_out(&mut self, tab_id: &str, leaf_id: &str, keys: &[String], target_id: &str, edge: Edge, cx: &mut Context<Self>) {
+        self.fit_edge = Some(edge);
         let fresh = new_leaf(vec![]); // id known now: the updater below runs later
         let fresh_id = fresh.id.clone();
         self.update_root(cx, tab_id, |r| {
@@ -633,6 +644,7 @@ impl AguApp {
 
     /// Another tab dragged onto this one's splits: its whole layout goes in at that edge, and the tab closes.
     pub fn take_tab(&mut self, tab_id: &str, src_tab_id: &str, target_id: Option<&str>, edge: Edge, cx: &mut Context<Self>) {
+        self.fit_edge = target_id.map(|_| edge);
         self.mutate(cx, |l| {
             let Some(src) = l.tabs.iter().find(|t| t.id == src_tab_id) else { return };
             let Some(add) = src.root.clone() else { return };
@@ -741,6 +753,7 @@ impl AguApp {
         match d {
             Dialog::Settings | Dialog::CloseTab { .. } => {}
             Dialog::Add { tab_id } | Dialog::Whisper { tab_id } => {
+                self.fit_edge = Some(Edge::Right);
                 self.update_root(cx, &tab_id, |r| match r {
                     Some(root) => {
                         let first = leaves(Some(root))[0].id.clone();
@@ -754,6 +767,7 @@ impl AguApp {
                 self.update_root(cx, &tab_id, |r| map_leaf(r, &target, &|l| tree::Leaf { sources: sources.clone(), ..l }));
             }
             Dialog::Split { tab_id, leaf_id: target, below } => {
+                self.fit_edge = Some(if below { Edge::Bottom } else { Edge::Right });
                 self.update_root(cx, &tab_id, |r| insert_at(r, &target, leaf.into(), if below { Edge::Bottom } else { Edge::Right }));
                 self.focus_leaf(&tab_id, &leaf_id, cx);
             }
@@ -957,6 +971,31 @@ impl AguApp {
         }
     }
 
+    /// Keeps the window as big as the active tab's splits need: the minimum size follows the layout, and when
+    /// the content is smaller the window grows toward the side a split was just added on (right / down for
+    /// anything else). Runs from `render`, so it sees every layout or tab change.
+    fn fit_window(&mut self, window: &mut Window) {
+        if !self.fit_hooked {
+            self.fit_hooked = true;
+            window_fit::install(window);
+        }
+        let edge = self.fit_edge.take();
+        let chrome = 28.0 + if self.updater.status == "ready" && self.bar_dismissed != self.updater.version { 24.0 } else { 0.0 };
+        let tab = self.active_tab();
+        let (w, h) = tab.root.as_ref().map(window_fit::tree_min_size).unwrap_or((0.0, 0.0));
+        let key = (tab.id.clone(), w.ceil() as i32, h.ceil() as i32, chrome as i32);
+        if self.fit_last.as_ref() == Some(&key) {
+            return;
+        }
+        self.fit_last = Some(key);
+        let (w, h) = (w.max(window_state::MIN_W), (h + chrome).max(window_state::MIN_H));
+        window_fit::set_min_client(window, w, h);
+        // while a divider is being dragged only the minimum follows (the drag keeps every split above it)
+        if self.sv.resize.is_none() {
+            window_fit::grow_to_fit(window, w, h, edge);
+        }
+    }
+
     fn render_update_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let show = self.updater.status == "ready" && self.bar_dismissed != self.updater.version;
         if !show {
@@ -1058,6 +1097,7 @@ impl Render for AguApp {
             self.tabs.clear_drag();
             self.sv.clear_drag();
         }
+        self.fit_window(window);
         let tabs_bar = self.render_tabs(window, cx);
         let update_bar = self.render_update_bar(cx);
         let content = self.render_split_view(window, cx);
