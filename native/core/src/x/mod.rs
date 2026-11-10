@@ -232,7 +232,7 @@ fn conn_frame(st: &St, pinned: bool) -> Value {
             if pinned {
                 if !state.is_empty() && state != "RUNNING" { format!("This broadcast is not running ({}).", state.to_lowercase()) } else { "This broadcast is not running.".to_string() }
             } else {
-                "Not live. X only reveals a broadcast from a handle when the streamer tweets the link: paste the broadcast link to follow it directly.".to_string()
+                String::new()
             },
         )
     };
