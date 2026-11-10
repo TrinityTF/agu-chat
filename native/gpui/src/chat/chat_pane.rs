@@ -1508,6 +1508,9 @@ impl ChatPane {
         let recent_total = self.store.rows().iter().filter(|r| mine(r)).count();
         let (badges, sub) = recent.first().map(|r| super::user_card::badges_of(r, env.map(|e| &*e.badge_map), &st.rumble_badges)).unwrap_or_default();
         let login = ignore_login(&user.login, &user.name);
+        // your own card: nothing to ignore
+        let my_login = if platform == Platform::Twitch { self.me_login_lower() } else { self.co_login(platform) };
+        let is_me = (platform == Platform::Twitch && !me_id.is_empty() && user.id == me_id) || (!my_login.is_empty() && ignore_login(&my_login, "") == login);
         Some(super::user_card::CardCtx {
             source: st.source.clone(),
             caps,
@@ -1515,7 +1518,7 @@ impl ChatPane {
             suspicious: st.suspicious.get(&user.id).cloned(),
             co_can_moderate: self.co_caps.get(sk).map(|c| c.can_moderate).unwrap_or(false),
             ignored: !login.is_empty() && super::ignores::is_user_ignored(&self.settings.ignored_users, platform, &login),
-            can_ignore: !login.is_empty(),
+            can_ignore: !login.is_empty() && !is_me,
             emotes: env.and_then(|e| e.emotes.clone()),
             recent,
             recent_total,
