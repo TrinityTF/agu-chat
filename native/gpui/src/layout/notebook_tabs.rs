@@ -15,6 +15,7 @@ use crate::icons;
 use crate::layout::app::{AguApp, DragGhost, SourcesDrag, SplitDrag, TabDrag};
 use crate::chat::chat_pane::Activity;
 use crate::layout::hotkeys::{hotkey_hint, HotkeyAction};
+use crate::layout::macwin;
 use crate::layout::tab_window::tab_window;
 use crate::layout::tree::{auto_title, tab_title, whisper_only};
 use crate::layout::ui::{tip, MenuEntry, MenuItem, MenuState};
@@ -420,7 +421,8 @@ impl AguApp {
             .min_w_0()
             .flex_1()
             .h_full()
-            .when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag).occlude());
+            .when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag).occlude())
+            .when(cfg!(target_os = "macos") && !drag_live, |d| d.on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, w, _| macwin::titlebar_press(ev, w)));
         let grab = self.drop_targets(grab, cx, move |_, _| drop_end);
 
         let zone = div()
@@ -470,16 +472,30 @@ impl AguApp {
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<TabDrag>, _w, cx| this.clear_bar_mark(cx)))
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SplitDrag>, _w, cx| this.clear_bar_mark(cx)))
             .on_drag_move(cx.listener(|this, _: &DragMoveEvent<SourcesDrag>, _w, cx| this.clear_bar_mark(cx)))
+            // macOS: room for the native traffic lights (which are the window buttons there); the strip drags too
+            .when(cfg!(target_os = "macos"), |d| {
+                d.child(div().w(px(macwin::TRAFFIC_INSET)).flex_none().h_full().on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, w, _| macwin::titlebar_press(ev, w)))
+            })
             .child(zone)
             // Always some bare title bar to grab the window by, however many tabs there are.
-            .child(div().w(px(28.)).flex_none().h_full().when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag).occlude()))
-            .child(win_btn("win-min", WindowControlArea::Min, icons::WIN_MIN, 14., false))
-            .child(if maximized {
-                win_btn("win-max", WindowControlArea::Max, icons::WIN_RESTORE, 14., false)
-            } else {
-                win_btn("win-max", WindowControlArea::Max, icons::WIN_MAX, 12., false)
+            .child(
+                div()
+                    .w(px(28.))
+                    .flex_none()
+                    .h_full()
+                    .when(!drag_live, |d| d.window_control_area(WindowControlArea::Drag).occlude())
+                    .when(cfg!(target_os = "macos") && !drag_live, |d| d.on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, w, _| macwin::titlebar_press(ev, w))),
+            )
+            // the traffic lights replace the minimize / maximize / close buttons on macOS
+            .when(!cfg!(target_os = "macos"), |d| {
+                d.child(win_btn("win-min", WindowControlArea::Min, icons::WIN_MIN, 14., false))
+                    .child(if maximized {
+                        win_btn("win-max", WindowControlArea::Max, icons::WIN_RESTORE, 14., false)
+                    } else {
+                        win_btn("win-max", WindowControlArea::Max, icons::WIN_MAX, 12., false)
+                    })
+                    .child(win_btn("win-close", WindowControlArea::Close, icons::X, 14., true))
             })
-            .child(win_btn("win-close", WindowControlArea::Close, icons::X, 14., true))
             .into_any_element()
     }
 

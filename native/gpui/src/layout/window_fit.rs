@@ -1,7 +1,7 @@
 //! Keeps every chat of the active tab at least `MIN_W` wide: the window grows when a split is added (toward the
 //! side the split went) and its minimum size follows the layout, so it cannot be dragged narrower than the splits
 //! need. gpui 0.2.2 fixes the minimum size at creation, so on Windows the main window is subclassed and
-//! `WM_GETMINMAXINFO` is raised after gpui has answered it.
+//! `WM_GETMINMAXINFO` is raised after gpui has answered it; on macOS `setContentMinSize:` does it (macwin.rs).
 use std::collections::{HashMap, HashSet};
 
 use agu_chat_core::protocol::SplitNode;
@@ -379,21 +379,27 @@ mod win {
 #[cfg(windows)]
 pub use win::{apply_grow, install, max_client, plan_grow, plan_resize, set_min_client};
 
-#[cfg(not(windows))]
+/// macOS: the same hooks over AppKit (macwin.rs); there is no message hook to install.
+#[cfg(target_os = "macos")]
+pub use super::macwin::{apply_grow, max_client, plan_grow, plan_resize, set_min_client};
+#[cfg(target_os = "macos")]
 pub fn install(_: &gpui::Window) {}
-#[cfg(not(windows))]
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn install(_: &gpui::Window) {}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_min_client(_: &gpui::Window, _: f32, _: f32) {}
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn plan_grow(_: &gpui::Window, _: f32, _: f32, _: Option<Edge>) -> Option<(isize, Rect)> {
     None
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn plan_resize(_: &gpui::Window, _: f32, _: f32, _: bool, _: bool) -> Option<(isize, Rect)> {
     None
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn apply_grow(_: isize, _: Rect) {}
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn max_client(_: &gpui::Window) -> Option<(f32, f32)> {
     None
 }

@@ -150,7 +150,7 @@ fn main() {
                 window_bounds: Some(window_bounds),
                 display_id,
                 // frame: false -> no OS title bar; the tab bar is the title bar.
-                titlebar: Some(TitlebarOptions { title: Some("Agu Chat".into()), appears_transparent: true, traffic_light_position: None }),
+                titlebar: Some(TitlebarOptions { title: Some("Agu Chat".into()), appears_transparent: true, traffic_light_position: layout::macwin::traffic_light_position(28.0) }),
                 window_min_size: Some(size(px(window_state::MIN_W), px(window_state::MIN_H))),
                 ..Default::default()
             },

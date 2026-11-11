@@ -896,6 +896,10 @@ impl Render for UserCardView {
             // focusable ancestor would otherwise swallow the press).
             .window_control_area(WindowControlArea::Drag)
             .occlude()
+            // macOS: the native traffic lights sit at the left of the header, the whole row drags the window
+            .when(cfg!(target_os = "macos"), |d| {
+                d.pl(px(crate::layout::macwin::TRAFFIC_INSET)).on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, w, _| crate::layout::macwin::titlebar_press(ev, w))
+            })
             .child(div().flex_none().child(Self::avatar(&avatar_src, &display)))
             .child(
                 div()
@@ -904,18 +908,21 @@ impl Render for UserCardView {
                     .child(div().flex().items_center().gap(px(6.)).child(icons::platform_icon(self.platform, 14., true)).child(name_el))
                     .when(!display.is_empty() && !login.is_empty() && display.to_lowercase() != login.to_lowercase(), |d| d.child(div().text_size(px(11.)).line_height(px(16.)).text_color(c(theme::FAINT)).child(SharedString::from(format!("@{login}"))))),
             )
-            .child(
-                div()
-                    .id("card-close")
-                    .flex_none()
-                    .rounded(px(4.))
-                    .p(px(4.))
-                    .text_color(c(theme::FAINT))
-                    .hover(|s| s.text_color(c(theme::TEXT)))
-                    .occlude()
-                    .child(icon(icons::X, 16.))
-                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx))),
-            )
+            // the traffic lights close the window on macOS
+            .when(!cfg!(target_os = "macos"), |d| {
+                d.child(
+                    div()
+                        .id("card-close")
+                        .flex_none()
+                        .rounded(px(4.))
+                        .p(px(4.))
+                        .text_color(c(theme::FAINT))
+                        .hover(|s| s.text_color(c(theme::TEXT)))
+                        .occlude()
+                        .child(icon(icons::X, 16.))
+                        .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx))),
+                )
+            })
             // the top 4px are the window's top resize edge, not the grab handle: the strip's hitbox blocks the
             // drag area, so the platform falls through to its own top-edge resize
             .relative()

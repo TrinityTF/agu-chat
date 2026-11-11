@@ -13,6 +13,7 @@ pub mod split_header;
 pub mod split_view;
 pub mod tab_window;
 pub mod window_fit;
+pub mod macwin;
 pub mod tree;
 // The login windows host WebView2 in a raw Win32 window; other platforms get their own hosts later.
 #[cfg(windows)]

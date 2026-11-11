@@ -35,7 +35,7 @@ pub fn open_popout<V: Render + 'static>(cx: &mut App, title: &str, x: f32, y: f3
     // loses its taskbar button below so it still behaves like Electron's frameless pop-out.
     let opts = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), size(px(width), px(height))))),
-        titlebar: Some(TitlebarOptions { title: Some(title.to_string().into()), appears_transparent: true, traffic_light_position: None }),
+        titlebar: Some(TitlebarOptions { title: Some(title.to_string().into()), appears_transparent: true, traffic_light_position: crate::layout::macwin::traffic_light_position(57.0) }),
         kind: WindowKind::Normal,
         display_id,
         is_resizable: true,
@@ -68,7 +68,15 @@ pub fn set_owner(window: &Window) {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: the main window's NSWindow.
+#[cfg(target_os = "macos")]
+pub fn set_owner(window: &Window) {
+    if let Some(w) = crate::layout::macwin::ns_window(window) {
+        OWNER.store(w as isize, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_owner(_: &Window) {}
 
 /// No taskbar button and no maximize: swap WS_EX_APPWINDOW for WS_EX_TOOLWINDOW (re-shown so the shell drops
@@ -100,7 +108,13 @@ fn tool_window(window: &Window) {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: a child window of the main window, no zoom button, in front.
+#[cfg(target_os = "macos")]
+fn tool_window(window: &Window) {
+    crate::layout::macwin::tool_window(window, OWNER.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn tool_window(_: &Window) {}
 
 /// `fitPopout`: the window's height follows its content, at least 120 and at most the screen less 40.

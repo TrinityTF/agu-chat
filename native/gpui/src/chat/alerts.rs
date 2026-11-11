@@ -193,7 +193,13 @@ fn flash_window(hwnd: isize) {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: one informational Dock bounce (AppKit ignores it while the app is active).
+#[cfg(target_os = "macos")]
+fn flash_window(_hwnd: isize) {
+    crate::layout::macwin::request_attention();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn flash_window(_hwnd: isize) {}
 
 #[allow(dead_code)]

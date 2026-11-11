@@ -81,6 +81,7 @@ dependencies = [
  "futures",
  "gpui",
  "image",
+ "objc2",
  "raw-window-handle",
  "reqwest",
  "rodio",
