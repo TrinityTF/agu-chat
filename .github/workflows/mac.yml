@@ -1,0 +1,58 @@
+# Builds a test macOS app (Apple Silicon) on every push to the `mac` branch, or by hand. It does not publish a
+# release: the zipped "Agu Chat.app" is attached to the run as an artifact.
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - mac
+
+concurrency:
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      # native/rust-toolchain.toml pins the Windows MSVC host; on the Mac runner use plain stable instead
+      RUSTUP_TOOLCHAIN: stable
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: native-mac-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: native-mac-
+
+      - name: Test
+        working-directory: native
+        run: cargo test -p agu-chat-core -p agu-chat-gpui
+
+      - name: Build
+        working-directory: native
+        run: cargo build --release -p agu-chat-gpui
+
+      - name: Bundle
+        run: |
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' native/gpui/Cargo.toml | head -n 1)-${GITHUB_SHA::7}"
+          sh native/installer/mac/bundle.sh native/target/release/agu-chat-gpui "$version" native/dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agu-chat-mac
+          path: native/dist/*.zip

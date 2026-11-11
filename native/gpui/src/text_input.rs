@@ -265,9 +265,16 @@ pub struct TextInput {
 }
 
 /// `GetCaretBlinkTime` (ms); the OS says INFINITE (no blinking) with 0xFFFFFFFF.
+#[cfg(windows)]
 fn caret_blink_ms() -> Option<u128> {
     let t = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
     if t == u32::MAX || t == 0 { None } else { Some(t as u128) }
+}
+
+/// macOS / Linux: the common 530 ms default.
+#[cfg(not(windows))]
+fn caret_blink_ms() -> Option<u128> {
+    Some(530)
 }
 
 impl TextInput {

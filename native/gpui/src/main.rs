@@ -21,6 +21,10 @@ use crate::layout::app::AguApp;
 /// `AGU_LOG=1`: the app is a windows-subsystem exe in every build, so stderr goes nowhere; with the switch on, what
 /// would be printed (the UI's `eprintln!`s, panics) is appended to `agu-chat.log` in the data dir, next to the
 /// backend's own lines.
+#[cfg(not(windows))]
+fn route_stderr_to_log() {}
+
+#[cfg(windows)]
 fn route_stderr_to_log() {
     if !std::env::var("AGU_LOG").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
         return;
@@ -99,9 +103,12 @@ fn main() {
         };
         if !mock {
             // X login: the core asks for the sign-in window through this hook
-            layout::x_login::install(cx);
-            layout::youtube_login::install(cx);
-            layout::twitch_login::install(cx);
+            #[cfg(windows)]
+            {
+                layout::x_login::install(cx);
+                layout::youtube_login::install(cx);
+                layout::twitch_login::install(cx);
+            }
         }
         chat::services::init(cx, bridge.clone(), data_dir);
 

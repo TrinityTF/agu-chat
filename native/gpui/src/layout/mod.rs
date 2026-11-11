@@ -14,7 +14,11 @@ pub mod split_view;
 pub mod tab_window;
 pub mod window_fit;
 pub mod tree;
+// The login windows host WebView2 in a raw Win32 window; other platforms get their own hosts later.
+#[cfg(windows)]
 pub mod twitch_login;
+#[cfg(windows)]
 pub mod x_login;
+#[cfg(windows)]
 pub mod youtube_login;
 pub mod ui;
