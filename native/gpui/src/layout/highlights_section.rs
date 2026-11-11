@@ -12,17 +12,18 @@ use super::settings_dialog::SettingsDialog;
 use super::settings_widgets::{checkbox, eid, txt};
 use super::tree::uid;
 use super::ui::{btn, toggle, BtnOpts};
-use crate::chat::highlights::{compile_highlights, next_rule_color, regex_error, rule_row_style, MatchInput, RULE_COLORS};
+use crate::chat::highlights::{compile_highlights, is_badge_id, next_rule_color, regex_error, rule_row_style, MatchInput, BADGES, BADGE_COLORS, RULE_COLORS};
 use crate::icons;
 use crate::text_input::InputStyle;
 use crate::theme::{self, a, c};
 
-const KINDS: [(&str, &str); 3] = [("phrase", "Phrase"), ("regex", "Regex"), ("user", "User")];
+const KINDS: [(&str, &str); 4] = [("phrase", "Phrase"), ("regex", "Regex"), ("user", "User"), ("badge", "Badge")];
 
 fn placeholder(kind: &str) -> &'static str {
     match kind {
         "regex" => "Regular expression, e.g. ^!(drop|claim)",
         "user" => "Names, separated by commas",
+        "badge" => "",
         _ => "Word or phrase, e.g. giveaway",
     }
 }
@@ -99,7 +100,32 @@ impl SettingsDialog {
         self.set_rules(rules, cx);
     }
 
+    /// Append every badge rule that is not in the list yet: enabled, no sound, no flash.
+    fn add_badge_rules(&mut self, cx: &mut Context<Self>) {
+        let mut rules = self.rules();
+        for (i, (badge, _)) in BADGES.iter().enumerate() {
+            if rules.iter().any(|r| r.kind == "badge" && r.pattern.trim().eq_ignore_ascii_case(badge)) {
+                continue;
+            }
+            rules.push(HighlightRule {
+                id: uid(),
+                enabled: true,
+                kind: "badge".into(),
+                pattern: badge.to_string(),
+                case_sensitive: false,
+                color: BADGE_COLORS[i].to_string(),
+                sound: false,
+                sound_file: String::new(),
+                flash: false,
+            });
+        }
+        self.set_rules(rules, cx);
+    }
+
     pub(super) fn commit_rule_pattern(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.rules().iter().any(|r| r.id == id && r.kind == "badge") {
+            return;
+        }
         let text = self.text_of(&format!("hl.{id}.pat"), cx);
         if self.rules().iter().any(|r| r.id == id && r.pattern != text) {
             self.update_rule(id, |r| r.pattern = text, cx);
@@ -118,7 +144,22 @@ impl SettingsDialog {
         let Some(rest) = id.strip_prefix("hl.") else { return };
         if let Some(rid) = rest.strip_suffix(".kind") {
             let v = value.to_string();
-            self.update_rule(rid, |r| r.kind = v, cx);
+            self.update_rule(
+                rid,
+                |r| {
+                    // a badge rule's pattern is always one badge id; other kinds start from a clean field
+                    if v == "badge" && !is_badge_id(&r.pattern) {
+                        r.pattern = BADGES[0].0.to_string();
+                    } else if v != "badge" && r.kind == "badge" {
+                        r.pattern = String::new();
+                    }
+                    r.kind = v;
+                },
+                cx,
+            );
+        } else if let Some(rid) = rest.strip_suffix(".badge") {
+            let v = value.to_string();
+            self.update_rule(rid, |r| r.pattern = v, cx);
         } else if let Some(rid) = rest.strip_suffix(".sound") {
             if value == "default" {
                 self.update_rule(rid, |r| r.sound_file = String::new(), cx);
@@ -180,14 +221,23 @@ impl SettingsDialog {
         let id = r.id.clone();
         let dim = !r.enabled;
         let key = format!("hl.{id}.pat");
-        let pat = self.input(&key, placeholder(&r.kind), InputStyle::Field, &r.pattern, true, false, window, cx);
-        if self.focus_rule.as_deref() == Some(id.as_str()) {
-            self.focus_rule = None;
-            pat.update(cx, |t, _| t.focus(window));
-        }
-        let draft = self.text_of(&key, cx);
-        let re_err = if r.kind == "regex" && !draft.trim().is_empty() { regex_error(&draft, r.case_sensitive) } else { None };
-        pat.update(cx, |t, cx| t.set_invalid(re_err.is_some(), cx));
+        let is_badge = r.kind == "badge";
+        let (pat, re_err) = if is_badge {
+            // a fixed list instead of a text field
+            let cur = if is_badge_id(&r.pattern) { r.pattern.as_str() } else { "" };
+            let sel = self.select(&format!("hl.{id}.badge"), cur, &BADGES, true, cx);
+            (div().flex().child(sel).into_any_element(), None)
+        } else {
+            let pat = self.input(&key, placeholder(&r.kind), InputStyle::Field, &r.pattern, true, false, window, cx);
+            if self.focus_rule.as_deref() == Some(id.as_str()) {
+                self.focus_rule = None;
+                pat.update(cx, |t, _| t.focus(window));
+            }
+            let draft = self.text_of(&key, cx);
+            let re_err = if r.kind == "regex" && !draft.trim().is_empty() { regex_error(&draft, r.case_sensitive) } else { None };
+            pat.update(cx, |t, cx| t.set_invalid(re_err.is_some(), cx));
+            (pat.into_any_element(), re_err)
+        };
 
         let kind = self.select(&format!("hl.{id}.kind"), &r.kind, &KINDS, true, cx);
         let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
@@ -327,7 +377,7 @@ impl SettingsDialog {
                     .text_size(px(11.))
                     .line_height(px(16.5))
                     .when(dim, |d| d.opacity(0.5))
-                    .child(case)
+                    .children((!is_badge).then_some(case))
                     .child(flash)
                     .child(sound)
                     .children(sound_ui),
@@ -347,7 +397,7 @@ impl SettingsDialog {
         let text = self.input("hl.test.text", "A sample message", InputStyle::Field, "", false, false, window, cx);
         let (u, t) = (self.text_of("hl.test.user", cx), self.text_of("hl.test.text", cx));
         let hl = compile_highlights(rules);
-        let hit = if !t.is_empty() || !u.is_empty() { hl.matches(&MatchInput { text: t.clone(), login: u.clone(), name: u.clone() }) } else { None };
+        let hit = if !t.is_empty() || !u.is_empty() { hl.matches(&MatchInput { text: t.clone(), login: u.clone(), name: u.clone(), badges: Vec::new() }) } else { None };
         let result = (!t.is_empty() || !u.is_empty()).then(|| match hit {
             Some(h) => {
                 let idx = rules.iter().position(|r| r.id == h.id).unwrap_or(0);
@@ -419,6 +469,9 @@ impl SettingsDialog {
             div().mb(px(12.)).children(editors).into_any_element()
         };
         let tester = (!rules.is_empty()).then(|| self.rule_tester(&rules, window, cx));
+        let add_badges = btn(eid("hl-add-badges"), "Add badge rules", BtnOpts { small: true, ..Default::default() })
+            .tooltip(super::ui::tip("Adds Broadcaster, Moderator, Lead Moderator, Verified, VIP and Founder rules that are not in the list yet"))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_badge_rules(cx)));
         let add = btn(eid("hl-add"), "Add rule", BtnOpts { primary: true, small: true, ..Default::default() }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_rule(cx)));
 
         div()
@@ -439,8 +492,8 @@ impl SettingsDialog {
                     .child(self.bool_row(&sv, "highlightSoundFocused", "Play sounds while Agu Chat is focused", Some("Off: sounds only play when you're in another window"), false, true, cx))
                     .children(sound_err.map(|e| txt(11.).mt(px(4.)).text_color(c(theme::RED_400)).child(e))),
             )
-            .child(div().mb(px(8.)).mt(px(4.)).flex().items_center().justify_between().child(txt(13.).font_weight(gpui::FontWeight::SEMIBOLD).child("Rules")).child(add))
-            .child(txt(11.).mb(px(8.)).text_color(c(theme::FAINT)).child("For every platform. Checked top to bottom: the first rule that matches colours the message. Your own messages are never highlighted."))
+            .child(div().mb(px(8.)).mt(px(4.)).flex().items_center().justify_between().child(txt(13.).font_weight(gpui::FontWeight::SEMIBOLD).child("Rules")).child(div().flex().items_center().gap(px(6.)).child(add_badges).child(add)))
+            .child(txt(11.).mb(px(8.)).text_color(c(theme::FAINT)).child("For every platform. Checked top to bottom: the first rule that matches colours the message. Badge rules come last, after every phrase, regex and user rule, and don't turn the tab red. Your own messages are never highlighted."))
             .child(rules_body)
             .children(tester)
             .into_any_element()

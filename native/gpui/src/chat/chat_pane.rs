@@ -957,7 +957,10 @@ impl ChatPane {
             if !mention && rule.is_none() {
                 continue;
             }
-            activity = Some(Activity::Highlight);
+            // badge-only matches are frequent (mods, VIPs): sound and flash apply, but the tab stays a plain message
+            if mention || rule.as_ref().is_some_and(|r| r.kind != "badge") {
+                activity = Some(Activity::Highlight);
+            }
             let key = format!("{}|{}", r.sk.to_lowercase(), &r.key[r.sk.len()..]);
             let wants = if mention {
                 AlertWants { sound: self.settings.mention_sound, sound_file: String::new(), flash: self.settings.mention_flash }

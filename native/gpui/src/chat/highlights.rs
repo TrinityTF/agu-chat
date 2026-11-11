@@ -4,16 +4,105 @@
 use agu_chat_core::protocol::HighlightRule;
 use fancy_regex::Regex;
 
-use super::types::{Row, RowBody};
+use super::types::{KickBadge, Row, RowBody, YouTubeBadge};
 
 /// What a rule looks at: the message text and who wrote it.
 pub struct MatchInput {
     pub text: String,
     pub login: String,
     pub name: String,
+    /// the author's badges as the normalised ids of `BADGES` (empty where the platform has none)
+    pub badges: Vec<&'static str>,
+}
+
+/// The badge ids a `badge` rule can name, with their Settings labels.
+pub const BADGES: [(&str, &str); 6] = [
+    ("broadcaster", "Broadcaster"),
+    ("moderator", "Moderator"),
+    ("lead_moderator", "Lead Moderator"),
+    ("verified", "Verified"),
+    ("vip", "VIP"),
+    ("founder", "Founder"),
+];
+
+/// Light row tints for "Add badge rules" (Chatterino-like), in `BADGES` order.
+pub const BADGE_COLORS: [&str; 6] = ["#ff5c5c", "#3fcf5a", "#5cf27a", "#8fb8a0", "#ff6ec7", "#b48cff"];
+
+pub fn is_badge_id(id: &str) -> bool {
+    BADGES.iter().any(|(b, _)| *b == id)
+}
+
+fn badge_const(id: &str) -> Option<&'static str> {
+    BADGES.iter().find(|(b, _)| *b == id).map(|(b, _)| *b)
+}
+
+/// Twitch IRC `badges` tag ("broadcaster/1,moderator/1,partner/1") -> ids. `partner` is the verified checkmark.
+pub fn twitch_badge_ids(tag: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for set in tag.split(',').map(|b| b.split('/').next().unwrap_or("")) {
+        let id = if set == "partner" { Some("verified") } else { badge_const(set) };
+        if let Some(id) = id {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// Kick badges (`type`: broadcaster, moderator, vip, founder, verified, ...) plus the user's verified flag.
+/// Kick has no lead moderator.
+pub fn kick_badge_ids(badges: &[KickBadge], verified: bool) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for b in badges {
+        if let Some(id) = badge_const(&b.r#type) {
+            if id != "lead_moderator" && !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    if verified && !out.contains(&"verified") {
+        out.push("verified");
+    }
+    out
+}
+
+/// YouTube badge icon types: OWNER is the channel owner (broadcaster). Members and others map to nothing.
+pub fn youtube_badge_ids(badges: &[YouTubeBadge]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for b in badges {
+        let id = match b.icon.as_str() {
+            "OWNER" => "broadcaster",
+            "MODERATOR" => "moderator",
+            "VERIFIED" => "verified",
+            _ => continue,
+        };
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Rumble badge ids ("moderator", "verified", "broadcaster"/"streamer" for the channel owner, ...).
+pub fn rumble_badge_ids(badges: &[String]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for b in badges {
+        let id = match b.as_str() {
+            "broadcaster" | "streamer" => "broadcaster",
+            "moderator" => "moderator",
+            "verified" => "verified",
+            _ => continue,
+        };
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 enum Test {
+    Badge(&'static str),
     Phrase { needle: String, cs: bool },
     Regex(Regex),
     User(Vec<String>, bool),
@@ -82,6 +171,7 @@ fn compile_rule(rule: &HighlightRule) -> Option<Compiled> {
     let test = match rule.kind.as_str() {
         "phrase" => Test::Phrase { needle: pattern.to_string(), cs },
         "regex" => Test::Regex(build_regex(pattern, cs).ok()?),
+        "badge" => Test::Badge(badge_const(&pattern.to_lowercase())?),
         "user" => {
             let names: Vec<String> = rule_users(pattern).into_iter().map(|s| if cs { s } else { s.to_lowercase() }).collect();
             if names.is_empty() {
@@ -104,10 +194,13 @@ impl Highlighter {
         self.list.len()
     }
 
-    /// The first enabled rule (in list order) that matches.
+    /// The first enabled rule (in list order) that matches. Badge rules come after every phrase, regex and
+    /// user rule, whatever the list order; among themselves they keep list order.
     pub fn matches(&self, m: &MatchInput) -> Option<&HighlightRule> {
-        for c in &self.list {
+        let (badge, other): (Vec<&Compiled>, Vec<&Compiled>) = self.list.iter().partition(|c| matches!(c.test, Test::Badge(_)));
+        for c in other.into_iter().chain(badge) {
             let hit = match &c.test {
+                Test::Badge(id) => m.badges.contains(id),
                 Test::Phrase { needle, cs } => phrase_hit(&m.text, needle, *cs),
                 Test::Regex(re) => re.is_match(&m.text).unwrap_or(false),
                 Test::User(names, cs) => {
@@ -152,11 +245,11 @@ pub fn kick_plain(text: &str) -> String {
 /// The text and author a rule is matched against, or None for rows rules never apply to (system lines).
 pub fn match_input_of(row: &Row) -> Option<MatchInput> {
     Some(match &row.body {
-        RowBody::Msg(m) => MatchInput { text: m.text.clone(), login: m.user.login.clone(), name: m.user.name.clone() },
-        RowBody::Rumble(m) => MatchInput { text: m.text.clone(), login: m.user.login.clone(), name: m.user.name.clone() },
-        RowBody::Kick(m) => MatchInput { text: kick_plain(&m.text), login: m.user.login.clone(), name: m.user.name.clone() },
-        RowBody::YouTube(m) => MatchInput { text: m.text.clone(), login: String::new(), name: m.user.name.clone() },
-        RowBody::X(m) => MatchInput { text: m.text.clone(), login: m.user.login.clone(), name: m.user.name.clone() },
+        RowBody::Msg(m) => MatchInput { text: m.text.clone(), login: m.user.login.clone(), name: m.user.name.clone(), badges: twitch_badge_ids(&m.badges) },
+        RowBody::Rumble(m) => MatchInput { text: m.text.clone(), login: m.user.login.clone(), name: m.user.name.clone(), badges: rumble_badge_ids(&m.badges) },
+        RowBody::Kick(m) => MatchInput { text: kick_plain(&m.text), login: m.user.login.clone(), name: m.user.name.clone(), badges: kick_badge_ids(&m.badges, m.user.verified) },
+        RowBody::YouTube(m) => MatchInput { text: m.text.clone(), login: String::new(), name: m.user.name.clone(), badges: youtube_badge_ids(&m.badges) },
+        RowBody::X(m) => MatchInput { text: m.text.clone(), login: m.user.login.clone(), name: m.user.name.clone(), badges: Vec::new() },
         _ => return None,
     })
 }
@@ -212,7 +305,7 @@ mod tests {
         HighlightRule { id: "r".into(), enabled: true, kind: kind.into(), pattern: pattern.into(), case_sensitive: false, color: "#ff9f1a".into(), sound: false, sound_file: String::new(), flash: false }
     }
     fn msg(text: &str, login: &str, name: &str) -> MatchInput {
-        MatchInput { text: text.into(), login: login.into(), name: name.into() }
+        MatchInput { text: text.into(), login: login.into(), name: name.into(), badges: vec![] }
     }
 
     #[test]
@@ -320,5 +413,85 @@ mod tests {
         let mut r = rule("phrase", "x");
         r.color = "#FF9F1A".into();
         assert_eq!(next_rule_color(&[r]), "#2bd4a4");
+    }
+
+    fn with_badges(badges: &[&'static str]) -> MatchInput {
+        MatchInput { text: "hello".into(), login: "s".into(), name: "s".into(), badges: badges.to_vec() }
+    }
+
+    #[test]
+    fn badge_rules_match_by_id() {
+        let h = compile_highlights(&[rule("badge", "vip"), rule("badge", " Moderator ")]);
+        assert!(h.matches(&with_badges(&["vip"])).is_some());
+        assert!(h.matches(&with_badges(&["moderator"])).is_some());
+        assert!(h.matches(&with_badges(&["founder"])).is_none());
+        assert!(h.matches(&with_badges(&[])).is_none());
+        assert_eq!(compile_highlights(&[rule("badge", "nonsense"), rule("badge", "")]).size(), 0);
+        let mut off = rule("badge", "vip");
+        off.enabled = false;
+        assert!(compile_highlights(&[off]).matches(&with_badges(&["vip"])).is_none());
+    }
+
+    #[test]
+    fn badge_rules_rank_after_phrase_regex_and_user_rules() {
+        let mut vip = rule("badge", "vip");
+        vip.color = "#111111".into();
+        let mut phrase = rule("phrase", "hello");
+        phrase.color = "#222222".into();
+        let mut user = rule("user", "s");
+        user.color = "#333333".into();
+        let m = with_badges(&["vip"]);
+        // the badge rule is first in the list but loses to a phrase rule
+        assert_eq!(compile_highlights(&[vip.clone(), phrase.clone()]).matches(&m).unwrap().color, "#222222");
+        assert_eq!(compile_highlights(&[vip.clone(), user]).matches(&m).unwrap().color, "#333333");
+        // with no other rule matching, the badge rule applies
+        let mut other = rule("phrase", "nothing");
+        other.color = "#444444".into();
+        assert_eq!(compile_highlights(&[vip.clone(), other]).matches(&m).unwrap().color, "#111111");
+        // among badge rules, list order
+        let mut modr = rule("badge", "moderator");
+        modr.color = "#555555".into();
+        let both = with_badges(&["moderator", "vip"]);
+        assert_eq!(compile_highlights(&[modr.clone(), vip.clone()]).matches(&both).unwrap().color, "#555555");
+        assert_eq!(compile_highlights(&[vip, modr]).matches(&both).unwrap().color, "#111111");
+    }
+
+    #[test]
+    fn twitch_badges_map() {
+        assert_eq!(twitch_badge_ids("broadcaster/1,moderator/1,subscriber/12"), vec!["broadcaster", "moderator"]);
+        assert_eq!(twitch_badge_ids("lead_moderator/1,partner/1,vip/1,founder/0"), vec!["lead_moderator", "verified", "vip", "founder"]);
+        assert!(twitch_badge_ids("").is_empty());
+        assert!(twitch_badge_ids("subscriber/3000,bits/100").is_empty());
+    }
+
+    #[test]
+    fn kick_badges_map() {
+        let b = |t: &str| KickBadge { r#type: t.into(), ..Default::default() };
+        assert_eq!(kick_badge_ids(&[b("broadcaster"), b("subscriber"), b("og"), b("vip")], false), vec!["broadcaster", "vip"]);
+        assert_eq!(kick_badge_ids(&[b("moderator"), b("founder")], true), vec!["moderator", "founder", "verified"]);
+        assert_eq!(kick_badge_ids(&[b("verified")], true), vec!["verified"]);
+        assert!(kick_badge_ids(&[], false).is_empty());
+    }
+
+    #[test]
+    fn youtube_badges_map() {
+        let b = |icon: &str| YouTubeBadge { icon: icon.into(), ..Default::default() };
+        assert_eq!(youtube_badge_ids(&[b("OWNER"), b("MODERATOR"), b("VERIFIED"), b("")]), vec!["broadcaster", "moderator", "verified"]);
+        assert!(youtube_badge_ids(&[b("")]).is_empty());
+    }
+
+    #[test]
+    fn rumble_badges_map() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(rumble_badge_ids(&v(&["moderator", "whale-gray", "verified"])), vec!["moderator", "verified"]);
+        assert_eq!(rumble_badge_ids(&v(&["streamer"])), vec!["broadcaster"]);
+        assert!(rumble_badge_ids(&[]).is_empty());
+    }
+
+    #[test]
+    fn badge_defaults_are_consistent() {
+        assert_eq!(BADGES.len(), BADGE_COLORS.len());
+        assert!(BADGE_COLORS.iter().all(|c| parse_hex(c) != (145, 71, 255)));
+        assert!(is_badge_id("lead_moderator") && !is_badge_id("subscriber"));
     }
 }
