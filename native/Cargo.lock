@@ -58,6 +58,7 @@ dependencies = [
  "regex",
  "reqwest",
  "resvg",
+ "security-framework",
  "serde",
  "serde_json",
  "sha1",

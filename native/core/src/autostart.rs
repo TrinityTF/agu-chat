@@ -42,13 +42,58 @@ pub fn sync(enabled: bool) -> Result<(), String> {
     res
 }
 
-#[cfg(not(windows))]
+/// macOS: a LaunchAgent in ~/Library/LaunchAgents that runs this exe at login.
+#[cfg(target_os = "macos")]
+pub fn sync(enabled: bool) -> Result<(), String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let path = std::path::PathBuf::from(home).join("Library/LaunchAgents/lol.agu.chat.plist");
+    if !enabled {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("remove {}: {e}", path.display())),
+        };
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let plist = launch_agent_plist(&exe.to_string_lossy());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, plist).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// The LaunchAgent: run the app once at login (no KeepAlive, so quitting it keeps it quit).
+pub fn launch_agent_plist(exe: &str) -> String {
+    let esc = exe.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>lol.agu.chat</string>
+  <key>ProgramArguments</key><array><string>{esc}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+"#
+    )
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn sync(_enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_agent_escapes_the_path() {
+        let p = super::launch_agent_plist("/Applications/A & B.app/Contents/MacOS/Agu Chat");
+        assert!(p.contains("<string>/Applications/A &amp; B.app/Contents/MacOS/Agu Chat</string>"));
+        assert!(p.contains("<key>RunAtLoad</key><true/>"));
+    }
+
     #[test]
     fn quotes_the_exe() {
         assert_eq!(super::command_line(std::path::Path::new(r"C:\Program Files\Agu Chat\Agu Chat.exe")), r#""C:\Program Files\Agu Chat\Agu Chat.exe""#);

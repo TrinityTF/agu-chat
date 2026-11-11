@@ -6,6 +6,9 @@
 //!
 //! so a secrets.bin written by the Electron app opens here, and the other way round. Data without the v10
 //! prefix is a bare DPAPI blob (what very old Chromium versions wrote), which is still readable.
+//!
+//! On macOS the same file layout is used, but the 32-byte key lives in the login Keychain (a generic password,
+//! base64), the way Chromium keeps its "Safe Storage" secret there.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -35,6 +38,13 @@ impl SafeStorage {
         if let Some(k) = *guard {
             return Ok(k);
         }
+        #[cfg(target_os = "macos")]
+        {
+            let k = keychain::load_or_create()?;
+            *guard = Some(k);
+            return Ok(k);
+        }
+        #[allow(unreachable_code)]
         let state: Value = std::fs::read(&self.local_state).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| json!({}));
         let b64 = state.pointer("/os_crypt/encrypted_key").and_then(Value::as_str);
         let key = match b64 {
@@ -66,7 +76,7 @@ impl SafeStorage {
     }
 
     pub fn is_encryption_available(&self) -> bool {
-        cfg!(windows) && self.key().is_ok()
+        cfg!(any(windows, target_os = "macos")) && self.key().is_ok()
     }
 
     pub fn decrypt_string(&self, buf: &[u8]) -> Result<String, String> {
@@ -122,6 +132,36 @@ mod dpapi {
             let mut out = CRYPT_INTEGER_BLOB::default();
             CryptProtectData(&blob(data), None, None, None, None, 0, &mut out).map_err(|e| format!("CryptProtectData failed: {e}"))?;
             Ok(take(out))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod keychain {
+    use base64::Engine;
+    use security_framework::passwords::{get_generic_password, set_generic_password};
+
+    const SERVICE: &str = "Agu Chat Safe Storage";
+    const ACCOUNT: &str = "Agu Chat";
+    /// errSecItemNotFound
+    const NOT_FOUND: i32 = -25300;
+
+    /// The key from the Keychain, or a fresh random one saved there on first run.
+    pub fn load_or_create() -> Result<[u8; 32], String> {
+        match get_generic_password(SERVICE, ACCOUNT) {
+            Ok(stored) => {
+                let raw = base64::engine::general_purpose::STANDARD.decode(&stored).map_err(|e| format!("Keychain key is not base64: {e}"))?;
+                <[u8; 32]>::try_from(raw.as_slice()).map_err(|_| "Keychain key is not 32 bytes".to_string())
+            }
+            Err(e) if e.code() == NOT_FOUND => {
+                use rand::RngCore;
+                let mut k = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut k);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(k);
+                set_generic_password(SERVICE, ACCOUNT, b64.as_bytes()).map_err(|e| format!("Keychain: could not save the key: {e}"))?;
+                Ok(k)
+            }
+            Err(e) => Err(format!("Keychain: {e}")),
         }
     }
 }

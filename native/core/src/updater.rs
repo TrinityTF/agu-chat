@@ -160,8 +160,15 @@ pub fn allowed_on_channel(channel: &str, current: &str, version: &str) -> bool {
 }
 
 /// `Agu-Chat-Setup-<version>-x64.exe`: the one installer asset the updater downloads.
+#[cfg(not(target_os = "macos"))]
 pub fn installer_asset_name(version: &str) -> String {
     format!("Agu-Chat-Setup-{version}-x64.exe")
+}
+
+/// macOS: the zipped app bundle (`Agu-Chat-<version>-mac.zip`); only releases that carry it are offered.
+#[cfg(target_os = "macos")]
+pub fn installer_asset_name(version: &str) -> String {
+    format!("Agu-Chat-{version}-mac.zip")
 }
 
 /// A file attached to a release.
@@ -502,6 +509,15 @@ impl Installer for NativeInstaller {
     fn install(&self) -> BoxFuture<'static, Result<(), String>> {
         let (ready, quit, log) = (self.ready.clone(), self.quit.clone(), self.log.clone());
         Box::pin(async move {
+            // macOS: no in-place swap of the .app yet; the new version is downloaded from the release page
+            #[cfg(target_os = "macos")]
+            {
+                let _ = (&ready, &quit);
+                log.log("[updater] macOS: opening the release page");
+                crate::backend::shell_open("https://github.com/TrinityTF/agu-chat/releases/latest");
+                return Ok(());
+            }
+            #[allow(unreachable_code)]
             let path = ready.lock().unwrap().clone().ok_or_else(|| "No update is ready to install.".to_string())?;
             if !path.is_file() {
                 return Err("The downloaded update is gone. Check for updates again.".into());
