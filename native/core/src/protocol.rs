@@ -336,6 +336,8 @@ pub trait AguBridge: Send + Sync + 'static {
     fn updater_get(&self) -> UpdaterState;
     fn updater_check(&self) -> BoxFuture<'static, ()>;
     fn updater_install(&self) -> BoxFuture<'static, ()>;
+    /// The app is quitting: install a downloaded update (without starting it). Must not block for long.
+    fn updater_install_on_exit(&self) {}
     fn on_updater(&self, cb: Arc<dyn Fn(&UpdaterState) + Send + Sync>) -> Unsubscribe;
 
     fn app_info(&self) -> AppInfo;

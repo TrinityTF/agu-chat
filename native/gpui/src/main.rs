@@ -115,6 +115,16 @@ fn main() {
             }
         }
         chat::services::init(cx, bridge.clone(), data_dir);
+        // Quitting with a downloaded update installs it (without starting the new version). After "Restart to
+        // update" the update has already started and this does nothing.
+        cx.on_app_quit({
+            let bridge = bridge.clone();
+            move |_| {
+                bridge.updater_install_on_exit();
+                async {}
+            }
+        })
+        .detach();
 
         // Where the window opens: its saved bounds, pulled back onto a screen when needed (windowState.js).
         let saved = window_state::load();

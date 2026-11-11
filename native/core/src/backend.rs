@@ -369,6 +369,10 @@ impl AguBridge for Backend {
         )
     }
 
+    fn updater_install_on_exit(&self) {
+        self.inner.updater.install_on_exit();
+    }
+
     fn on_updater(&self, cb: Arc<dyn Fn(&UpdaterState) + Send + Sync>) -> Unsubscribe {
         let l = self.inner.updater_cbs.clone();
         let id = l.on(cb);

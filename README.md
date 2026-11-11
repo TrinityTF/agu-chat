@@ -126,7 +126,7 @@
 2. Click **Add a channel** in a new tab. Add channels from several platforms to one split to merge them.
 3. Log in to the platforms you want to write in under **Settings → Accounts**.
 
-Agu Chat keeps itself up to date on Windows. On a Mac, it tells you when a new version is out and opens the download page.
+Agu Chat keeps itself up to date after that.
 
 <details>
 <summary><b>Shortcuts and how-tos</b></summary>
@@ -181,7 +181,7 @@ In **Settings → Updates** choose a channel:
 - **Beta:** every new release, so you get new features first.
 - **Stable:** only full releases (version 1.0.0 and up). Until 1.0.0 is out, every release is a beta, so Stable also receives them.
 
-On Windows, new versions download in the background and install when you close Agu Chat, or right away with **Restart to update**. Switching from Beta to Stable keeps your current version until a newer stable one is out.
+New versions download in the background and install when you close Agu Chat, or right away with **Restart to update**. On a Mac this needs Agu Chat to be in Applications (or another folder you can write to); otherwise **Restart to update** opens the download page. Switching from Beta to Stable keeps your current version until a newer stable one is out.
 
 ## Privacy
 

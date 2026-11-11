@@ -381,6 +381,8 @@ pub trait Installer: Send + Sync {
     fn download(&self, release: &Release, progress: Arc<dyn Fn(f32) + Send + Sync>) -> BoxFuture<'static, Result<(), InstallError>>;
     /// Quits into the downloaded update ("Restart to update").
     fn install(&self) -> BoxFuture<'static, Result<(), String>>;
+    /// The app is quitting with a downloaded update: install it without starting the new version.
+    fn install_on_exit(&self) {}
 }
 
 pub struct NoInstaller;
@@ -400,8 +402,11 @@ impl Installer for NoInstaller {
 /// Called by `NativeInstaller::install` once the installer runs: the UI quits the app (flushing its files first).
 pub type QuitHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
-/// The installer of the native app: `Agu-Chat-Setup-<version>-x64.exe` from the release's assets (see the
-/// module docs and docs/GPUI-PORT.md). The download is size- and sha256-checked before it counts as ready.
+/// The update of the native app, from the release's assets (see the module docs and docs/GPUI-PORT.md). The download
+/// is size- and sha256-checked before it counts as ready.
+///   Windows: `Agu-Chat-Setup-<version>-x64.exe`, run silently (`/S`, plus `/R` to start the new version).
+///   macOS:   `Agu-Chat-<version>-mac.zip`, unpacked and signature-checked when downloaded; installing swaps the
+///            running `Agu Chat.app` for the new one (a small shell script that waits for this process to exit).
 pub struct NativeInstaller {
     dir: PathBuf,
     client: reqwest::Client,
@@ -435,7 +440,7 @@ fn hex(bytes: &[u8]) -> String {
 
 impl Installer for NativeInstaller {
     fn supported(&self) -> bool {
-        cfg!(windows)
+        cfg!(any(windows, target_os = "macos"))
     }
 
     fn download(&self, release: &Release, progress: Arc<dyn Fn(f32) + Send + Sync>) -> BoxFuture<'static, Result<(), InstallError>> {
@@ -455,7 +460,8 @@ impl Installer for NativeInstaller {
             // older downloads are leftovers
             if let Ok(rd) = std::fs::read_dir(&dir) {
                 for e in rd.flatten() {
-                    let _ = std::fs::remove_file(e.path());
+                    let p = e.path();
+                    let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
                 }
             }
 
@@ -501,6 +507,8 @@ impl Installer for NativeInstaller {
             }
             let done = dir.join(&asset.name);
             std::fs::rename(&part, &done).map_err(|e| fail(e.to_string()))?;
+            #[cfg(target_os = "macos")]
+            let done = mac::unpack(&done, &dir).map_err(fail)?;
             *ready.lock().unwrap() = Some(done);
             Ok(())
         })
@@ -509,37 +517,177 @@ impl Installer for NativeInstaller {
     fn install(&self) -> BoxFuture<'static, Result<(), String>> {
         let (ready, quit, log) = (self.ready.clone(), self.quit.clone(), self.log.clone());
         Box::pin(async move {
-            // macOS: no in-place swap of the .app yet; the new version is downloaded from the release page
-            #[cfg(target_os = "macos")]
-            {
-                let _ = (&ready, &quit);
-                log.log("[updater] macOS: opening the release page");
-                crate::backend::shell_open("https://github.com/TrinityTF/agu-chat/releases/latest");
-                return Ok(());
+            match take_and_launch(&ready, true, &log) {
+                Ok(()) => {
+                    log.log("[updater] update started, quitting");
+                    let hook = quit.lock().unwrap().clone();
+                    match hook {
+                        Some(h) => h(),
+                        None => std::process::exit(0),
+                    }
+                    Ok(())
+                }
+                // macOS: an app that cannot replace itself (not in a folder it may write to, or started straight
+                // from the zip) is updated by hand from the release page instead
+                #[cfg(target_os = "macos")]
+                Err(e) => {
+                    log.log(&format!("[updater] macOS: {e}; opening the release page"));
+                    crate::backend::shell_open(RELEASES_PAGE);
+                    Ok(())
+                }
+                #[cfg(not(target_os = "macos"))]
+                Err(e) => Err(e),
             }
-            #[allow(unreachable_code)]
-            let path = ready.lock().unwrap().clone().ok_or_else(|| "No update is ready to install.".to_string())?;
-            if !path.is_file() {
-                return Err("The downloaded update is gone. Check for updates again.".into());
-            }
-            // Silent install, then the new copy starts (/R). The installer waits for this process to let go of
-            // "Agu Chat.exe", so we only have to quit right after starting it.
-            let mut cmd = std::process::Command::new(&path);
-            cmd.args(["/S", "/R"]);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-            }
-            cmd.spawn().map_err(|e| format!("Could not start the installer: {e}"))?;
-            log.log("[updater] installer started, quitting");
-            let hook = quit.lock().unwrap().clone();
-            match hook {
-                Some(h) => h(),
-                None => std::process::exit(0),
-            }
-            Ok(())
         })
+    }
+
+    fn install_on_exit(&self) {
+        match take_and_launch(&self.ready, false, &self.log) {
+            Ok(()) => self.log.log("[updater] installing the downloaded update on exit"),
+            Err(e) => self.log.log(&format!("[updater] update not installed on exit: {e}")),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+const RELEASES_PAGE: &str = "https://github.com/TrinityTF/agu-chat/releases/latest";
+
+/// Starts the ready update once: the slot is emptied, and put back if starting fails.
+fn take_and_launch(ready: &Mutex<Option<PathBuf>>, relaunch: bool, log: &Logger) -> Result<(), String> {
+    let path = ready.lock().unwrap().take().ok_or_else(|| "No update is ready to install.".to_string())?;
+    match launch_update(&path, relaunch, log) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            *ready.lock().unwrap() = Some(path);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn launch_update(path: &std::path::Path, relaunch: bool, _log: &Logger) -> Result<(), String> {
+    if !path.is_file() {
+        return Err("The downloaded update is gone. Check for updates again.".into());
+    }
+    // Silent install; /R starts the new copy afterwards. The installer waits for this process to let go of
+    // "Agu Chat.exe", so the app only has to quit right after starting it.
+    let mut cmd = std::process::Command::new(path);
+    cmd.arg("/S");
+    if relaunch {
+        cmd.arg("/R");
+    }
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    cmd.spawn().map_err(|e| format!("Could not start the installer: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_update(new_app: &std::path::Path, relaunch: bool, log: &Logger) -> Result<(), String> {
+    mac::launch(new_app, relaunch, log)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn launch_update(_: &std::path::Path, _: bool, _: &Logger) -> Result<(), String> {
+    Err("Installing updates is not available on this system yet.".into())
+}
+
+/// `.../Agu Chat.app/Contents/MacOS/Agu Chat` -> `.../Agu Chat.app` (None when the program is not inside an app bundle).
+pub fn app_bundle_of(exe: &std::path::Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let app = contents.parent()?;
+    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && app.extension()? == "app").then(|| app.to_path_buf())
+}
+
+/// Swaps the app bundle once the app has quit: `$0 <pid> <new .app> <installed .app> <1 = open it afterwards>`.
+/// The new bundle is copied next to the old one first, so the swap itself is two renames in the same folder, and
+/// the old bundle is put back if the second rename fails. Waits at most 30 s for the app to exit.
+pub const MAC_SWAP_SCRIPT: &str = r#"pid="$1"; new="$2"; app="$3"; relaunch="$4"
+i=0
+while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+tmp="$app.updating"; old="$app.old"
+rm -rf "$tmp" "$old"
+ditto "$new" "$tmp" || { rm -rf "$tmp"; exit 1; }
+xattr -dr com.apple.quarantine "$tmp" 2>/dev/null
+if mv "$app" "$old"; then
+  if mv "$tmp" "$app"; then rm -rf "$old"; else mv "$old" "$app"; fi
+fi
+rm -rf "$tmp" "$new"
+if [ "$relaunch" = 1 ]; then open "$app"; fi
+"#;
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    use crate::log::Logger;
+
+    /// Unpacks the downloaded zip into `<dir>/staged` and checks the app inside (its program is there and its
+    /// signature is intact). The zip is removed; the unpacked `Agu Chat.app` is what gets installed.
+    pub fn unpack(zip: &Path, dir: &Path) -> Result<PathBuf, String> {
+        let staged = dir.join("staged");
+        let _ = std::fs::remove_dir_all(&staged);
+        let ok = Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(zip).arg(&staged).status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            return Err("Could not unpack the update.".into());
+        }
+        let app = staged.join("Agu Chat.app");
+        if !app.join("Contents/MacOS/Agu Chat").is_file() {
+            return Err("The update has no Agu Chat app inside.".into());
+        }
+        let signed = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&app)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !signed {
+            return Err("The update's signature did not check out.".into());
+        }
+        let _ = std::fs::remove_file(zip);
+        Ok(app)
+    }
+
+    /// Can this process create files in `dir`? (The installed app's folder; false for an app started from a
+    /// read-only place, such as the copy macOS runs when the app was opened straight from Downloads.)
+    fn writable(dir: &Path) -> bool {
+        let probe = dir.join(format!(".agu-chat-update-{}", std::process::id()));
+        let ok = std::fs::write(&probe, b"").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        ok
+    }
+
+    pub fn launch(new_app: &Path, relaunch: bool, log: &Logger) -> Result<(), String> {
+        if !new_app.join("Contents/MacOS/Agu Chat").is_file() {
+            return Err("The downloaded update is gone. Check for updates again.".into());
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let app = super::app_bundle_of(&exe).ok_or("Agu Chat is not running from its app bundle")?;
+        let folder = app.parent().ok_or("Agu Chat's folder is unknown")?;
+        if !writable(folder) {
+            return Err(format!("cannot write to {}", folder.display()));
+        }
+        use std::os::unix::process::CommandExt;
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(super::MAC_SWAP_SCRIPT)
+            .arg("agu-chat-update")
+            .arg(std::process::id().to_string())
+            .arg(new_app)
+            .arg(&app)
+            .arg(if relaunch { "1" } else { "0" })
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0) // not taken down with the app
+            .spawn()
+            .map_err(|e| format!("Could not start the update: {e}"))?;
+        log.log(&format!("[updater] macOS: replacing {} after exit", app.display()));
+        Ok(())
     }
 }
 
@@ -825,6 +973,15 @@ impl Updater {
         }
     }
 
+    /// The app is quitting: a downloaded update is installed now (without starting it), like "Restart to update"
+    /// minus the restart.
+    pub fn install_on_exit(&self) {
+        let ready = self.inner.lock().unwrap().enabled && self.get_state().status == "ready";
+        if ready {
+            self.installer.install_on_exit();
+        }
+    }
+
     /// Restarts the app into the downloaded update ("Restart to update").
     pub fn install(&self) -> BoxFuture<'static, Result<(), String>> {
         let ready = self.inner.lock().unwrap().enabled && self.get_state().status == "ready";
@@ -977,7 +1134,10 @@ second line", None), "boom");
         use sha2::{Digest, Sha256};
         let dir = std::env::temp_dir().join(format!("agu-upd-{}", crate::util::uuid_v4()));
         let log = Arc::new(Logger::new(&dir, true));
+        #[cfg(not(target_os = "macos"))]
         let body = b"MZ pretend installer bytes".to_vec();
+        #[cfg(target_os = "macos")]
+        let body = mac_test_zip(&dir);
         let url = serve(body.clone());
         let good: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
         let mk = |digest: Option<String>, size: u64| Release {
@@ -994,7 +1154,16 @@ second line", None), "boom");
         assert!(inst.download(&mk(Some(format!("sha256:{good}")), body.len() as u64), progress.clone()).await.is_ok());
         assert_eq!(*seen.lock().unwrap(), 1.0);
         let done = dir.join("updates").join(installer_asset_name("0.1.0"));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(std::fs::read(&done).unwrap(), body);
+        // macOS: the zip is unpacked and its signed app is what is ready
+        #[cfg(target_os = "macos")]
+        {
+            let app = dir.join("updates/staged/Agu Chat.app");
+            assert_eq!(inst.ready.lock().unwrap().clone(), Some(app.clone()));
+            assert_eq!(std::fs::read_to_string(app.join("Contents/MacOS/Agu Chat")).unwrap(), "#!/bin/sh\n");
+            assert!(!done.exists());
+        }
         // wrong hash: refused, nothing left behind
         let bad = format!("sha256:{}", "0".repeat(64));
         assert!(matches!(inst.download(&mk(Some(bad), body.len() as u64), progress.clone()).await, Err(InstallError::Failed(m)) if m.contains("checksum")));
@@ -1008,6 +1177,69 @@ second line", None), "boom");
         #[cfg(not(target_os = "macos"))]
         assert!(inst.install().await.is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A zipped, ad-hoc signed `Agu Chat.app` like the release's (bundle.sh), built with the system tools.
+    #[cfg(target_os = "macos")]
+    fn mac_test_zip(dir: &std::path::Path) -> Vec<u8> {
+        let src = dir.join("zipsrc");
+        let app = src.join("Agu Chat.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/Agu Chat"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Agu Chat</string><key>CFBundleIdentifier</key><string>lol.agu.chat.test</string></dict></plist>"#,
+        )
+        .unwrap();
+        let run = |cmd: &str, args: &[&std::ffi::OsStr]| assert!(std::process::Command::new(cmd).args(args).status().unwrap().success(), "{cmd} failed");
+        run("/usr/bin/codesign", &["--force".as_ref(), "--deep".as_ref(), "--sign".as_ref(), "-".as_ref(), app.as_os_str()]);
+        let zip = src.join("app.zip");
+        run("/usr/bin/ditto", &["-c".as_ref(), "-k".as_ref(), "--keepParent".as_ref(), app.as_os_str(), zip.as_os_str()]);
+        std::fs::read(&zip).unwrap()
+    }
+
+    #[test]
+    fn the_app_bundle_is_found_from_its_program() {
+        let exe = std::path::Path::new("/Applications/Agu Chat.app/Contents/MacOS/Agu Chat");
+        assert_eq!(app_bundle_of(exe), Some(PathBuf::from("/Applications/Agu Chat.app")));
+        assert_eq!(app_bundle_of(std::path::Path::new("/Users/me/dev/target/release/agu-chat-gpui")), None);
+        assert_eq!(app_bundle_of(std::path::Path::new("/Applications/Agu Chat/Contents/MacOS/Agu Chat")), None);
+    }
+
+    /// The real swap script on a fake installed app: the new bundle takes its place, nothing is left beside it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_swap_script_replaces_the_app_bundle() {
+        let root = std::env::temp_dir().join(format!("agu-swap-{}", crate::util::uuid_v4()));
+        let make = |app: &std::path::Path, text: &str| {
+            std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            std::fs::write(app.join("Contents/MacOS/Agu Chat"), text).unwrap();
+        };
+        let installed = root.join("Applications/Agu Chat.app");
+        let staged = root.join("updates/staged/Agu Chat.app");
+        make(&installed, "old");
+        make(&staged, "new");
+        // a pid that has already exited, so the script does not wait
+        let mut done = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = done.id();
+        done.wait().unwrap();
+        let st = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(MAC_SWAP_SCRIPT)
+            .arg("agu-chat-update")
+            .arg(pid.to_string())
+            .arg(&staged)
+            .arg(&installed)
+            .arg("0")
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert_eq!(std::fs::read_to_string(installed.join("Contents/MacOS/Agu Chat")).unwrap(), "new");
+        let mut left: Vec<String> = std::fs::read_dir(root.join("Applications")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, vec!["Agu Chat.app".to_string()]);
+        assert!(!staged.exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
