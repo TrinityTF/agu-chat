@@ -180,6 +180,8 @@ pub struct AguApp {
     fit_hooked: bool,
     /// the biggest content area (logical px) the screen leaves for the splits
     fit_max: Option<(f32, f32)>,
+    /// the "Always on top" state last applied to the native window
+    on_top_applied: Option<bool>,
     _subs: Vec<Subscription>,
     _unsubs: Vec<Unsub>,
 }
@@ -235,6 +237,7 @@ impl AguApp {
             fit_prev: None,
             fit_hooked: false,
             fit_max: None,
+            on_top_applied: None,
             _subs: subs,
             _unsubs: Vec::new(),
         };
@@ -1253,6 +1256,15 @@ impl Render for AguApp {
             self.sv.clear_drag();
         }
         self.fit_window(window, cx);
+        if self.on_top_applied != Some(self.settings.always_on_top) {
+            let on = self.settings.always_on_top;
+            self.on_top_applied = Some(on);
+            // after this frame, like the window resizes: native window calls inside render can be lost
+            cx.spawn_in(window, async move |_, cx| {
+                let _ = cx.update(|window, _| window_fit::set_always_on_top(window, on));
+            })
+            .detach();
+        }
         let tabs_bar = self.render_tabs(window, cx);
         let update_bar = self.render_update_bar(cx);
         let content = self.render_split_view(window, cx);

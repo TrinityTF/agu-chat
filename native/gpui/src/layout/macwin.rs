@@ -265,6 +265,15 @@ mod imp {
         }
     }
 
+    /// Keeps the window above other apps' windows (NSFloatingWindowLevel = 3) or back at NSNormalWindowLevel (0).
+    pub fn set_always_on_top(window: &Window, on: bool) {
+        let Some(win) = ns_window(window) else { return };
+        let level: isize = if on { 3 } else { 0 };
+        unsafe {
+            let _: () = msg_send![win, setLevel: level];
+        }
+    }
+
     /// Bounces the Dock icon once (informational, not critical); AppKit ignores it while the app is active.
     pub fn request_attention() {
         unsafe {

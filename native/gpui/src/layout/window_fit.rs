@@ -369,6 +369,15 @@ mod win {
         Some(((wa.width - fw).max(0.0) / scale, (wa.height - fh).max(0.0) / scale))
     }
 
+    /// Keeps the window above other windows (HWND_TOPMOST) or puts it back among them.
+    pub fn set_always_on_top(window: &Window, on: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE};
+        let Some(hwnd) = hwnd_of(window) else { return };
+        unsafe {
+            let _ = SetWindowPos(hwnd, if on { HWND_TOPMOST } else { HWND_NOTOPMOST }, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
     pub fn apply_grow(hwnd: isize, to: Rect) {
         unsafe {
             let _ = SetWindowPos(HWND(hwnd as *mut core::ffi::c_void), None, to.x as i32, to.y as i32, to.width as i32, to.height as i32, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -377,11 +386,11 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{apply_grow, install, max_client, plan_grow, plan_resize, set_min_client};
+pub use win::{apply_grow, install, max_client, plan_grow, plan_resize, set_always_on_top, set_min_client};
 
 /// macOS: the same hooks over AppKit (macwin.rs); there is no message hook to install.
 #[cfg(target_os = "macos")]
-pub use super::macwin::{apply_grow, max_client, plan_grow, plan_resize, set_min_client};
+pub use super::macwin::{apply_grow, max_client, plan_grow, plan_resize, set_always_on_top, set_min_client};
 #[cfg(target_os = "macos")]
 pub fn install(_: &gpui::Window) {}
 
@@ -399,6 +408,8 @@ pub fn plan_resize(_: &gpui::Window, _: f32, _: f32, _: bool, _: bool) -> Option
 }
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn apply_grow(_: isize, _: Rect) {}
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn set_always_on_top(_: &gpui::Window, _: bool) {}
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn max_client(_: &gpui::Window) -> Option<(f32, f32)> {
     None
