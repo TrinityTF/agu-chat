@@ -103,7 +103,7 @@ fn main() {
         };
         if !mock {
             // X login: the core asks for the sign-in window through this hook
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             {
                 layout::x_login::install(cx);
                 layout::youtube_login::install(cx);
