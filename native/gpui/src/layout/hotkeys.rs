@@ -402,6 +402,7 @@ mod tests {
     // Port of test/hotkeys.test.ts
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn parse_binding_reads_modifiers_and_keys_in_any_case_and_order() {
         assert_eq!(parse_binding("ctrl+shift+w"), b(true, false, true, "W"));
         assert_eq!(parse_binding("Shift+Ctrl+W"), b(true, false, true, "W"));
@@ -438,6 +439,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn event_to_binding_uses_physical_keys_and_treats_cmd_as_ctrl() {
         assert_eq!(event_to_binding(&ev("w", "KeyW", true, false, false, false)).as_deref(), Some("Ctrl+W"));
         assert_eq!(event_to_binding(&ev("W", "KeyW", true, false, true, false)).as_deref(), Some("Ctrl+Shift+W"));
@@ -501,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn defaults_match_the_original_shortcuts() {
         let t = resolve_hotkeys(&Value::Null);
         assert_eq!(t[&HotkeyAction::NewTab], v(&["Ctrl+T"]));
@@ -515,6 +518,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn resolve_hotkeys_applies_overrides_and_drops_junk() {
         let t = resolve_hotkeys(&json!({
             "newTab": ["ctrl+n", "ctrl+N", "Q", 7, "bogus+x"],
@@ -544,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn binding_map_and_find_conflicts() {
         let t = resolve_hotkeys(&json!({ "newTab": ["Ctrl+W"] }));
         let m = binding_map(&t);
