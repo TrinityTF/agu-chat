@@ -38,7 +38,20 @@ pub const WHITE: u32 = 0xffffff;
 pub const BLACK: u32 = 0x000000;
 
 /// The font Chromium's `system-ui` resolves to on Windows.
+#[cfg(target_os = "macos")]
+pub const FONT: &str = ".SystemUIFont";
+#[cfg(not(target_os = "macos"))]
 pub const FONT: &str = "Segoe UI";
+/// Monospace for patterns and code-like text (Consolas on Windows, Menlo on macOS).
+#[cfg(target_os = "macos")]
+pub const MONO: &str = "Menlo";
+#[cfg(not(target_os = "macos"))]
+pub const MONO: &str = "Consolas";
+/// The slash-command name in the autocomplete list (Cascadia Mono on Windows).
+#[cfg(target_os = "macos")]
+pub const MONO_CMD: &str = "Menlo";
+#[cfg(not(target_os = "macos"))]
+pub const MONO_CMD: &str = "Cascadia Mono";
 
 /// `var(--color-x)`
 pub fn c(hex: u32) -> Rgba {

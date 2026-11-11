@@ -47,10 +47,31 @@ actions!(
     ]
 );
 
+/// True when a keystroke carries a modifier that makes it a shortcut rather than typing (Cmd counts on macOS only:
+/// the Windows key is not a shortcut modifier there).
+pub fn is_shortcut_mod(m: &gpui::Modifiers) -> bool {
+    m.control || m.alt || (cfg!(target_os = "macos") && m.platform)
+}
+
+/// The "primary" modifier for clicks and shortcuts: Cmd on macOS, Ctrl elsewhere.
+pub fn primary_held(m: &gpui::Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        m.platform
+    } else {
+        m.control
+    }
+}
+
 /// Key bindings the field needs (call once at startup).
 pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
-    cx.bind_keys([
+    cx.bind_keys(common_bindings());
+    cx.bind_keys(platform_bindings());
+}
+
+fn common_bindings() -> Vec<gpui::KeyBinding> {
+    use gpui::KeyBinding;
+    vec![
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("shift-backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
@@ -58,6 +79,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, Some("TextInput")),
         KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
         KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
+        KeyBinding::new("home", Home, Some("TextInput")),
+        KeyBinding::new("end", End, Some("TextInput")),
+        KeyBinding::new("shift-home", SelectHome, Some("TextInput")),
+        KeyBinding::new("shift-end", SelectEnd, Some("TextInput")),
+    ]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_bindings() -> Vec<gpui::KeyBinding> {
+    use gpui::KeyBinding;
+    vec![
         KeyBinding::new("ctrl-left", WordLeft, Some("TextInput")),
         KeyBinding::new("ctrl-right", WordRight, Some("TextInput")),
         KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some("TextInput")),
@@ -71,11 +103,32 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-insert", Copy, Some("TextInput")),
         KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
         KeyBinding::new("shift-delete", Cut, Some("TextInput")),
-        KeyBinding::new("home", Home, Some("TextInput")),
-        KeyBinding::new("end", End, Some("TextInput")),
-        KeyBinding::new("shift-home", SelectHome, Some("TextInput")),
-        KeyBinding::new("shift-end", SelectEnd, Some("TextInput")),
-    ]);
+    ]
+}
+
+/// macOS conventions: Cmd for clipboard / select all / line ends, Option for words, Ctrl+A / Ctrl+E for line ends.
+#[cfg(target_os = "macos")]
+fn platform_bindings() -> Vec<gpui::KeyBinding> {
+    use gpui::KeyBinding;
+    vec![
+        KeyBinding::new("alt-left", WordLeft, Some("TextInput")),
+        KeyBinding::new("alt-right", WordRight, Some("TextInput")),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, Some("TextInput")),
+        KeyBinding::new("alt-shift-right", SelectWordRight, Some("TextInput")),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, Some("TextInput")),
+        KeyBinding::new("alt-delete", DeleteWordRight, Some("TextInput")),
+        KeyBinding::new("cmd-backspace", DeleteWordLeft, Some("TextInput")),
+        KeyBinding::new("cmd-left", Home, Some("TextInput")),
+        KeyBinding::new("cmd-right", End, Some("TextInput")),
+        KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
+        KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-a", Home, Some("TextInput")),
+        KeyBinding::new("ctrl-e", End, Some("TextInput")),
+        KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("cmd-v", Paste, Some("TextInput")),
+        KeyBinding::new("cmd-c", Copy, Some("TextInput")),
+        KeyBinding::new("cmd-x", Cut, Some("TextInput")),
+    ]
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -629,7 +682,7 @@ impl TextInput {
             return;
         }
         let ks = &event.keystroke;
-        if ks.modifiers.control || ks.modifiers.alt {
+        if is_shortcut_mod(&ks.modifiers) {
             return;
         }
         match ks.key.as_str() {
@@ -1353,7 +1406,7 @@ impl Render for TextInput {
             .text_size(px(12.))
             .line_height(px(18.))
             .overflow_hidden()
-            .when(self.mono, |d| d.font_family("Consolas"));
+            .when(self.mono, |d| d.font_family(theme::MONO));
         let child = div().w_full().min_w_0().child(TextElement { input: cx.entity() });
         match self.style {
             InputStyle::Field => base.w_full().rounded(px(4.)).px(px(8.)).py(px(4.)).border_color(if self.invalid { a(theme::RED_500, 0.7) } else { c(if focused { theme::ACCENT } else { theme::LINE }) }).child(child),

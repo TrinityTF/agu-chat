@@ -881,7 +881,7 @@ impl AguApp {
             }
         }
         // Ctrl+F: only the focused split's list reacts, and not while a dialog is open
-        if ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.shift && ks.key == "f" && self.dialog.is_none() {
+        if crate::text_input::primary_held(&ks.modifiers) && !ks.modifiers.alt && !ks.modifiers.shift && ks.key == "f" && self.dialog.is_none() {
             let tab = self.active_tab().clone();
             if let Some(slot) = self.focused_of(&tab).and_then(|id| self.panes.get(&id)) {
                 let v = slot.view.clone();
@@ -1234,7 +1234,7 @@ pub(crate) fn key_like(ks: &Keystroke) -> KeyLike {
         ctrl_key: ks.modifiers.control,
         alt_key: ks.modifiers.alt,
         shift_key: ks.modifiers.shift,
-        meta_key: false, // the Windows key is not Cmd
+        meta_key: cfg!(target_os = "macos") && ks.modifiers.platform, // the Windows key is not Cmd
     }
 }
 

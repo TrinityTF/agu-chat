@@ -614,7 +614,7 @@ impl SettingsDialog {
                             .line_height(px(39.))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(c(theme::TEXT))
-                            .font_family("Consolas")
+                            .font_family(theme::MONO)
                             .child(spaced),
                     )
                     .child(
@@ -966,7 +966,7 @@ impl SettingsDialog {
             .border_1()
             .px(px(6.))
             .py(px(4.))
-            .font_family("Consolas")
+            .font_family(theme::MONO)
             .text_size(px(11.))
             .line_height(px(11.))
             .when(on, |d| d.border_color(c(theme::ACCENT)).bg(theme::mention()).text_color(c(theme::TEXT)))
@@ -1192,7 +1192,7 @@ impl SettingsDialog {
         }
         let Some(b) = event_to_binding(&crate::layout::app::key_like(ks)) else { return };
         if !is_usable_binding(&b) {
-            self.hk_hint = format!("{b} would get in the way of typing. Hold Ctrl or Alt, or use a function key.");
+            self.hk_hint = format!("{} would get in the way of typing. Hold {}, or use a function key.", super::hotkeys::display_binding(&b), if cfg!(target_os = "macos") { "Cmd, Ctrl or Option" } else { "Ctrl or Alt" });
             cx.notify();
             return;
         }
@@ -1255,7 +1255,7 @@ impl SettingsDialog {
                         .line_height(px(16.5))
                         .when(warn, |d| d.border_color(a_amber(0.6)).text_color(c(theme::AMBER_300)))
                         .when(!warn, |d| d.border_color(c(theme::LINE)).bg(c(theme::APP)))
-                        .child(b.clone())
+                        .child(super::hotkeys::display_binding(b))
                         .child(
                             div()
                                 .id(eid(format!("hk-x-{}-{}", id.id(), b)))
@@ -1326,7 +1326,7 @@ impl SettingsDialog {
                         .text_size(px(11.))
                         .line_height(px(16.5))
                         .text_color(c(theme::AMBER_200))
-                        .child(div().min_w_0().flex_1().child(format!("{pb} is already used by \"{}\".", action_label(other))))
+                        .child(div().min_w_0().flex_1().child(format!("{} is already used by \"{}\".", super::hotkeys::display_binding(&pb), action_label(other))))
                         .child(btn(eid("hk-move"), "Move it here", BtnOpts { small: true, ..Default::default() }).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             let mut t = t4.clone();
                             if let Some(l) = t.get_mut(&other) {

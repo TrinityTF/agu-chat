@@ -48,24 +48,34 @@ fn def(id: HotkeyAction, label: &str, group: &'static str, defaults: &[&str]) ->
     HotkeyDef { id, label: label.into(), group, defaults: defaults.iter().map(|s| s.to_string()).collect() }
 }
 
+const MAC: bool = cfg!(target_os = "macos");
+
 /// HOTKEY_ACTIONS
 pub fn hotkey_actions() -> &'static Vec<HotkeyDef> {
     static CELL: OnceLock<Vec<HotkeyDef>> = OnceLock::new();
-    CELL.get_or_init(|| {
-        let mut v = vec![
-            def(HotkeyAction::NewTab, "New tab", "Tabs", &["Ctrl+T"]),
-            def(HotkeyAction::CloseTab, "Close tab", "Tabs", &["Ctrl+Shift+W"]),
-            def(HotkeyAction::NextTab, "Next tab", "Tabs", &["Ctrl+Tab", "Ctrl+PageDown"]),
-            def(HotkeyAction::PrevTab, "Previous tab", "Tabs", &["Ctrl+Shift+Tab", "Ctrl+PageUp"]),
-        ];
-        for n in 1..=8u8 {
-            v.push(def(HotkeyAction::SelectTab(n), &format!("Select tab {n}"), "Tabs", &[&format!("Ctrl+{n}")]));
-        }
-        v.push(def(HotkeyAction::SelectLastTab, "Select last tab", "Tabs", &["Ctrl+9"]));
-        v.push(def(HotkeyAction::CloseSplit, "Close split", "Splits", &["Ctrl+W"]));
-        v.push(def(HotkeyAction::OpenSettings, "Open / close settings", "Window", &["Ctrl+P"]));
-        v
-    })
+    CELL.get_or_init(|| build_actions(MAC))
+}
+
+/// The action list with the defaults of one platform: macOS uses Cmd where Windows uses Ctrl (Chrome's Mac
+/// shortcuts for switching tabs), keeps Ctrl+Tab, and adds the Cmd+, Settings shortcut every Mac app has.
+fn build_actions(mac: bool) -> Vec<HotkeyDef> {
+    let p = if mac { "Cmd" } else { "Ctrl" };
+    let next: Vec<&str> = if mac { vec!["Ctrl+Tab", "Cmd+Shift+]"] } else { vec!["Ctrl+Tab", "Ctrl+PageDown"] };
+    let prev: Vec<&str> = if mac { vec!["Ctrl+Shift+Tab", "Cmd+Shift+["] } else { vec!["Ctrl+Shift+Tab", "Ctrl+PageUp"] };
+    let settings: Vec<&str> = if mac { vec!["Cmd+P", "Cmd+,"] } else { vec!["Ctrl+P"] };
+    let mut v = vec![
+        def(HotkeyAction::NewTab, "New tab", "Tabs", &[&format!("{p}+T")]),
+        def(HotkeyAction::CloseTab, "Close tab", "Tabs", &[&format!("{p}+Shift+W")]),
+        def(HotkeyAction::NextTab, "Next tab", "Tabs", &next),
+        def(HotkeyAction::PrevTab, "Previous tab", "Tabs", &prev),
+    ];
+    for n in 1..=8u8 {
+        v.push(def(HotkeyAction::SelectTab(n), &format!("Select tab {n}"), "Tabs", &[&format!("{p}+{n}")]));
+    }
+    v.push(def(HotkeyAction::SelectLastTab, "Select last tab", "Tabs", &[&format!("{p}+9")]));
+    v.push(def(HotkeyAction::CloseSplit, "Close split", "Splits", &[&format!("{p}+W")]));
+    v.push(def(HotkeyAction::OpenSettings, "Open / close settings", "Window", &settings));
+    v
 }
 
 /// What settings.hotkeys holds: only the actions the user changed (an empty list = unbound).
@@ -75,6 +85,8 @@ pub type HotkeyTable = HashMap<HotkeyAction, Vec<String>>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
     pub ctrl: bool,
+    /// The Command key (macOS only; elsewhere "Cmd" in a saved binding reads as Ctrl).
+    pub meta: bool,
     pub alt: bool,
     pub shift: bool,
     pub key: String,
@@ -129,6 +141,10 @@ fn norm_key(raw: &str) -> Option<String> {
 
 /// "ctrl+shift+w" -> {ctrl, shift, key: "W"}; None for anything that is not a single valid shortcut.
 pub fn parse_binding(s: &str) -> Option<Binding> {
+    parse_binding_for(s, MAC)
+}
+
+fn parse_binding_for(s: &str, mac: bool) -> Option<Binding> {
     let t = s.trim();
     if t.is_empty() {
         return None;
@@ -138,17 +154,25 @@ pub fn parse_binding(s: &str) -> Option<Binding> {
     if parts.iter().any(|p| p.is_empty()) {
         return None;
     }
-    let mut b = Binding { ctrl: false, alt: false, shift: false, key: String::new() };
+    let mut b = Binding { ctrl: false, meta: false, alt: false, shift: false, key: String::new() };
     for (i, part) in parts.iter().enumerate() {
         let p = part.to_lowercase();
         let last = i == parts.len() - 1;
         if !last {
             match p.as_str() {
-                "ctrl" | "control" | "cmd" | "meta" => {
+                "ctrl" | "control" => {
                     if b.ctrl {
                         return None;
                     }
                     b.ctrl = true;
+                }
+                "cmd" | "meta" | "command" | "super" => {
+                    // Windows / Linux have no Cmd: a saved "Cmd+T" means the same as "Ctrl+T" there.
+                    let slot = if mac { &mut b.meta } else { &mut b.ctrl };
+                    if *slot {
+                        return None;
+                    }
+                    *slot = true;
                 }
                 "alt" | "option" => {
                     if b.alt {
@@ -176,6 +200,9 @@ pub fn format_binding(b: &Binding) -> String {
     if b.ctrl {
         out.push("Ctrl");
     }
+    if b.meta {
+        out.push("Cmd");
+    }
     if b.alt {
         out.push("Alt");
     }
@@ -197,10 +224,22 @@ fn is_fn_key(key: &str) -> bool {
     key.strip_prefix('F').map(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit())).unwrap_or(false)
 }
 
-/// A binding we let the user assign: needs Ctrl or Alt, except the function keys (a bare letter would eat typing).
+/// A binding as the user reads it: macOS calls Alt "Option" ("Cmd+Alt+T" -> "Cmd+Option+T"); elsewhere unchanged.
+pub fn display_binding(s: &str) -> String {
+    display_binding_for(s, MAC)
+}
+
+fn display_binding_for(s: &str, mac: bool) -> String {
+    if !mac {
+        return s.to_string();
+    }
+    s.split('+').map(|p| if p == "Alt" { "Option" } else { p }).collect::<Vec<_>>().join("+")
+}
+
+/// A binding we let the user assign: needs Ctrl, Cmd or Alt, except the function keys (a bare letter would eat typing).
 pub fn is_usable_binding(s: &str) -> bool {
     match parse_binding(s) {
-        Some(b) => b.ctrl || b.alt || is_fn_key(&b.key),
+        Some(b) => b.ctrl || b.meta || b.alt || is_fn_key(&b.key),
         None => false,
     }
 }
@@ -233,8 +272,13 @@ pub struct KeyLike {
     pub meta_key: bool,
 }
 
-/// The binding a keydown event produces, or None for a lone modifier / an unknown key. Ctrl and Cmd are the same.
+/// The binding a keydown event produces, or None for a lone modifier / an unknown key. On Windows / Linux Ctrl and
+/// Cmd are the same; on macOS they are separate keys.
 pub fn event_to_binding(e: &KeyLike) -> Option<String> {
+    event_to_binding_for(e, MAC)
+}
+
+fn event_to_binding_for(e: &KeyLike, mac: bool) -> Option<String> {
     if ["Control", "Shift", "Alt", "Meta", "AltGraph", "CapsLock", "OS"].contains(&e.key.as_str()) {
         return None;
     }
@@ -254,7 +298,7 @@ pub fn event_to_binding(e: &KeyLike) -> Option<String> {
         norm_key(if e.key == " " { "Space" } else { &e.key })
     };
     let key = key?;
-    Some(format_binding(&Binding { ctrl: e.ctrl_key || e.meta_key, alt: e.alt_key, shift: e.shift_key, key }))
+    Some(format_binding(&Binding { ctrl: e.ctrl_key || (!mac && e.meta_key), meta: mac && e.meta_key, alt: e.alt_key, shift: e.shift_key, key }))
 }
 
 /// Defaults with the user's overrides applied. Bad or unusable entries and unknown actions are dropped.
@@ -323,7 +367,7 @@ pub fn action_label(id: HotkeyAction) -> String {
 
 /// The first binding of an action ("Ctrl+T"), for a menu hint or tooltip (port of `useHotkeyHint`); None when unbound.
 pub fn hotkey_hint(table: &HotkeyTable, id: HotkeyAction) -> Option<String> {
-    table.get(&id).and_then(|v| v.first().cloned())
+    table.get(&id).and_then(|v| v.first()).map(|b| display_binding(b))
 }
 
 // While the settings page records a new shortcut, the global key handlers (shortcuts, Esc-closes-dialog)
@@ -349,7 +393,7 @@ mod tests {
         KeyLike { key: key.into(), code: code.into(), ctrl_key: ctrl, alt_key: alt, shift_key: shift, meta_key: meta }
     }
     fn b(ctrl: bool, alt: bool, shift: bool, key: &str) -> Option<Binding> {
-        Some(Binding { ctrl, alt, shift, key: key.into() })
+        Some(Binding { ctrl, meta: false, alt, shift, key: key.into() })
     }
     fn v(l: &[&str]) -> Vec<String> {
         l.iter().map(|s| s.to_string()).collect()
@@ -358,6 +402,7 @@ mod tests {
     // Port of test/hotkeys.test.ts
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn parse_binding_reads_modifiers_and_keys_in_any_case_and_order() {
         assert_eq!(parse_binding("ctrl+shift+w"), b(true, false, true, "W"));
         assert_eq!(parse_binding("Shift+Ctrl+W"), b(true, false, true, "W"));
@@ -394,6 +439,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn event_to_binding_uses_physical_keys_and_treats_cmd_as_ctrl() {
         assert_eq!(event_to_binding(&ev("w", "KeyW", true, false, false, false)).as_deref(), Some("Ctrl+W"));
         assert_eq!(event_to_binding(&ev("W", "KeyW", true, false, true, false)).as_deref(), Some("Ctrl+Shift+W"));
@@ -408,6 +454,56 @@ mod tests {
     }
 
     #[test]
+    fn cmd_is_its_own_modifier_on_mac_and_ctrl_elsewhere() {
+        let mac = parse_binding_for("cmd+shift+t", true).unwrap();
+        assert!(mac.meta && !mac.ctrl);
+        assert_eq!(format_binding(&mac), "Cmd+Shift+T");
+        assert_eq!(format_binding(&parse_binding_for("Ctrl+Cmd+Alt+K", true).unwrap()), "Ctrl+Cmd+Alt+K");
+        assert_eq!(parse_binding_for("Cmd+Cmd+T", true), None);
+        let win = parse_binding_for("Cmd+T", false).unwrap();
+        assert!(win.ctrl && !win.meta);
+        assert_eq!(parse_binding_for("Ctrl+Cmd+T", false), None); // both fold into Ctrl: a repeat
+    }
+
+    #[test]
+    fn events_keep_cmd_apart_from_ctrl_on_mac_only() {
+        let cmd_t = ev("t", "KeyT", false, false, false, true);
+        assert_eq!(event_to_binding_for(&cmd_t, true).as_deref(), Some("Cmd+T"));
+        assert_eq!(event_to_binding_for(&cmd_t, false).as_deref(), Some("Ctrl+T"));
+        let ctrl_tab = ev("Tab", "Tab", true, false, false, false);
+        assert_eq!(event_to_binding_for(&ctrl_tab, true).as_deref(), Some("Ctrl+Tab"));
+        let cmd_comma = ev(",", "Comma", false, false, false, true);
+        assert_eq!(event_to_binding_for(&cmd_comma, true).as_deref(), Some("Cmd+,"));
+    }
+
+    #[test]
+    fn mac_defaults_use_cmd_and_parse_back() {
+        let acts = build_actions(true);
+        let get = |a: HotkeyAction| acts.iter().find(|d| d.id == a).unwrap().defaults.clone();
+        assert_eq!(get(HotkeyAction::NewTab), v(&["Cmd+T"]));
+        assert_eq!(get(HotkeyAction::CloseSplit), v(&["Cmd+W"]));
+        assert_eq!(get(HotkeyAction::OpenSettings), v(&["Cmd+P", "Cmd+,"]));
+        assert_eq!(get(HotkeyAction::NextTab), v(&["Ctrl+Tab", "Cmd+Shift+]"]));
+        let mut seen = HashSet::new();
+        for d in &acts {
+            for s in &d.defaults {
+                let p = parse_binding_for(s, true).unwrap_or_else(|| panic!("{s}"));
+                assert_eq!(&format_binding(&p), s);
+                assert!(p.ctrl || p.meta);
+                assert!(seen.insert(s.clone()), "duplicate default {s}");
+            }
+        }
+    }
+
+    #[test]
+    fn display_binding_says_option_on_mac() {
+        assert_eq!(display_binding_for("Cmd+Alt+T", true), "Cmd+Option+T");
+        assert_eq!(display_binding_for("Cmd+Alt+T", false), "Cmd+Alt+T");
+        assert_eq!(display_binding_for("Ctrl+Tab", true), "Ctrl+Tab");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn defaults_match_the_original_shortcuts() {
         let t = resolve_hotkeys(&Value::Null);
         assert_eq!(t[&HotkeyAction::NewTab], v(&["Ctrl+T"]));
@@ -422,6 +518,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn resolve_hotkeys_applies_overrides_and_drops_junk() {
         let t = resolve_hotkeys(&json!({
             "newTab": ["ctrl+n", "ctrl+N", "Q", 7, "bogus+x"],
@@ -451,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))] // the Windows / Linux defaults; the mac_* tests cover macOS
     fn binding_map_and_find_conflicts() {
         let t = resolve_hotkeys(&json!({ "newTab": ["Ctrl+W"] }));
         let m = binding_map(&t);
