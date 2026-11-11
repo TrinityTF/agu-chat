@@ -33,7 +33,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use gpui::{
-    div, px, size, AnyWindowHandle, App, AsyncApp, Bounds, Context, IntoElement, Render, Styled, TitlebarOptions, Window,
+    div, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, Context, IntoElement, Render, Styled, TitlebarOptions, Window,
     WindowBounds, WindowKind, WindowOptions,
 };
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtDarwin, WebViewExtDarwin};
