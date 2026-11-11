@@ -352,7 +352,7 @@ pub fn autocomplete_dropdown(state: &AutoState, scroll: &gpui::ScrollHandle, on_
             });
         if is_cmd {
             row = row
-                .child(div().flex_none().font_family("Cascadia Mono").font_weight(FontWeight::SEMIBOLD).text_color(c(theme::ACCENT_SOFT)).child(SharedString::from(format!("/{}", m.name))))
+                .child(div().flex_none().font_family(theme::MONO_CMD).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::ACCENT_SOFT)).child(SharedString::from(format!("/{}", m.name))))
                 .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(c(theme::FAINT)).child(SharedString::from(m.label.clone())));
             if m.dim {
                 row = row.child(div().flex_none().text_size(px(10.)).text_color(c(theme::AMBER_500)).child("(not available)"));

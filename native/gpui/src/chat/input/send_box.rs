@@ -431,7 +431,7 @@ impl SendBox {
         let ks = &ev.keystroke;
         let key = ks.key.as_str();
         let m = ks.modifiers;
-        if m.control || m.alt {
+        if crate::text_input::is_shortcut_mod(&m) {
             return;
         }
         // While the mention list is open it owns Tab/arrows/Enter/Escape.

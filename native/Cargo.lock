@@ -75,6 +75,9 @@ version = "0.2.1"
 dependencies = [
  "agu-chat-core",
  "chrono",
+ "core-foundation 0.10.0",
+ "core-graphics 0.24.0",
+ "core-text",
  "crossbeam-channel",
  "embed-resource",
  "fancy-regex",

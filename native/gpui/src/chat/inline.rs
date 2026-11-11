@@ -24,10 +24,18 @@ use crate::theme;
 
 /// Measured (pixel diff against the Electron app): GPUI's DirectWrite glyph baseline lands this many px lower than
 /// Chromium's for the same layout baseline, so text is painted this much higher.
+#[cfg(not(target_os = "macos"))]
 pub const TEXT_DY: f32 = -1.0;
+/// macOS: CoreText baselines match the layout baseline (the Windows offset was measured against DirectWrite).
+#[cfg(target_os = "macos")]
+pub const TEXT_DY: f32 = 0.0;
 
 /// Segoe UI's x-height / em, for `vertical-align: middle`.
+#[cfg(not(target_os = "macos"))]
 pub const X_HEIGHT: f32 = 0.5;
+/// San Francisco: x-height 1060 / 2048 em.
+#[cfg(target_os = "macos")]
+pub const X_HEIGHT: f32 = 0.52;
 
 #[derive(Clone)]
 pub enum Act {

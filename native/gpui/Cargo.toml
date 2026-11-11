@@ -31,6 +31,12 @@ windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsA
 webview2-com = "0.38"
 windows-core = "0.61"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# the versions GPUI itself resolves on macOS (see Cargo.lock), so no second copy is built
+core-foundation = "0.10"
+core-graphics = "0.24"
+core-text = "21"
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 

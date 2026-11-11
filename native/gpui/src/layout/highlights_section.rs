@@ -362,7 +362,7 @@ impl SettingsDialog {
                     .bg(a_rgb(bg))
                     .flex()
                     .child(format!("Rule {} ({} ", idx + 1, kind_label(&h.kind).to_lowercase()))
-                    .child(div().font_family("Consolas").child(h.pattern.clone()))
+                    .child(div().font_family(theme::MONO).child(h.pattern.clone()))
                     .child(") highlights this.")
             }
             None => div().mt(px(6.)).px(px(8.)).py(px(2.)).text_color(c(theme::FAINT)).child("No rule matches."),

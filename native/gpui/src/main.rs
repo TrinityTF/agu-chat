@@ -9,6 +9,8 @@ mod assets;
 mod chat;
 mod icons;
 mod layout;
+#[cfg(target_os = "macos")]
+mod mac_menu;
 mod text_input;
 mod theme;
 mod window_state;
@@ -67,6 +69,8 @@ fn main() {
     log_panics();
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         text_input::bind_keys(cx);
+        #[cfg(target_os = "macos")]
+        mac_menu::install(cx);
 
         let mock = std::env::var("AGU_MOCK").map(|v| v == "1").unwrap_or(false);
         let (bridge, data_dir): (std::sync::Arc<dyn agu_chat_core::protocol::AguBridge>, std::path::PathBuf) = if mock {

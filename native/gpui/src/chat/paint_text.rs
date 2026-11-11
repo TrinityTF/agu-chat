@@ -491,7 +491,55 @@ fn glyph_mask(text: &str, size_px: f32, weight: u16, w: u32, h: u32, origin_x: f
     })
 }
 
-#[cfg(not(windows))]
+/// macOS: the same mask through CoreText + CoreGraphics. The text is drawn white into a premultiplied RGBA bitmap
+/// whose alpha channel is the coverage; the baseline sits at `baseline_y` from the top and the pen starts at
+/// `origin_x`, like the DirectWrite version. The font is the system UI font (San Francisco, what GPUI shapes with),
+/// emphasized for weights of 600 and up. Returns the line's typographic width (trailing whitespace included).
+#[cfg(target_os = "macos")]
+fn glyph_mask(text: &str, size_px: f32, weight: u16, w: u32, h: u32, origin_x: f32, baseline_y: f32) -> Option<(Vec<u8>, f32)> {
+    use core_foundation::attributed_string::{CFAttributedStringRef, CFMutableAttributedString};
+    use core_foundation::base::{CFRange, TCFType};
+    use core_foundation::string::CFString;
+    use core_graphics::color::CGColor;
+    use core_graphics::color_space::CGColorSpace;
+    use core_graphics::context::CGContext;
+    use core_text::font::{new_ui_font_for_language, CTFont};
+    use core_text::line::CTLine;
+    use core_text::string_attributes::kCTFontAttributeName;
+
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (wu, hu) = (w as usize, h as usize);
+    let stride = wu * 4;
+    let mut buf = vec![0u8; stride * hu];
+
+    let font: CTFont = new_ui_font_for_language(if weight >= 600 { core_text::font::kCTFontEmphasizedSystemFontType } else { core_text::font::kCTFontSystemFontType }, size_px as f64, None);
+    let cf_text = CFString::new(text);
+    let mut astr = CFMutableAttributedString::new();
+    astr.replace_str(&cf_text, CFRange::init(0, 0));
+    let len = astr.char_len();
+    astr.set_attribute(CFRange::init(0, len), unsafe { kCTFontAttributeName }, &font);
+    let line = CTLine::new_with_attributed_string(astr.as_concrete_TypeRef() as CFAttributedStringRef);
+    let width = line.get_typographic_bounds().width as f32;
+
+    {
+        // kCGImageAlphaPremultipliedLast = 1. Row 0 of the buffer is the top row of the image.
+        let ctx = CGContext::create_bitmap_context(Some(buf.as_mut_ptr() as *mut std::ffi::c_void), wu, hu, 8, stride, &CGColorSpace::create_device_rgb(), 1);
+        ctx.set_should_antialias(true);
+        ctx.set_allows_font_smoothing(false);
+        ctx.set_should_smooth_fonts(false);
+        ctx.set_should_subpixel_position_fonts(true);
+        ctx.set_fill_color(&CGColor::rgb(1.0, 1.0, 1.0, 1.0));
+        // CoreGraphics' y axis points up: the baseline `baseline_y` below the top is `h - baseline_y` above the bottom.
+        ctx.set_text_position(origin_x as f64, (h as f32 - baseline_y) as f64);
+        line.draw(&ctx);
+    }
+    let out: Vec<u8> = buf.chunks_exact(4).map(|px| px[3]).collect();
+    Some((out, width))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn glyph_mask(_: &str, _: f32, _: u16, _: u32, _: u32, _: f32, _: f32) -> Option<(Vec<u8>, f32)> {
     None
 }

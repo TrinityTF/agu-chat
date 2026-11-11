@@ -22,8 +22,44 @@ fn uses_12h() -> bool {
                 return s.contains("tt") || s.contains('t');
             }
         }
+        if cfg!(target_os = "macos") {
+            return mac_uses_12h();
+        }
         false
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_uses_12h() -> bool {
+    false
+}
+
+/// macOS: the date format CoreFoundation builds for the template "j" (the locale's preferred hour, which follows the
+/// "24-hour time" switch in System Settings) holds an AM/PM marker `a` when the user reads 12h time.
+#[cfg(target_os = "macos")]
+fn mac_uses_12h() -> bool {
+    use core_foundation::base::{kCFAllocatorDefault, CFAllocatorRef, CFOptionFlags, CFType, TCFType};
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFLocaleCopyCurrent() -> *const c_void;
+        fn CFDateFormatterCreateDateFormatFromTemplate(alloc: CFAllocatorRef, template: CFStringRef, options: CFOptionFlags, locale: *const c_void) -> CFStringRef;
+    }
+    unsafe {
+        let locale = CFLocaleCopyCurrent();
+        if locale.is_null() {
+            return false;
+        }
+        let locale = CFType::wrap_under_create_rule(locale as _); // released on drop
+        let template = CFString::new("j");
+        let fmt = CFDateFormatterCreateDateFormatFromTemplate(kCFAllocatorDefault, template.as_concrete_TypeRef(), 0, locale.as_CFTypeRef());
+        if fmt.is_null() {
+            return false;
+        }
+        CFString::wrap_under_create_rule(fmt).to_string().contains('a')
+    }
 }
 
 pub fn fmt_time(ts_ms: i64, seconds: bool) -> String {
