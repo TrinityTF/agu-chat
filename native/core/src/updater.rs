@@ -852,17 +852,17 @@ mod tests {
               "assets": [asset("Agu-Chat-Setup-0.0.1-beta.40.exe", 5), asset("latest.yml", 1)] },
             { "tag_name": "v0.0.1", "prerelease": false, "draft": false, "body": "electron stable", "html_url": "u7", "assets": [] },
             // even with an -x64 installer, a version below 0.1.0 is never offered
-            { "tag_name": "v0.0.9", "prerelease": false, "draft": false, "body": "", "html_url": "u8", "assets": [asset("Agu-Chat-Setup-0.0.9-x64.exe", 9)] },
+            { "tag_name": "v0.0.9", "prerelease": false, "draft": false, "body": "", "html_url": "u8", "assets": [asset(&installer_asset_name("0.0.9"), 9)] },
             { "tag_name": "v0.1.0-beta", "prerelease": true, "draft": false, "body": "- first beta", "html_url": "u2",
-              "assets": [asset("Agu-Chat-Setup-0.1.0-beta-x64.exe", 9), asset("Agu-Chat-Setup-0.1.0-beta-x64.exe.sha256", 80)] },
+              "assets": [asset(&installer_asset_name("0.1.0-beta"), 9), asset(&format!("{}.sha256", installer_asset_name("0.1.0-beta")), 80)] },
             { "tag_name": "v0.1.1", "prerelease": true, "draft": false, "body": "", "html_url": "u3",
-              "assets": [asset("Agu-Chat-Setup-0.1.1-x64.exe", 9)] },
+              "assets": [asset(&installer_asset_name("0.1.1"), 9)] },
             // no installer attached (yet): never offered
             { "tag_name": "v0.2.0", "prerelease": true, "draft": false, "body": "", "html_url": "u4", "assets": [asset("notes.txt", 1)] },
             // the Electron-style installer name on a new-looking tag: not ours
             { "tag_name": "v0.3.0", "prerelease": true, "draft": false, "body": "", "html_url": "u5", "assets": [asset("Agu-Chat-Setup-0.3.0.exe", 1)] },
-            { "tag_name": "vnope", "prerelease": false, "draft": false, "body": "", "html_url": "u6", "assets": [asset("Agu-Chat-Setup-nope-x64.exe", 1)] },
-            { "tag_name": "native-v0.4.0", "prerelease": false, "draft": false, "body": "", "html_url": "u9", "assets": [asset("Agu-Chat-Setup-0.4.0-x64.exe", 1)] }
+            { "tag_name": "vnope", "prerelease": false, "draft": false, "body": "", "html_url": "u6", "assets": [asset(&installer_asset_name("nope"), 1)] },
+            { "tag_name": "native-v0.4.0", "prerelease": false, "draft": false, "body": "", "html_url": "u9", "assets": [asset(&installer_asset_name("0.4.0"), 1)] }
         ])
     }
 
@@ -915,11 +915,14 @@ mod tests {
         let rels = parse_releases(&github_list());
         let versions: Vec<_> = rels.iter().map(|r| r.version.as_str()).collect();
         assert_eq!(versions, vec!["0.1.0-beta", "0.1.1"]);
-        assert_eq!(rels[0].installer().unwrap().name, "Agu-Chat-Setup-0.1.0-beta-x64.exe");
+        assert_eq!(rels[0].installer().unwrap().name, installer_asset_name("0.1.0-beta"));
         assert!(rels[0].prerelease);
         // the old Electron updater's files are never ours
         assert!(rels.iter().all(|r| r.assets.iter().all(|a| a.name != "latest.yml")));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(installer_asset_name("1.2.3"), "Agu-Chat-Setup-1.2.3-x64.exe");
+        #[cfg(target_os = "macos")]
+        assert_eq!(installer_asset_name("1.2.3"), "Agu-Chat-1.2.3-mac.zip");
     }
 
     #[test]
@@ -1001,7 +1004,8 @@ second line", None), "boom");
         assert!(matches!(inst.download(&mk(None, 3), progress.clone()).await, Err(InstallError::Failed(m)) if m.contains("incomplete")));
         // no installer asset at all
         assert!(inst.download(&Release { version: "0.1.0".into(), ..Default::default() }, progress).await.is_err());
-        // nothing verified is ready: install refuses
+        // nothing verified is ready: install refuses (macOS install only opens the release page)
+        #[cfg(not(target_os = "macos"))]
         assert!(inst.install().await.is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
