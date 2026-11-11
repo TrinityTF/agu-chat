@@ -6,12 +6,13 @@
 
 <p align="center">
   <b>Every chat, one window.</b><br />
-  A fast, native desktop chat client for streamers and moderators.<br />
+  A fast, native desktop chat client for streamers and moderators, on Windows and Mac.<br />
   Twitch, Kick, YouTube, Rumble and X, side by side or merged into one.
 </p>
 
 <p align="center">
   <a href="https://github.com/TrinityTF/agu-chat/releases"><img alt="Download for Windows 10 / 11" src="https://img.shields.io/badge/Download-Windows%2010%20%2F%2011-9147ff?style=for-the-badge" /></a>
+  <a href="https://github.com/TrinityTF/agu-chat/releases"><img alt="Download for macOS" src="https://img.shields.io/badge/Download-macOS-9147ff?style=for-the-badge&logo=apple&logoColor=white" /></a>
 </p>
 
 <p align="center">
@@ -81,7 +82,7 @@
 - **Tabs and splits:** as many tabs as you like, each with chats side by side or stacked. Drag to resize or rearrange.
 - **A window that fits:** the window grows to fit a new split and shrinks back when you take one away. A split only goes beside another when your screen has room for both.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
-- **Tab markers:** a tab you're not looking at shows a dot when new messages arrive, and lights up when one of them is a highlight.
+- **Tab markers:** the dot on a tab is green while one of its channels is live, grey when new messages arrive while you're elsewhere, and red when one of them mentions you or matches a highlight.
 
 **Chat**
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges. Animated emotes can be turned off in Settings, which takes most of the GPU load away.
@@ -102,7 +103,7 @@
 - **Slash commands** such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
 
 **Make it yours**
-- **Highlights:** colour messages that contain a word or phrase, match a regular expression, or come from a certain user, on every platform. Each rule can play a sound (a built-in ping or your own file) and flash the taskbar. Messages that mention your Twitch name are highlighted too.
+- **Highlights:** colour messages that contain a word or phrase, match a regular expression, come from a certain user, or come from someone with a certain badge (broadcaster, moderator, lead moderator, verified, VIP or founder), on every platform. Each rule can play a sound (a built-in ping or your own file) and flash the taskbar (on a Mac, bounce the Dock icon). Messages that mention your Twitch name are highlighted too.
 - **Ignores:** hide messages from users you don't want to see, and hide or rewrite messages containing words or patterns you choose.
 - **Keyboard shortcuts:** change or add shortcuts in **Settings → Hotkeys**.
 - **Automatic updates** on the Beta or Stable channel.
@@ -119,14 +120,18 @@
 
 ## Getting started
 
-1. Download `Agu-Chat-Setup-<version>-x64.exe` from [Releases](https://github.com/TrinityTF/agu-chat/releases) and run it (Windows 10 or 11, 64-bit).
+1. Download Agu Chat from [Releases](https://github.com/TrinityTF/agu-chat/releases):
+   - **Windows 10 or 11 (64-bit):** `Agu-Chat-Setup-<version>-x64.exe`, then run it.
+   - **macOS 11 or later (Apple Silicon, M1 and newer):** `Agu-Chat-<version>-mac.zip`. Open it and drag **Agu Chat** into Applications. The first time, right-click Agu Chat and choose **Open**, then **Open** again (the app isn't signed by Apple yet). When you first log in somewhere, allow Agu Chat to use the Keychain, where your logins are kept.
 2. Click **Add a channel** in a new tab. Add channels from several platforms to one split to merge them.
 3. Log in to the platforms you want to write in under **Settings → Accounts**.
 
-Agu Chat keeps itself up to date after that.
+Agu Chat keeps itself up to date on Windows. On a Mac, it tells you when a new version is out and opens the download page.
 
 <details>
 <summary><b>Shortcuts and how-tos</b></summary>
+
+On a Mac, use Cmd where this says Ctrl (Ctrl+Tab stays Ctrl+Tab). Settings also opens with Cmd+, or **Agu Chat → Settings…** in the menu bar.
 
 | To do this | Do this |
 | --- | --- |
@@ -176,15 +181,15 @@ In **Settings → Updates** choose a channel:
 - **Beta:** every new release, so you get new features first.
 - **Stable:** only full releases (version 1.0.0 and up). Until 1.0.0 is out, every release is a beta, so Stable also receives them.
 
-New versions download in the background and install when you close Agu Chat, or right away with **Restart to update**. Switching from Beta to Stable keeps your current version until a newer stable one is out.
+On Windows, new versions download in the background and install when you close Agu Chat, or right away with **Restart to update**. Switching from Beta to Stable keeps your current version until a newer stable one is out.
 
 ## Privacy
 
-Your logins are stored only on your PC, encrypted with Windows' own protection, and are never sent anywhere except to the platform they belong to. Twitch login happens on twitch.tv, so your password never goes through Agu Chat, and you can revoke access at any time (Twitch → Settings → Connections).
+Your logins are stored only on your computer, encrypted with Windows' own protection (on a Mac, with a key kept in your Keychain), and are never sent anywhere except to the platform they belong to. Twitch login happens on twitch.tv, so your password never goes through Agu Chat, and you can revoke access at any time (Twitch → Settings → Connections).
 
-The one exception is Kick: its login and token refresh go through Agu Chat's sign-in service at api.agu.lol, which passes the tokens to your PC and keeps nothing. X and YouTube logins happen in a sign-in window inside Agu Chat (it shows x.com's or Google's own page, so your password goes to them only); only the resulting session is kept, encrypted on your PC like the others.
+The one exception is Kick: its login and token refresh go through Agu Chat's sign-in service at api.agu.lol, which passes the tokens to your computer and keeps nothing. X and YouTube logins happen in a sign-in window inside Agu Chat (it shows x.com's or Google's own page, so your password goes to them only); only the resulting session is kept, encrypted on your computer like the others.
 
-Settings and logs are in `%APPDATA%\Agu Chat\`.
+Settings and logs are in `%APPDATA%\Agu Chat\` on Windows and `~/Library/Application Support/Agu Chat/` on a Mac.
 
 ## Building from source
 
@@ -195,4 +200,4 @@ cd native
 cargo build --release -p agu-chat-gpui
 ```
 
-The program is `native/target/release/agu-chat-gpui.exe`. `cargo test -p agu-chat-core -p agu-chat-gpui` runs the tests.
+The program is `native/target/release/agu-chat-gpui.exe` (`agu-chat-gpui` on macOS; `native/installer/mac/bundle.sh` wraps it into `Agu Chat.app`). `cargo test -p agu-chat-core -p agu-chat-gpui` runs the tests.

@@ -6,7 +6,7 @@ use crate::util::slice_utf16;
 
 pub const MAX_RULES: usize = 200;
 pub const MAX_PATTERN: usize = 500;
-const KINDS: [&str; 3] = ["phrase", "regex", "user"];
+const KINDS: [&str; 4] = ["phrase", "regex", "user", "badge"];
 
 /// `/^#[0-9a-f]{6}$/i`
 fn is_color(s: &str) -> bool {
@@ -89,6 +89,12 @@ mod tests {
     #[test]
     fn a_good_rule_passes_through_unchanged() {
         let r = json!({"id":"a","enabled":true,"kind":"regex","pattern":"^hi","caseSensitive":true,"color":"#ff9f1a","sound":true,"soundFile":"ping-1a2b3c4d.mp3","flash":true});
+        assert_eq!(sanitize_highlight_rule(&r), Some(r));
+    }
+
+    #[test]
+    fn a_badge_rule_keeps_its_kind() {
+        let r = json!({"id":"v","enabled":true,"kind":"badge","pattern":"vip","caseSensitive":false,"color":"#ff6ec7","sound":false,"soundFile":"","flash":false});
         assert_eq!(sanitize_highlight_rule(&r), Some(r));
     }
 
