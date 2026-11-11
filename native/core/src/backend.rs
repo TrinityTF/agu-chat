@@ -23,11 +23,15 @@ use crate::store::Store;
 use crate::updater::{GithubFeed, NativeInstaller, QuitHook, Updater};
 use crate::util::Listeners;
 
-/// `%APPDATA%\Agu Chat` (what Electron's `app.getPath("userData")` is for this app) unless `AGU_DATA_DIR`
+/// `%APPDATA%\Agu Chat` (`~/Library/Application Support/Agu Chat` on macOS; what Electron's `app.getPath("userData")` is for this app) unless `AGU_DATA_DIR`
 /// points elsewhere (dev runs on a copy).
 pub fn default_data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("AGU_DATA_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(h) = std::env::var_os("HOME") {
+        return PathBuf::from(h).join("Library").join("Application Support").join("Agu Chat");
     }
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)

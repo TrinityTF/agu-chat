@@ -924,14 +924,18 @@ impl SettingsDialog {
     fn render_appearance(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let sv = serde_json::to_value(&self.settings).unwrap_or_default();
         let s = self.settings.clone();
-        let pause = self.select("pauseChat", &s.pause_chat, &[("scroll", "Scroll only"), ("hover", "While the mouse is over it"), ("alt", "While Alt is held")], false, cx);
+        let pause = self.select("pauseChat", &s.pause_chat, &[("scroll", "Scroll only"), ("hover", "While the mouse is over it"), ("alt", if cfg!(target_os = "macos") { "While Option is held" } else { "While Alt is held" })], false, cx);
         let emote = self.select("emoteSize", &s.emote_size, &[("small", "Small"), ("medium", "Medium"), ("large", "Large")], false, cx);
         let deleted = self.select("deletedMessages", &s.deleted_messages, &[("strike", "Grey out"), ("hide", "Hide"), ("show", "Show normally")], false, cx);
         let font = self.slider_row("fontSize", s.font_size, 10., 22., 1., "px", cx);
         div()
             .child(Self::h("Window"))
             .child(self.bool_row(&sv, "alwaysOnTop", "Always on top", Some("Keep Agu Chat above other windows"), false, false, cx))
-            .child(self.bool_row(&sv, "startWithWindows", "Start with Windows", Some("Open Agu Chat when you sign in to Windows"), false, false, cx))
+            .child(if cfg!(target_os = "macos") {
+                self.bool_row(&sv, "startWithWindows", "Open at login", Some("Open Agu Chat when you log in to your Mac"), false, false, cx)
+            } else {
+                self.bool_row(&sv, "startWithWindows", "Start with Windows", Some("Open Agu Chat when you sign in to Windows"), false, false, cx)
+            })
             .child(Self::h("Messages"))
             .child(self.bool_row(&sv, "timestamps", "Show timestamps", None, false, false, cx))
             .child(self.bool_row(&sv, "timestampSeconds", "Timestamps with seconds", None, !s.timestamps, false, cx))
