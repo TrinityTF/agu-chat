@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "agu-chat-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "agu-chat-gpui"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "agu-chat-core",
  "chrono",
