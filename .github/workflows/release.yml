@@ -1,11 +1,14 @@
-# Builds the Windows installer and publishes it as a GitHub release.
+# Builds the Windows installer and the macOS app and publishes both in one GitHub release.
 #   * runs only by hand (workflow_dispatch, from main) or when a `v*` tag is pushed; never on a branch push
 #   * manual run: releases the version in native/gpui/Cargo.toml and creates the tag v<version> on the run's commit
 #     (fails if that tag already exists)
 #   * tag push: the version is the tag without its leading `v`; it must equal native/gpui/Cargo.toml's version
 #   * a version with a -suffix, or with major 0, is a prerelease (published with --prerelease --latest=false);
 #     a full release (>= 1.0.0, no suffix) is published as "latest"
-#   * assets: Agu-Chat-Setup-<version>-x64.exe + .sha256; title "Agu Chat <version>"
+#   * assets: Agu-Chat-Setup-<version>-x64.exe + .sha256 (Windows), Agu-Chat-<version>-mac.zip + .sha256 (macOS,
+#     Apple Silicon); title "Agu Chat <version>"
+#   * jobs: version -> windows + mac (in parallel, artifacts only) -> publish (draft, upload, check, publish), so the
+#     app never sees a release with only some of its files
 # Versions are set by hand in Cargo.toml. Update rules (native/core/src/updater.rs): docs/GPUI-PORT.md "Installer and updates".
 name: Build and release
 
@@ -23,15 +26,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # tags: the release notes read them
+          fetch-depth: 0 # tags
 
       - name: Work out the version
         id: ver
@@ -54,19 +58,14 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "Agu Chat $version ($tag, prerelease=$prerelease)"
 
-      - name: Release notes
-        run: |
-          mkdir -p native/dist
-          # the previous native release: skip the old Electron tags (v0.0.*) and this release's own tag
-          prev="$(git tag --list 'v*' --sort=-creatordate | grep -v '^v0\.0\.' | grep -v -x "${{ steps.ver.outputs.tag }}" | head -n 1 || true)"
-          if [ -z "$prev" ]; then
-            notes="First release of the new Agu Chat, rebuilt as a native Windows app: faster, lighter, same look. Install it over the old version; your settings and logins carry over."
-          else
-            notes="$(git log "$prev..HEAD" --no-merges --format='- %s' -n 40)"
-            if [ -z "$notes" ]; then notes="- Improvements and fixes"; fi
-          fi
-          printf '%s\n' "$notes" > native/dist/release-notes.md
-          cat native/dist/release-notes.md
+  windows:
+    needs: version
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -85,7 +84,7 @@ jobs:
       - name: Build
         working-directory: native
         env:
-          AGU_BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          AGU_BUILD_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --release -p agu-chat-gpui
 
       - name: Install NSIS
@@ -96,42 +95,134 @@ jobs:
         shell: pwsh
         run: |
           $env:NSIS_HOME = "${env:ProgramFiles(x86)}\NSIS"
-          native\installer\build-installer.ps1 -Version "${{ steps.ver.outputs.version }}" -Exe native\target\release\agu-chat-gpui.exe -OutDir native\dist
+          native\installer\build-installer.ps1 -Version "${{ needs.version.outputs.version }}" -Exe native\target\release\agu-chat-gpui.exe -OutDir native\dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            native/dist/Agu-Chat-Setup-${{ needs.version.outputs.version }}-x64.exe
+            native/dist/Agu-Chat-Setup-${{ needs.version.outputs.version }}-x64.exe.sha256
+          if-no-files-found: error
+
+  mac:
+    needs: version
+    runs-on: macos-latest
+    env:
+      # native/rust-toolchain.toml pins the Windows MSVC host; on the Mac runner use plain stable instead
+      RUSTUP_TOOLCHAIN: stable
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: native-mac-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: native-mac-
+
+      - name: Test
+        working-directory: native
+        run: cargo test -p agu-chat-core -p agu-chat-gpui
+
+      - name: Build
+        working-directory: native
+        env:
+          AGU_BUILD_VERSION: ${{ needs.version.outputs.version }}
+        run: cargo build --release -p agu-chat-gpui
+
+      - name: Bundle
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          sh native/installer/mac/bundle.sh native/target/release/agu-chat-gpui "$version" native/dist
+          cd native/dist
+          zip="Agu-Chat-$version-mac.zip"
+          shasum -a 256 "$zip" > "$zip.sha256" # "<hash>  <name>", like the Windows installer's
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            native/dist/Agu-Chat-${{ needs.version.outputs.version }}-mac.zip
+            native/dist/Agu-Chat-${{ needs.version.outputs.version }}-mac.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [version, windows, mac]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # tags: the release notes read them
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          # the previous native release: skip the old Electron tags (v0.0.*) and this release's own tag
+          prev="$(git tag --list 'v*' --sort=-creatordate | grep -v '^v0\.0\.' | grep -v -x "$TAG" | head -n 1 || true)"
+          if [ -z "$prev" ]; then
+            notes="- First release"
+          else
+            notes="$(git log "$prev..HEAD" --no-merges --format='- %s' -n 40)"
+            if [ -z "$notes" ]; then notes="- Improvements and fixes"; fi
+          fi
+          {
+            printf '%s\n\n' "$notes"
+            printf '**Windows 10 / 11:** download `Agu-Chat-Setup-%s-x64.exe` and run it.\n\n' "$VERSION"
+            printf '**macOS 11+ (Apple Silicon):** download `Agu-Chat-%s-mac.zip`, open it and drag Agu Chat into Applications. The first time, right-click the app and choose **Open** (it is not signed by Apple yet).\n' "$VERSION"
+          } > release-notes.md
+          cat release-notes.md
 
       # The draft release is created up front and published last, so the app never sees a half-uploaded release.
       # For a manual run, --target makes GitHub create the tag v<version> on this run's commit when it is published.
       - name: Create draft release and upload
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${{ steps.ver.outputs.tag }}"
           flags=""
-          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then flags="--prerelease"; fi
-          if gh release view "$tag" > /dev/null 2>&1; then
-            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = "true" ]; then
-              gh release delete "$tag" --yes # an unpublished leftover of a failed earlier run of the same tag
+          if [ "$PRERELEASE" = "true" ]; then flags="--prerelease"; fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "true" ]; then
+              gh release delete "$TAG" --yes # an unpublished leftover of a failed earlier run of the same tag
             else
-              echo "Release $tag is already published."; exit 1
+              echo "Release $TAG is already published."; exit 1
             fi
           fi
-          gh release create "$tag" --draft $flags --title "Agu Chat ${{ steps.ver.outputs.version }}" --target "$GITHUB_SHA" --notes-file native/dist/release-notes.md
-          gh release upload "$tag" "native/dist/Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe" "native/dist/Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe.sha256"
+          gh release create "$TAG" --draft $flags --title "Agu Chat $VERSION" --target "$GITHUB_SHA" --notes-file release-notes.md
+          gh release upload "$TAG" \
+            "dist/Agu-Chat-Setup-$VERSION-x64.exe" "dist/Agu-Chat-Setup-$VERSION-x64.exe.sha256" \
+            "dist/Agu-Chat-$VERSION-mac.zip" "dist/Agu-Chat-$VERSION-mac.zip.sha256"
 
       - name: Check the assets are there
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          assets="$(gh release view "${{ steps.ver.outputs.tag }}" --json assets --jq '.assets[].name')"
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
           echo "$assets"
-          echo "$assets" | grep -qx "Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe"
-          echo "$assets" | grep -qx "Agu-Chat-Setup-${{ steps.ver.outputs.version }}-x64.exe.sha256"
+          for f in "Agu-Chat-Setup-$VERSION-x64.exe" "Agu-Chat-Setup-$VERSION-x64.exe.sha256" "Agu-Chat-$VERSION-mac.zip" "Agu-Chat-$VERSION-mac.zip.sha256"; do
+            echo "$assets" | grep -qx "$f"
+          done
 
       - name: Publish release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
-            gh release edit "${{ steps.ver.outputs.tag }}" --draft=false --prerelease --latest=false
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
           else
-            gh release edit "${{ steps.ver.outputs.tag }}" --draft=false --prerelease=false --latest
+            gh release edit "$TAG" --draft=false --prerelease=false --latest
           fi
