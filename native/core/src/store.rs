@@ -21,6 +21,7 @@ pub fn default_settings() -> Map<String, Value> {
     let v = json!({
         "twitchClientId": "",
         "alwaysOnTop": false,
+        "startWithWindows": false, // the HKCU Run entry follows it (installed builds only)
         "updateChannel": "beta", // "beta" = GitHub prereleases too, "stable" = full releases only
         "timestamps": false,
         "timestampSeconds": false,

@@ -1,5 +1,6 @@
 //! agu-chat-core: the Rust port of the Electron main process (src/main). See docs/GPUI-PORT.md.
 //! `protocol` is the contract the UI codes against; `Backend` implements it.
+pub mod autostart;
 pub mod backend;
 pub mod highlight_rules;
 pub mod images;

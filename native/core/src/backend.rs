@@ -135,6 +135,25 @@ impl Backend {
         let u3 = updater.clone();
         inner.store.settings.events.on(Arc::new(move |s: &Settings| u3.set_channel(&s.update_channel)));
 
+        // "Start with Windows": the Run entry follows the setting, and is repointed at this exe on every start.
+        // Only an installed build on the real data folder touches it (dev runs use AGU_DATA_DIR copies).
+        if meta.packaged && std::env::var_os("AGU_DATA_DIR").is_none() {
+            let sync = |on: bool, log: &Arc<Logger>| {
+                if let Err(e) = crate::autostart::sync(on) {
+                    log.log(&format!("[autostart] {e}"));
+                }
+            };
+            let start = inner.store.settings.get_typed().start_with_windows;
+            sync(start, &logger);
+            let last = Arc::new(std::sync::atomic::AtomicBool::new(start));
+            let l2 = logger.clone();
+            inner.store.settings.events.on(Arc::new(move |s: &Settings| {
+                if last.swap(s.start_with_windows, std::sync::atomic::Ordering::SeqCst) != s.start_with_windows {
+                    sync(s.start_with_windows, &l2);
+                }
+            }));
+        }
+
         // app.whenReady: every module's init(), then the updater
         let (ctx2, mods2, upd, channel) = (ctx.clone(), modules.clone(), updater.clone(), inner.store.settings.get_typed().update_channel);
         rt.block_on(async move {

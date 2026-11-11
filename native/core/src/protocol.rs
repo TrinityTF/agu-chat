@@ -163,6 +163,7 @@ pub struct ModButton {
 pub struct Settings {
     pub twitch_client_id: String,
     pub always_on_top: bool,
+    pub start_with_windows: bool,
     /// beta | stable
     pub update_channel: String,
     pub timestamps: bool,
@@ -211,6 +212,7 @@ impl Default for Settings {
         Settings {
             twitch_client_id: String::new(),
             always_on_top: false,
+            start_with_windows: false,
             update_channel: "beta".into(),
             timestamps: false,
             timestamp_seconds: false,

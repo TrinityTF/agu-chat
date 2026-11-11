@@ -173,5 +173,6 @@ Section "Uninstall"
   Delete "$DESKTOP\${SHORTCUT}.lnk"
 !endif
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Agu Chat"
   RMDir "$INSTDIR"
 SectionEnd

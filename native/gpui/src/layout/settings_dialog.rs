@@ -931,6 +931,7 @@ impl SettingsDialog {
         div()
             .child(Self::h("Window"))
             .child(self.bool_row(&sv, "alwaysOnTop", "Always on top", Some("Keep Agu Chat above other windows"), false, false, cx))
+            .child(self.bool_row(&sv, "startWithWindows", "Start with Windows", Some("Open Agu Chat when you sign in to Windows"), false, false, cx))
             .child(Self::h("Messages"))
             .child(self.bool_row(&sv, "timestamps", "Show timestamps", None, false, false, cx))
             .child(self.bool_row(&sv, "timestampSeconds", "Timestamps with seconds", None, !s.timestamps, false, cx))
