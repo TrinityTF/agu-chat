@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       # native/rust-toolchain.toml pins the Windows MSVC host; on the Mac runner use plain stable instead
       RUSTUP_TOOLCHAIN: stable
