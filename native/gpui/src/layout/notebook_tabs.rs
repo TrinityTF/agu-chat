@@ -9,7 +9,9 @@ use gpui::{
     SharedString, Subscription, TextRun, Window, WindowControlArea,
 };
 
-use agu_chat_core::protocol::Tab;
+use std::collections::HashSet;
+
+use agu_chat_core::protocol::{ConnFrame, Tab};
 
 use crate::icons;
 use crate::layout::app::{AguApp, DragGhost, SourcesDrag, SplitDrag, TabDrag};
@@ -17,7 +19,7 @@ use crate::chat::chat_pane::Activity;
 use crate::layout::hotkeys::{hotkey_hint, HotkeyAction};
 use crate::layout::macwin;
 use crate::layout::tab_window::tab_window;
-use crate::layout::tree::{auto_title, tab_title, whisper_only};
+use crate::layout::tree::{auto_title, leaves, source_key, tab_title, whisper_only};
 use crate::layout::ui::{tip, MenuEntry, MenuItem, MenuState};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
@@ -47,6 +49,49 @@ impl TabsState {
     }
 }
 
+/// What a tab's small circle says. Ordered by priority: a mention beats live, live beats new messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TabDot {
+    Message,
+    Live,
+    Highlight,
+}
+
+impl TabDot {
+    pub fn color(self) -> u32 {
+        match self {
+            TabDot::Message => theme::FAINT,
+            TabDot::Live => theme::EMERALD_500, // the split header's connected / live dot
+            TabDot::Highlight => theme::RED_500,
+        }
+    }
+}
+
+/// The dot a tab shows. The selected tab has seen its messages and mentions, so only live can show on it.
+pub fn tab_dot(selected: bool, activity: Option<Activity>, live: bool) -> Option<TabDot> {
+    let act = if selected { None } else { activity };
+    match act {
+        Some(Activity::Highlight) => Some(TabDot::Highlight),
+        _ if live => Some(TabDot::Live),
+        Some(Activity::Message) => Some(TabDot::Message),
+        None => None,
+    }
+}
+
+/// The menu hint beside a tab in the All tabs list.
+fn dot_hint(d: TabDot) -> &'static str {
+    match d {
+        TabDot::Highlight => "highlight",
+        TabDot::Live => "live",
+        TabDot::Message => "new",
+    }
+}
+
+/// True when any of the given connection states says the channel is live right now.
+pub fn any_live<'a>(states: impl IntoIterator<Item = Option<&'a ConnFrame>>) -> bool {
+    states.into_iter().any(|st| st.map(|s| s.live == Some(true)).unwrap_or(false))
+}
+
 enum Dropped {
     Tab,
     Split(String, Option<Vec<String>>),
@@ -64,8 +109,8 @@ fn text_width(window: &Window, s: &str, size: f32) -> f32 {
 impl AguApp {
     /// A tab's width as the DOM would lay it out: border, padding, the unread dot, the title (ellipsised at
     /// the 220px max) and the close button of the selected tab.
-    fn tab_width(&self, window: &Window, t: &Tab, selected: bool) -> f32 {
-        let mark = !selected && self.unread.contains_key(&t.id);
+    fn tab_width(&self, window: &Window, t: &Tab, selected: bool, live_tabs: &HashSet<String>) -> f32 {
+        let mark = tab_dot(selected, self.unread.get(&t.id).copied(), live_tabs.contains(&t.id)).is_some();
         let title = text_width(window, &tab_title(t, false), 12.0);
         let mut w = 1.0 + 20.0 + title;
         if mark {
@@ -190,8 +235,24 @@ impl AguApp {
         let n = tabs.len();
         let active_idx = tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
 
+        // tabs with a live channel in any split, from the panes' connection state (a Status event re-renders the app)
+        let live_tabs: HashSet<String> = tabs
+            .iter()
+            .filter(|t| {
+                leaves(t.root.as_ref()).iter().any(|l| match self.panes.get(&l.id) {
+                    Some(slot) => {
+                        let status = &slot.view.read(cx).status;
+                        any_live(l.sources.iter().map(|s| status.get(&source_key(s))))
+                    }
+                    None => false,
+                })
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        let dot_of = |t: &Tab| tab_dot(t.id == active_id, self.unread.get(&t.id).copied(), live_tabs.contains(&t.id));
+
         // ---- which tabs fit ----
-        let widths: Vec<f32> = tabs.iter().map(|t| self.tab_width(window, t, t.id == active_id)).collect();
+        let widths: Vec<f32> = tabs.iter().map(|t| self.tab_width(window, t, t.id == active_id, &live_tabs)).collect();
         let vw: f32 = window.viewport_size().width.into();
         let zone_w = self.anchor("tabs-zone").map(|b| f32::from(b.size.width)).unwrap_or(vw - 28.0 - 3.0 * 36.0);
         let full = zone_w - PLUS_W;
@@ -205,13 +266,7 @@ impl AguApp {
         self.tabs.start = start;
         let shown = |i: usize| i >= start && (i as isize) <= end;
         let hidden: Vec<&Tab> = tabs.iter().enumerate().filter(|(i, _)| !shown(*i)).map(|(_, t)| t).collect();
-        let hidden_mark = if hidden.iter().any(|t| self.unread.get(&t.id) == Some(&Activity::Highlight)) {
-            Some(Activity::Highlight)
-        } else if hidden.iter().any(|t| self.unread.contains_key(&t.id)) {
-            Some(Activity::Message)
-        } else {
-            None
-        };
+        let hidden_mark = hidden.iter().filter_map(|t| dot_of(t)).max();
 
         let drag_live = cx.has_active_drag();
         let dragging = self.tabs.drag_id.is_some() || self.tabs.split_over;
@@ -219,6 +274,13 @@ impl AguApp {
         let entity = cx.entity();
 
         // ---- chevron: every tab ----
+        let menu_hints: std::collections::HashMap<String, &'static str> = tabs
+            .iter()
+            .filter_map(|t| {
+                let dot = dot_of(t)?;
+                Some((t.id.clone(), dot_hint(dot)))
+            })
+            .collect();
         let all_tabs = (!hidden.is_empty()).then(|| {
             let n_hidden = hidden.len();
             div()
@@ -234,14 +296,14 @@ impl AguApp {
                 .text_color(c(theme::MUTED))
                 .hover(|s| s.bg(c(theme::RAISED_2)).text_color(c(theme::TEXT)))
                 .tooltip(tip(format!("All tabs ({n_hidden} more)")))
-                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     let entries: Vec<MenuEntry> = this
                         .layout
                         .tabs
                         .iter()
                         .map(|t| {
                             let id = t.id.clone();
-                            let hint = (t.id != this.layout.active).then(|| this.unread.get(&t.id).map(|m| if *m == Activity::Highlight { "highlight" } else { "new" }.to_string())).flatten();
+                            let hint = menu_hints.get(&t.id).map(|h| h.to_string());
                             MenuEntry::Item(MenuItem::new(tab_title(t, true), move |this, _w, cx| this.select_tab(&id, cx)).active(t.id == this.layout.active).hint(hint))
                         })
                         .collect();
@@ -249,9 +311,7 @@ impl AguApp {
                     this.toggle_menu("tabs-all", anchor, false, entries, cx);
                 }))
                 .child(icons::icon(icons::CHEVRON, 14.))
-                .children(hidden_mark.map(|m| {
-                    div().absolute().right(px(4.)).top(px(4.)).size(px(6.)).rounded_full().bg(if m == Activity::Highlight { c(theme::ACCENT_SOFT) } else { c(theme::FAINT) })
-                }))
+                .children(hidden_mark.map(|m| div().absolute().right(px(4.)).top(px(4.)).size(px(6.)).rounded_full().bg(c(m.color()))))
                 .child(self.probe("tabs-all".into(), cx))
         });
 
@@ -264,6 +324,7 @@ impl AguApp {
             let selected = t.id == active_id;
             let is_editing = self.tabs.editing.as_deref() == Some(&t.id);
             let mark = if selected { None } else { self.unread.get(&t.id).copied() };
+            let dot = dot_of(t);
             let tid = t.id.clone();
             let label: SharedString = tab_title(t, false).into();
             let full_title: SharedString = tab_title(t, true).into();
@@ -348,8 +409,8 @@ impl AguApp {
                         .child(input.clone());
                 }
             } else {
-                if let Some(m) = mark {
-                    el = el.child(div().size(px(6.)).flex_none().rounded_full().bg(if m == Activity::Highlight { c(theme::ACCENT_SOFT) } else { c(theme::FAINT) }));
+                if let Some(d) = dot {
+                    el = el.child(div().size(px(6.)).flex_none().rounded_full().bg(c(d.color())));
                 }
                 if whisper_only(t) {
                     el = el.child(div().flex_none().child(icons::icon(icons::MAIL, 12.).color(c(theme::platform_color(agu_chat_core::protocol::Platform::Twitch)))));
@@ -505,6 +566,51 @@ impl AguApp {
         }
         self.tabs.drop_at = None;
         self.tabs.split_over = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(live: Option<bool>) -> ConnFrame {
+        serde_json::from_value(serde_json::json!({"state": "open", "live": live})).unwrap()
+    }
+
+    #[test]
+    fn priority_is_mention_then_live_then_new() {
+        let (m, h) = (Some(Activity::Message), Some(Activity::Highlight));
+        assert_eq!(tab_dot(false, h, true), Some(TabDot::Highlight));
+        assert_eq!(tab_dot(false, h, false), Some(TabDot::Highlight));
+        assert_eq!(tab_dot(false, m, true), Some(TabDot::Live));
+        assert_eq!(tab_dot(false, m, false), Some(TabDot::Message));
+        assert_eq!(tab_dot(false, None, true), Some(TabDot::Live));
+        assert_eq!(tab_dot(false, None, false), None);
+    }
+
+    #[test]
+    fn selected_tab_shows_only_live() {
+        assert_eq!(tab_dot(true, Some(Activity::Highlight), true), Some(TabDot::Live));
+        assert_eq!(tab_dot(true, Some(Activity::Message), false), None);
+        assert_eq!(tab_dot(true, None, false), None);
+    }
+
+    #[test]
+    fn hidden_mark_takes_the_strongest() {
+        let dots = [Some(TabDot::Message), None, Some(TabDot::Live), Some(TabDot::Message)];
+        assert_eq!(dots.iter().filter_map(|d| *d).max(), Some(TabDot::Live));
+        let dots = [Some(TabDot::Live), Some(TabDot::Highlight)];
+        assert_eq!(dots.iter().filter_map(|d| *d).max(), Some(TabDot::Highlight));
+    }
+
+    #[test]
+    fn live_aggregates_over_any_source() {
+        let (on, off) = (conn(Some(true)), conn(Some(false)));
+        let unknown = conn(None);
+        assert!(any_live([Some(&off), Some(&on)]));
+        assert!(any_live([None, Some(&on)]));
+        assert!(!any_live([Some(&off), Some(&unknown), None]));
+        assert!(!any_live(std::iter::empty::<Option<&ConnFrame>>()));
     }
 }
 
