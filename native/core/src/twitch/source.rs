@@ -256,7 +256,7 @@ impl TwitchSource {
     /// Merge history into the live backlog (live entries win on a duplicate id) and tell every subscriber.
     async fn load_backlog(&self) {
         self.st.lock().unwrap().backlog_at = now_ms();
-        let lines = fetch_recent(&self.login, 200, 3000).await;
+        let lines = fetch_recent(&self.login, 200, 2000).await;
         if self.is_stopped() || lines.is_empty() {
             return;
         }

@@ -148,6 +148,11 @@ impl ChatPane {
     // ---- rows --------------------------------------------------------------------------------------------
 
     fn toolbar_button(&self, id: String, icon_path: &'static str, title: &'static str, danger: bool, cx: &mut Context<Self>, on: impl Fn(&mut Self, &mut Context<Self>) + 'static) -> AnyElement {
+        self.toolbar_button_at(id, icon_path, title, danger, cx, move |p, _pos, cx| on(p, cx))
+    }
+
+    /// Like `toolbar_button`, and also hands over where the click landed (window coordinates) for menus.
+    fn toolbar_button_at(&self, id: String, icon_path: &'static str, title: &'static str, danger: bool, cx: &mut Context<Self>, on: impl Fn(&mut Self, gpui::Point<gpui::Pixels>, &mut Context<Self>) + 'static) -> AnyElement {
         let _ = title;
         div()
             .id(ElementId::from(SharedString::from(id)))
@@ -156,7 +161,7 @@ impl ChatPane {
             .text_color(c(theme::MUTED))
             .hover(move |s| s.bg(c(theme::RAISED_2)).text_color(c(if danger { theme::RED_400 } else { theme::TEXT })))
             .child(icon(icon_path, 14.0))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| on(this, cx)))
+            .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| on(this, e.position(), cx)))
             .into_any_element()
     }
 
@@ -246,7 +251,11 @@ impl ChatPane {
             // The user's order: copy, pin, reply. No delete here (deleting stays on the mod buttons and the
             // user card), so a stray click on the hover bar can't remove a message.
             if let Some((sk, id)) = h.pin.clone() {
-                bar = bar.child(self.toolbar_button(format!("pin-{key}"), icons::PIN, "Pin", false, cx, move |p, cx| p.run_action(RowAction::Pin { sk: sk.clone(), id: id.clone() }, cx)));
+                bar = bar.child(self.toolbar_button_at(format!("pin-{key}"), icons::PIN, "Pin", false, cx, move |p, pos, cx| {
+                    // opens the "Pin for" menu at the button; choosing an entry does the pinning
+                    p.pin_pick = Some(super::chat_pane::PinPick { sk: sk.clone(), id: id.clone(), pos });
+                    cx.notify();
+                }));
             }
             if let Some(r) = h.reply.clone() {
                 bar = bar.child(self.toolbar_button(format!("reply-{key}"), icons::REPLY, "Reply", false, cx, move |p, cx| p.run_action(RowAction::Reply(r.clone()), cx)));
@@ -1037,6 +1046,55 @@ impl ChatPane {
         self.mod_pop.clone().map(|v| v.into())
     }
 
+    /// The "Pin for" menu a message's pin button opens: anchored at the button, below it or above it in the lower half.
+    fn pin_pick_el(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pick = self.pin_pick.as_ref()?;
+        let (sk, id, pos) = (pick.sk.clone(), pick.id.clone(), pick.pos);
+        let above = pos.y.f() > window.viewport_size().height.f() / 2.0;
+        let mut menu = div()
+            .id("pin-pick")
+            .occlude()
+            .w(px(232.))
+            .flex()
+            .flex_col()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c(theme::LINE))
+            .bg(c(theme::RAISED))
+            .p(px(4.))
+            .shadow_2xl()
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(c(theme::TEXT))
+            .font_family(theme::FONT)
+            .on_mouse_down_out(cx.listener(|this, _: &gpui::MouseDownEvent, _w, cx| {
+                this.pin_pick = None;
+                cx.notify();
+            }))
+            .child(div().px(px(8.)).py(px(4.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::FAINT)).child("PIN FOR"));
+        for (label, secs) in super::mod_actions::PIN_CHOICES {
+            let (sk, id) = (sk.clone(), id.clone());
+            menu = menu.child(
+                div()
+                    .id(ElementId::from(SharedString::from(format!("pin-for-{}", secs.unwrap_or(0)))))
+                    .w_full()
+                    .rounded(px(4.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .hover(|s| s.bg(c(theme::RAISED_2)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.pin_pick = None;
+                        this.pin_with(sk.clone(), id.clone(), secs, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        let corner = if above { Corner::BottomLeft } else { Corner::TopLeft };
+        let at = point(pos.x, if above { pos.y - px(12.) } else { pos.y + px(12.) });
+        Some(deferred(anchored().position(at).anchor(corner).snap_to_window_with_margin(gpui::Edges::all(px(4.))).child(menu)).with_priority(4).into_any_element())
+    }
+
     fn tip_el(&self, window: &Window) -> Option<AnyElement> {
         let (tip, pos) = self.tip.as_ref()?;
         let vp = window.viewport_size();
@@ -1153,6 +1211,7 @@ chat_list(
             .child(message_list)
             .children(self.toasts_el())
             .children(self.mod_pop_el(window, cx))
+            .children(self.pin_pick_el(window, cx))
             .child(self.send_box(window, cx))
             .children(self.tip_el(window))
     }

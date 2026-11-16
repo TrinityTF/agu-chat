@@ -48,7 +48,7 @@ pub const SLASH_COMMANDS: [SlashCommand; 25] = [
     sc("raid", "<user>", "raid"),
     sc("unraid", "cancel the pending raid", "raid"),
     sc("delete", "<messageId>", "delete"),
-    sc("pin", "[messageId] - pins the last message by default", "pin"),
+    sc("pin", "[messageId] [30s-30m|end] - pins the last message for 20 minutes by default", "pin"),
     sc("unpin", "unpin the current pin", "pin"),
     sc("me", "<action text> - passthrough, still supported", "send"),
 ];
@@ -101,6 +101,19 @@ const ANNOUNCE_COLOR_WORDS: [&str; 4] = ["blue", "green", "orange", "purple"];
 /// resolver lowercases too).
 pub fn parse_user_arg(s: &str) -> String {
     s.strip_prefix('@').unwrap_or(s).trim().to_lowercase()
+}
+
+/// A `/pin` duration word: "30s", "5m", "1800s" (30 s to 30 min) -> Some(Some(seconds)); "end" / "forever" /
+/// "manual" -> Some(None) (until unpinned or the stream ends); anything else (a message id) -> None.
+pub fn parse_pin_duration(w: &str) -> Option<Option<u32>> {
+    let w = w.to_ascii_lowercase();
+    if matches!(w.as_str(), "end" | "forever" | "manual") {
+        return Some(None);
+    }
+    let (num, mult) = if let Some(n) = w.strip_suffix('m') { (n, 60) } else if let Some(n) = w.strip_suffix('s') { (n, 1) } else { return None };
+    let n: u32 = num.parse().ok()?;
+    let secs = n.checked_mul(mult)?;
+    (30..=1800).contains(&secs).then_some(Some(secs))
 }
 
 pub fn split_args(s: &str) -> Vec<&str> {
@@ -255,11 +268,28 @@ pub fn plan_slash(raw: &str, last_message_id: Option<&str>, pinned_id: Option<&s
             mod_action(json!({"action": "delete", "messageId": id}), "deleted".into())
         }
         "pin" => {
-            let id = split_args(rest).first().map(|s| s.to_string()).or_else(|| last_message_id.map(|s| s.to_string())).unwrap_or_default();
+            // `/pin [messageId] [duration]`: a duration is "30s".."30m" or "end" (until unpinned / stream ends)
+            let mut id = String::new();
+            let mut duration: Option<Option<u32>> = None;
+            for a in split_args(rest) {
+                match parse_pin_duration(a) {
+                    Some(d) if duration.is_none() => duration = Some(d),
+                    _ if id.is_empty() => id = a.to_string(),
+                    _ => {}
+                }
+            }
+            if id.is_empty() {
+                id = last_message_id.map(|s| s.to_string()).unwrap_or_default();
+            }
             if id.is_empty() {
                 return Err("Nothing to pin yet".into());
             }
-            mod_action(json!({"action": "pin", "messageId": id, "durationSeconds": 1200}), "Pinned".into())
+            let mut body = json!({"action": "pin", "messageId": id});
+            match duration.unwrap_or(Some(1200)) {
+                Some(s) => body["durationSeconds"] = json!(s),
+                None => {}
+            }
+            mod_action(body, "Pinned".into())
         }
         "unpin" => {
             let Some(id) = pinned_id.filter(|s| !s.is_empty()) else { return Err("Nothing is pinned".into()) };
@@ -430,6 +460,11 @@ mod tests {
         assert_eq!(plan("/pin").body.unwrap(), json!({"action": "pin", "messageId": "last", "durationSeconds": 1200}));
         assert_eq!(plan("/pin xyz").body.unwrap()["messageId"], "xyz");
         assert_eq!(err("/pin"), "Nothing to pin yet");
+        assert_eq!(plan("/pin xyz 5m").body.unwrap(), json!({"action": "pin", "messageId": "xyz", "durationSeconds": 300}));
+        assert_eq!(plan("/pin 30s").body.unwrap(), json!({"action": "pin", "messageId": "last", "durationSeconds": 30}));
+        assert_eq!(plan("/pin end").body.unwrap(), json!({"action": "pin", "messageId": "last"}));
+        assert_eq!(parse_pin_duration("31m"), None);
+        assert_eq!(parse_pin_duration("0123-abc"), None);
         assert_eq!(plan("/unpin").body.unwrap(), json!({"action": "unpin", "messageId": "pinned"}));
         assert_eq!(err("/unpin"), "Nothing is pinned");
     }

@@ -347,7 +347,11 @@ impl EventSubManager {
             if acc.is_mod == Some(false) {
                 return source.set_esub(false, None, None); // simply not a mod here: nothing to show
             }
-            return source.set_esub(false, Some(if rec.scopes.iter().any(|s| s == "user:read:moderated_channels") { "error" } else { "relogin" }), None);
+            let can_ask = rec.scopes.iter().any(|s| s == "user:read:moderated_channels");
+            if can_ask {
+                self.retry_later(&source); // Twitch was unreachable (typical right at startup): ask again, don't stay in "error"
+            }
+            return source.set_esub(false, Some(if can_ask { "error" } else { "relogin" }), None);
         }
         if !has_required_scopes(&rec.scopes) {
             return source.set_esub(false, Some("relogin"), None);

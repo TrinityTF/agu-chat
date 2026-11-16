@@ -67,8 +67,27 @@ pub async fn resolve_automod(bridge: &Arc<dyn AguBridge>, source: &SourceRef, id
     (AutomodResult::Fail, warn(fail_text(&r, "action failed")))
 }
 
-pub async fn pin_message(bridge: &Arc<dyn AguBridge>, source: &SourceRef, id: &str) -> (bool, ToastMsg) {
-    twitch_action(bridge, source, json!({"action": "pin", "messageId": id, "durationSeconds": 1200}), Some("Pinned".into())).await
+/// The "Pin for" menu: Twitch takes 30 seconds to 30 minutes; `None` pins until unpinned or the stream ends.
+pub const PIN_CHOICES: [(&str, Option<u32>); 7] = [
+    ("30 seconds", Some(30)),
+    ("1 minute", Some(60)),
+    ("2 minutes", Some(120)),
+    ("5 minutes", Some(300)),
+    ("10 minutes", Some(600)),
+    ("30 minutes", Some(1800)),
+    ("Until unpinned or end of stream", None),
+];
+
+pub fn pin_body(id: &str, seconds: Option<u32>) -> serde_json::Value {
+    let mut body = json!({"action": "pin", "messageId": id});
+    if let Some(s) = seconds {
+        body["durationSeconds"] = json!(s);
+    }
+    body
+}
+
+pub async fn pin_message(bridge: &Arc<dyn AguBridge>, source: &SourceRef, id: &str, seconds: Option<u32>) -> (bool, ToastMsg) {
+    twitch_action(bridge, source, pin_body(id, seconds), Some("Pinned".into())).await
 }
 
 pub async fn unpin_message(bridge: &Arc<dyn AguBridge>, source: &SourceRef, id: &str) -> (bool, ToastMsg) {
@@ -137,4 +156,25 @@ pub async fn youtube_mod_action(bridge: &Arc<dyn AguBridge>, source: &SourceRef,
         "ban" => format!("Banned {who} on YouTube"),
         _ => "Message deleted on YouTube".to_string(),
     })
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_choices_are_within_twitchs_range() {
+        for (_, s) in PIN_CHOICES {
+            if let Some(s) = s {
+                assert!((30..=1800).contains(&s));
+            }
+        }
+        assert_eq!(PIN_CHOICES.last().unwrap().1, None);
+    }
+
+    #[test]
+    fn pin_body_omits_duration_for_until_unpinned() {
+        assert_eq!(pin_body("m1", Some(300)), json!({"action": "pin", "messageId": "m1", "durationSeconds": 300}));
+        assert_eq!(pin_body("m1", None), json!({"action": "pin", "messageId": "m1"}));
+    }
 }
