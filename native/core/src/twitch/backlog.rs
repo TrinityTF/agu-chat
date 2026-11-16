@@ -13,14 +13,34 @@ use crate::util::{js_int_or, now_ms};
 
 const BASE: &str = "https://recent-messages.robotty.de/api/v2/recent-messages";
 
-/// Raw lines for a channel, or [] on any failure. One retry when the service says it only just started
-/// tracking the channel.
-pub async fn fetch_recent(login: &str, limit: usize, retry_delay_ms: u64) -> Vec<String> {
+/// Tries per channel. At startup the app fires one request per open channel while the network and the
+/// service are both cold; a single 8 s attempt used to give up for good and leave the chat empty until the
+/// app was reopened.
+const MAX_ATTEMPTS: u32 = 4;
+
+/// A failed request is worth another try when it never reached the service or the service itself failed.
+pub fn is_transient(status: u16) -> bool {
+    status == 0 || status == 408 || status == 429 || status >= 500
+}
+
+/// Wait before attempt `attempt + 1` (attempt counts from 0): `base`, then 2x, 4x, capped at 15 s, plus a
+/// little spread so several channels do not hit the service in the same instant. None = out of attempts.
+pub fn retry_delay_ms(attempt: u32, base_ms: u64, spread: u64) -> Option<u64> {
+    if attempt + 1 >= MAX_ATTEMPTS {
+        return None;
+    }
+    Some((base_ms << attempt.min(8)).min(15_000) + spread % 500)
+}
+
+/// Raw lines for a channel, or [] once every try failed. Retries with backoff when the service is unreachable
+/// or failing, and when it says it only just started tracking the channel.
+pub async fn fetch_recent(login: &str, limit: usize, retry_delay_ms_base: u64) -> Vec<String> {
     if std::env::var("AGU_IRC_URL").map(|v| !v.is_empty()).unwrap_or(false) {
         return Vec::new(); // benchmark mode: no backlog, identical load for both apps
     }
-    for attempt in 0..2 {
-        match request_json(&format!("{BASE}/{}?limit={limit}", url::form_urlencoded::byte_serialize(login.as_bytes()).collect::<String>()), ReqOpts { timeout_ms: 8000, ..Default::default() }).await {
+    let url = format!("{BASE}/{}?limit={limit}", url::form_urlencoded::byte_serialize(login.as_bytes()).collect::<String>());
+    for attempt in 0..MAX_ATTEMPTS {
+        match request_json(&url, ReqOpts { timeout_ms: 10_000, ..Default::default() }).await {
             Ok(data) => {
                 let lines: Vec<String> = data["messages"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
                 let has_error = data.get("error_code").map(crate::util::truthy).unwrap_or(false);
@@ -29,11 +49,14 @@ pub async fn fetch_recent(login: &str, limit: usize, retry_delay_ms: u64) -> Vec
                 }
             }
             Err(err) => {
-                log(&format!("recent-messages unavailable for {login}: {}", err.message));
-                return Vec::new();
+                log(&format!("recent-messages unavailable for {login} (try {}): {}", attempt + 1, err.message));
+                if !is_transient(err.status) {
+                    return Vec::new();
+                }
             }
         }
-        tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+        let Some(wait) = retry_delay_ms(attempt, retry_delay_ms_base, rand::random::<u64>()) else { break };
+        tokio::time::sleep(Duration::from_millis(wait)).await;
     }
     Vec::new()
 }
@@ -87,4 +110,25 @@ pub fn shape_recent(lines: &[String]) -> (Vec<Value>, Option<String>) {
         }
     }
     (entries, room_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_statuses() {
+        assert!(is_transient(0) && is_transient(503) && is_transient(429));
+        assert!(!is_transient(404) && !is_transient(400));
+    }
+
+    #[test]
+    fn backoff_grows_and_ends() {
+        assert_eq!(retry_delay_ms(0, 2000, 0), Some(2000));
+        assert_eq!(retry_delay_ms(1, 2000, 0), Some(4000));
+        assert_eq!(retry_delay_ms(2, 2000, 0), Some(8000));
+        assert_eq!(retry_delay_ms(3, 2000, 0), None);
+        assert_eq!(retry_delay_ms(2, 10_000, 0), Some(15_000));
+        assert!(retry_delay_ms(0, 2000, 12345).unwrap() < 2500);
+    }
 }
