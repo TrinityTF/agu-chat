@@ -118,6 +118,14 @@ pub struct SendBox {
     _subs: Vec<gpui::Subscription>,
 }
 
+/// The toast lines for the targets that failed, in target order. With more than one target each line names its platform.
+fn send_failures(outcomes: Vec<(Platform, Option<String>)>, multi: bool) -> Vec<String> {
+    outcomes
+        .into_iter()
+        .filter_map(|(p, err)| err.map(|e| if multi { format!("{}: {e}", icons::platform_label(p)) } else { e }))
+        .collect()
+}
+
 /// `postText`: the error to show, or None when it went out.
 pub async fn post_text(bridge: &Arc<dyn agu_chat_core::protocol::AguBridge>, source: &SourceRef, path: &str, text: &str, reply_to: Option<&str>) -> Option<String> {
     let mut body = json!({"text": text});
@@ -590,17 +598,22 @@ impl SendBox {
         cx.notify();
         let reply = self.reply.clone();
         cx.spawn(async move |this, cx| {
-            // Sequential, not parallel: rate limits are per platform, and one failing must not lose the message
-            // that already reached another.
-            let mut failures: Vec<String> = Vec::new();
-            for s in &targets {
-                let Some(path) = send_path(s.source.platform) else { continue };
+            // All targets at once, so the message lands in every chat together and one slow platform does not hold
+            // up the rest. Each target is its own request (rate limits are per platform), and one failing never
+            // loses the message that already reached another: every outcome is collected, in target order.
+            let multi = targets.len() > 1;
+            let sends = targets.iter().filter_map(|s| {
+                let path = send_path(s.source.platform)?;
                 // A reply id only means something in the chat it came from.
                 let reply_to = reply.as_ref().filter(|r| r.sk == s.sk).map(|r| r.id.clone());
-                if let Some(err) = post_text(&bridge, &s.source, path, &body, reply_to.as_deref()).await {
-                    failures.push(if targets.len() > 1 { format!("{}: {err}", icons::platform_label(s.source.platform)) } else { err });
-                }
-            }
+                let (bridge, body) = (&bridge, &body);
+                Some(async move {
+                    let err = post_text(bridge, &s.source, path, body, reply_to.as_deref()).await;
+                    (s.source.platform, err)
+                })
+            });
+            let outcomes = futures::future::join_all(sends).await;
+            let failures = send_failures(outcomes, multi);
             let _ = this.update(cx, |sb, cx| {
                 sb.sending = false;
                 if !failures.is_empty() {
@@ -1129,6 +1142,17 @@ impl Render for SendBox {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn send_failures_keep_target_order_and_name_platforms_only_for_several_targets() {
+        use agu_chat_core::protocol::Platform::*;
+        let out = vec![(Twitch, None), (Kick, Some("slow".to_string())), (X, Some("nope".to_string()))];
+        let many = send_failures(out.clone(), true);
+        assert_eq!(many.len(), 2);
+        assert!(many[0].ends_with(": slow") && many[1].ends_with(": nope"));
+        assert_eq!(send_failures(vec![(Twitch, Some("nope".into()))], false), vec!["nope".to_string()]);
+        assert!(send_failures(vec![(Twitch, None), (Kick, None)], true).is_empty());
+    }
+
     use super::*;
 
     fn entry(name: &str, img: &str, insert: Option<&str>) -> InvEntry {
