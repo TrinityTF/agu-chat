@@ -85,11 +85,14 @@ pub struct TextItem {
     pub underline_on_hover: bool,
     /// hover popup (a Unicode emoji)
     pub tip: Option<Rc<Tip>>,
+    /// images drawn centred over the text, each fitted into `overlay_box` (7TV zero-width emotes on an emoji)
+    pub overlays: Vec<SharedString>,
+    pub overlay_box: (f32, f32),
 }
 
 impl TextItem {
     pub fn new(text: impl Into<SharedString>, size: f32, color: Hsla) -> Self {
-        TextItem { text: text.into(), size, color, weight: FontWeight::NORMAL, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None }
+        TextItem { text: text.into(), size, color, weight: FontWeight::NORMAL, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None, overlays: Vec::new(), overlay_box: (0.0, 0.0) }
     }
     pub fn tip(mut self, t: Tip) -> Self {
         self.tip = Some(Rc::new(t));
@@ -272,6 +275,7 @@ impl InlineContent {
                     if let Some(u) = t.paint.as_ref().and_then(|p| p.image_url.as_ref()) {
                         v.push(u.clone());
                     }
+                    v.extend(t.overlays.iter().map(|o| o.to_string()));
                 }
                 _ => {}
             }
@@ -472,7 +476,7 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
             Atom { w: i.size + 2.0 * i.margin_x, above: i.size / 2.0 - c, below: i.size / 2.0 + c, kind: AtomKind::Box { item }, break_before: false, dims: (i.size, i.size) }
         }
         Item::Pill(p) => {
-            let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None }, &p.text, 0, 1);
+            let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None, overlays: Vec::new(), overlay_box: (0.0, 0.0) }, &p.text, 0, 1);
             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
             Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc) }
         }
@@ -830,6 +834,19 @@ impl Element for InlineFlow {
                             let y = base_abs + 1.5;
                             window.paint_quad(gpui::fill(Bounds::new(point(px(x0), px(y)), size(px(p.atom.w), px(1.))), t.color));
                         }
+                        // zero-width emotes stacked on an emoji: centred on the glyph, which keeps its place
+                        if !t.overlays.is_empty() {
+                            let (bw, bh) = t.overlay_box;
+                            let c = point(px(x0 + p.atom.w / 2.0), px(base_abs + TEXT_DY - (*asc - shaped.descent.f()) / 2.0));
+                            for o in &t.overlays {
+                                if let Some(img) = imgs.0.get(o, bw, bh, window.scale_factor()) {
+                                    let (ow, oh) = fit_down(img.w as f32, img.h as f32, bw, bh);
+                                    let or = Bounds::new(point(c.x - px(ow / 2.0), c.y - px(oh / 2.0)), size(px(ow), px(oh)));
+                                    let idx = imgs.0.frame(&img, window, cx);
+                                    let _ = window.paint_image(or, gpui::Corners::all(px(0.)), img.gpu.clone(), idx, false);
+                                }
+                            }
+                        }
                     }
                 }
                 AtomKind::Box { item } => {
@@ -861,7 +878,7 @@ impl Element for InlineFlow {
                             let mut q = gpui::fill(r, pl.bg);
                             q.corner_radii = gpui::Corners::all(px(pl.radius));
                             window.paint_quad(q);
-                            let ti = TextItem { text: pl.text.clone(), size: pl.size, color: pl.color, weight: pl.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None };
+                            let ti = TextItem { text: pl.text.clone(), size: pl.size, color: pl.color, weight: pl.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None, overlays: Vec::new(), overlay_box: (0.0, 0.0) };
                             let shaped = shape(window, &ti, &pl.text, 0, 1);
                             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
                             let hl = (self.content.line_ratio * pl.size - (asc + desc)) / 2.0;
@@ -881,7 +898,7 @@ impl Element for InlineFlow {
                                     let _ = window.paint_svg(ir, SharedString::from(*path), TransformationMatrix::unit(), col, cx);
                                 }
                                 ButtonFace::Label(text, fs) => {
-                                    let ti = TextItem { text: text.clone(), size: *fs, color: col, weight: FontWeight::BOLD, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None };
+                                    let ti = TextItem { text: text.clone(), size: *fs, color: col, weight: FontWeight::BOLD, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None, overlays: Vec::new(), overlay_box: (0.0, 0.0) };
                                     let shaped = shape(window, &ti, text, 0, 1);
                                     // leading-none: centre the glyph box in the button
                                     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());

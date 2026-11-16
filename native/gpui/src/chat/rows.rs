@@ -326,10 +326,22 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                 f.push(Item::Text(TextItem::new(format!("{amount}"), base, if strike { with_alpha(c, 0.45) } else { c }).weight(FontWeight::BOLD)));
             }
             MsgPart::Link { href, text } => f.push(link_item(href, text, base)),
-            MsgPart::Emoji { text, .. } => {
+            MsgPart::Emoji { text, overlays } => {
                 let mut ti = TextItem::new(text.clone(), base, text_color).tip(emoji_tip(text));
                 if strike {
                     ti.color = with_alpha(text_color, 0.45);
+                }
+                if !overlays.is_empty() {
+                    // zero-width emotes on the emoji: drawn over its centre, fitted like on an emote
+                    let (px, max_w, _) = emote_box(base, size);
+                    ti.overlays = overlays
+                        .iter()
+                        .map(|o| {
+                            let oe = emotes.and_then(|e| e.all.get(&o.name)).cloned();
+                            emote_part_url(o.source, &o.id, size, oe.as_deref()).into()
+                        })
+                        .collect();
+                    ti.overlay_box = (max_w, px);
                 }
                 f.push(Item::Text(ti));
             }

@@ -258,11 +258,11 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
             Mid::Mention { login, name, color, user_id } => out.push(MsgPart::Mention { login, name, color, user_id }),
             Mid::Emote { source, id, name, zero_width } => {
                 if source != EmoteSource::Twitch && zero_width {
-                    // A zero-width emote overlays the PRECEDING emote; walk back past exactly one connecting
-                    // whitespace-only text token and drop it.
+                    // A zero-width emote overlays the PRECEDING emote or emoji; walk back past exactly one
+                    // connecting whitespace-only text token and drop it.
                     let mut prev = out.len() as isize - 1;
                     if prev >= 1 {
-                        if let (MsgPart::Text(t), MsgPart::Emote { .. }) = (&out[prev as usize], &out[prev as usize - 1]) {
+                        if let (MsgPart::Text(t), MsgPart::Emote { .. } | MsgPart::Emoji { .. }) = (&out[prev as usize], &out[prev as usize - 1]) {
                             if t.chars().all(|c| c.is_whitespace()) {
                                 out.remove(prev as usize);
                                 prev -= 1;
@@ -270,7 +270,7 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
                         }
                     }
                     if prev >= 0 {
-                        if let MsgPart::Emote { overlays, .. } = &mut out[prev as usize] {
+                        if let MsgPart::Emote { overlays, .. } | MsgPart::Emoji { overlays, .. } = &mut out[prev as usize] {
                             overlays.push(Overlay { source, id, name });
                             continue;
                         }
@@ -334,6 +334,34 @@ mod tests {
         // a Twitch emote range after an emoji still counts code points
         let p = build_parts("😀 Kappa", "25:2-6", None, None, "");
         assert_eq!(p[0], MsgPart::Emoji { text: "😀".into(), overlays: vec![] });
+    }
+
+    fn seven(entries: &[(&str, &str, bool)]) -> EmoteSets {
+        use super::super::emotes::ProviderEmote;
+        let mut sets = EmoteSets::default();
+        for (id, name, zw) in entries {
+            let e = std::sync::Arc::new(ProviderEmote { provider: EmoteProvider::SevenTv, id: id.to_string(), name: name.to_string(), zero_width: *zw, animated: false, urls: Default::default() });
+            sets.all.insert(name.to_string(), e);
+        }
+        sets
+    }
+
+    #[test]
+    fn zero_width_stacks_on_emotes_and_emoji() {
+        let sets = seven(&[("c", "RedCircle", true), ("k", "KEKW", false)]);
+        let ov = vec![Overlay { source: EmoteSource::Provider(EmoteProvider::SevenTv), id: "c".into(), name: "RedCircle".into() }];
+        // the reported case: "🍟 RedCircle" repeated, each circle on its fries
+        let p = build_parts("🍟 RedCircle 🍟 RedCircle", "", Some(&sets), None, "");
+        assert_eq!(p, vec![MsgPart::Emoji { text: "🍟".into(), overlays: ov.clone() }, MsgPart::Text(" ".into()), MsgPart::Emoji { text: "🍟".into(), overlays: ov.clone() }]);
+        // an emoji glued to text still takes it
+        let p = build_parts("lol🍟 RedCircle", "", Some(&sets), None, "");
+        assert_eq!(p, vec![MsgPart::Text("lol".into()), MsgPart::Emoji { text: "🍟".into(), overlays: ov.clone() }]);
+        // emotes as before
+        let p = build_parts("KEKW RedCircle", "", Some(&sets), None, "");
+        assert!(matches!(&p[..], [MsgPart::Emote { name, overlays, .. }] if name == "KEKW" && *overlays == ov));
+        // after plain text it stays an emote of its own
+        let p = build_parts("hi RedCircle", "", Some(&sets), None, "");
+        assert!(matches!(&p[..], [MsgPart::Text(_), MsgPart::Text(_), MsgPart::Emote { name, overlays, .. }] if name == "RedCircle" && overlays.is_empty()));
     }
 
     #[test]
