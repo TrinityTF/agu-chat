@@ -16,11 +16,14 @@ use super::images::{Images, ImagesHandle};
 use super::net::Net;
 use super::twitch::cosmetics::Cosmetics;
 use super::twitch::emotes::init_cache;
+use super::twitch::seven_events::SevenEvents;
 
 pub struct ServicesInner {
     pub net: Arc<Net>,
     pub images: ImagesHandle,
     pub cosmetics: Cosmetics,
+    /// live 7TV emote set changes (EventAPI), shared by every pane
+    pub seven_events: SevenEvents,
     pub alerts: Alerts,
     pub bridge: Arc<dyn AguBridge>,
     pub data_dir: PathBuf,
@@ -48,10 +51,12 @@ pub fn init(cx: &mut App, bridge: Arc<dyn AguBridge>, data_dir: PathBuf) -> Serv
     let images = ImagesHandle(Images::new(&net, Arc::new(move || {
         let _ = tx.unbounded_send(());
     })));
+    let seven_events = SevenEvents::new(net.clone(), cx);
     let svc = Services(Rc::new(ServicesInner {
         net,
         images: images.clone(),
         cosmetics: Cosmetics::new(),
+        seven_events,
         alerts: Alerts::new(),
         bridge,
         data_dir,

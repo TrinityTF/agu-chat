@@ -249,6 +249,7 @@ mod tests {
             seven: scoped(vec![pe(EmoteProvider::SevenTv, "g1", "GLOBAL7", false), pe(EmoteProvider::SevenTv, "z1", "ZW", true)], vec![pe(EmoteProvider::SevenTv, "c1", "CHAN7", false)]),
             bttv: scoped(vec![], vec![pe(EmoteProvider::Bttv, "b1", "BTTVCH", false)]),
             ffz: scoped(vec![], vec![]),
+            ..Default::default()
         };
         let twitch = TwitchEmotesResp { channel: vec![tw("1", "ChanSub")], global: vec![tw("25", "Kappa")], other: vec![] };
         let inv = build_twitch_inventory(Some(&sets), &twitch, &[pe(EmoteProvider::SevenTv, "p1", "MINE", false)]);
@@ -270,6 +271,7 @@ mod tests {
             seven: scoped(vec![pe(EmoteProvider::SevenTv, "g", "Same", false)], vec![pe(EmoteProvider::SevenTv, "c", "Same", false)]),
             bttv: scoped(vec![pe(EmoteProvider::Bttv, "bg", "Same", false)], vec![]),
             ffz: scoped(vec![], vec![]),
+            ..Default::default()
         };
         let inv = build_twitch_inventory(Some(&sets), &TwitchEmotesResp::default(), &[]);
         let same: Vec<_> = inv.inventory.iter().filter(|e| e.name == "Same").collect();

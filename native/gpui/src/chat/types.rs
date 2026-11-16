@@ -68,7 +68,15 @@ lenient! {
         pub user: ChatUser,
         pub text: String,
         pub emotes: Option<String>,
+        /// set on the app's own notice of a 7TV emote change (not a Twitch notice)
+        pub seventv: Option<SevenTvNote>,
     }
+}
+
+lenient! {
+    /// A change to the channel's 7TV emotes, heard live: `action` is "added", "removed", "renamed" or "set" (the
+    /// channel switched its active set; `name` is the set's name, no emote).
+    pub struct SevenTvNote { pub actor: String, pub action: String, pub emote_id: String, pub name: String, pub old_name: String }
 }
 
 lenient! { pub struct ModFeedEntry { pub ts: i64, pub feed_kind: String, pub text: String } }

@@ -337,7 +337,14 @@ impl ChatPane {
                 .child(lines)
                 .into_any_element();
         }
-        let (bar, bg) = if n.raid { (token_a(theme::ORANGE_500, 0.9), token_a(theme::ORANGE_500, 0.12)) } else { (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12)) };
+        let (bar, bg) = if let Some(b) = n.bar {
+            // the app's own notices (7TV emote changes): their bar, a faint lift
+            (b, gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.035 }.into())
+        } else if n.raid {
+            (token_a(theme::ORANGE_500, 0.9), token_a(theme::ORANGE_500, 0.12))
+        } else {
+            (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12))
+        };
         let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_3().border_color(bar).bg(bg).px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
         if let Some(t) = &n.text {
             d = d.child(self.flow(t, Rc::new(vec![]), cx));

@@ -133,6 +133,14 @@ pub fn read_cache(key: &str, ttl_ms: i64) -> Option<Value> {
     e.get("data").cloned()
 }
 
+/// Drop an entry (its data went stale: the next load fetches it again).
+pub fn forget_cache(key: &str) {
+    let mut c = cache().lock().unwrap();
+    if c.map.remove(key).is_some() {
+        c.dirty = true;
+    }
+}
+
 pub fn write_cache(key: &str, data: &Value) {
     let mut c = cache().lock().unwrap();
     c.map.insert(key.to_string(), json!({"v": 1, "at": now_ms(), "data": data}));
@@ -152,7 +160,12 @@ pub fn flush_cache() {
 }
 
 async fn fetch_json_cached(client: &reqwest::Client, key: &str, ttl: i64, url: &str) -> Option<Value> {
-    if let Some(v) = read_cache(key, ttl) {
+    fetch_json(client, key, ttl, url, false).await
+}
+
+/// `fresh` skips the cached entry (the answer still replaces it).
+async fn fetch_json(client: &reqwest::Client, key: &str, ttl: i64, url: &str, fresh: bool) -> Option<Value> {
+    if let Some(v) = (!fresh).then(|| read_cache(key, ttl)).flatten() {
         return Some(v);
     }
     let r = client.get(url).send().await.ok()?;
@@ -174,37 +187,70 @@ fn s(v: &Value, k: &str) -> String {
     }
 }
 
+/// One ActiveEmote of a 7TV set (`{id, name, flags, data: {flags, animated}}`); `name` is the set's name for it.
+pub fn seven_tv_emote(item: &Value) -> Arc<ProviderEmote> {
+    let flags = item.get("flags").and_then(|f| f.as_i64()).unwrap_or(0);
+    let data_flags = item.pointer("/data/flags").and_then(|f| f.as_i64()).unwrap_or(0);
+    let zero_width = flags & 1 != 0 || data_flags & 256 != 0;
+    let id = s(item, "id");
+    let u = |d: u8| Some(format!("https://cdn.7tv.app/emote/{id}/{d}x.webp"));
+    Arc::new(ProviderEmote {
+        provider: EmoteProvider::SevenTv,
+        id: id.clone(),
+        name: s(item, "name"),
+        zero_width,
+        animated: item.pointer("/data/animated").and_then(|a| a.as_bool()).unwrap_or(false),
+        urls: [u(1), u(2), u(3), u(4)],
+    })
+}
+
 fn seven_tv_map(emotes: Option<&Value>) -> EmoteMap {
     let mut m = EmoteMap::new();
     for item in emotes.and_then(|e| e.as_array()).into_iter().flatten() {
-        let flags = item.get("flags").and_then(|f| f.as_i64()).unwrap_or(0);
-        let data_flags = item.pointer("/data/flags").and_then(|f| f.as_i64()).unwrap_or(0);
-        let zero_width = flags & 1 != 0 || data_flags & 256 != 0;
-        let id = s(item, "id");
-        let name = s(item, "name");
-        let u = |d: u8| Some(format!("https://cdn.7tv.app/emote/{id}/{d}x.webp"));
-        m.insert(
-            name.clone(),
-            Arc::new(ProviderEmote {
-                provider: EmoteProvider::SevenTv,
-                id: id.clone(),
-                name,
-                zero_width,
-                animated: item.pointer("/data/animated").and_then(|a| a.as_bool()).unwrap_or(false),
-                urls: [u(1), u(2), u(3), u(4)],
-            }),
-        );
+        let e = seven_tv_emote(item);
+        m.insert(e.name.clone(), e);
     }
     m
 }
 
-pub async fn fetch_seven_tv(client: &reqwest::Client, channel_id: &str) -> ProviderScopedMap {
-    let (ck, cu) = (format!("emotes:7tv:channel:{channel_id}"), format!("https://7tv.io/v3/users/twitch/{channel_id}"));
+/// The emotes of one 7TV set by id, never cached (a set the channel just switched to).
+pub async fn fetch_seven_tv_set(client: &reqwest::Client, set_id: &str) -> Option<EmoteMap> {
+    let r = client.get(format!("https://7tv.io/v3/emote-sets/{set_id}")).send().await.ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    let d: Value = r.json().await.ok()?;
+    Some(seven_tv_map(d.get("emotes")))
+}
+
+/// A channel's 7TV account: its user id and the id of its active emote set (what the EventAPI subscribes to).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SevenTvIds {
+    pub user_id: String,
+    pub set_id: String,
+}
+
+pub fn seven_tv_channel_key(channel_id: &str) -> String {
+    format!("emotes:7tv:channel:{channel_id}")
+}
+
+/// The ids in a `/v3/users/twitch/<id>` answer.
+fn seven_tv_ids(c: &Value) -> Option<SevenTvIds> {
+    let user_id = c.pointer("/user/id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let set_id = c.pointer("/emote_set/id").or_else(|| c.get("emote_set_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    (!user_id.is_empty() || !set_id.is_empty()).then_some(SevenTvIds { user_id, set_id })
+}
+
+/// 7TV global + channel emotes and the channel's 7TV ids. `fresh` reloads the channel past its cache (a live
+/// update said it changed).
+pub async fn fetch_seven_tv(client: &reqwest::Client, channel_id: &str, fresh: bool) -> (ProviderScopedMap, Option<SevenTvIds>) {
+    let (ck, cu) = (seven_tv_channel_key(channel_id), format!("https://7tv.io/v3/users/twitch/{channel_id}"));
     let (g, c) = tokio::join!(
         fetch_json_cached(client, "emotes:7tv:global:global", EMOTE_GLOBAL_TTL_MS, "https://7tv.io/v3/emote-sets/global"),
-        fetch_json_cached(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu),
+        fetch_json(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu, fresh),
     );
-    ProviderScopedMap { global: g.map(|g| seven_tv_map(g.get("emotes"))).unwrap_or_default(), channel: c.map(|c| seven_tv_map(c.pointer("/emote_set/emotes"))).unwrap_or_default() }
+    let ids = c.as_ref().and_then(seven_tv_ids);
+    (ProviderScopedMap { global: g.map(|g| seven_tv_map(g.get("emotes"))).unwrap_or_default(), channel: c.map(|c| seven_tv_map(c.pointer("/emote_set/emotes"))).unwrap_or_default() }, ids)
 }
 
 // ---- BTTV -------------------------------------------------------------------------------------
@@ -427,6 +473,21 @@ mod tests {
         assert!(m["N"].zero_width);
         assert_eq!(provider_emote_url(&m["ZW"], SizeOpt::Medium), "https://cdn.7tv.app/emote/abc/2x.webp");
         assert_eq!(provider_tooltip_url(&m["ZW"]), "https://cdn.7tv.app/emote/abc/4x.webp");
+    }
+
+    #[test]
+    fn seven_tv_channel_ids() {
+        let c = json!({"id": "71092938", "emote_set_id": "SET", "emote_set": {"id": "SET", "emotes": []}, "user": {"id": "USER"}});
+        assert_eq!(seven_tv_ids(&c), Some(SevenTvIds { user_id: "USER".into(), set_id: "SET".into() }));
+        assert_eq!(seven_tv_ids(&json!({"emote_set": null})), None);
+    }
+
+    #[test]
+    fn forgotten_entries_are_not_read() {
+        write_cache("test:forget", &json!(1));
+        assert_eq!(read_cache("test:forget", EMOTE_CHANNEL_TTL_MS), Some(json!(1)));
+        forget_cache("test:forget");
+        assert_eq!(read_cache("test:forget", EMOTE_CHANNEL_TTL_MS), None);
     }
 
     #[test]

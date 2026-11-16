@@ -8,17 +8,19 @@ use std::sync::Arc;
 pub struct Net {
     pub rt: tokio::runtime::Runtime,
     pub client: reqwest::Client,
+    pub user_agent: String,
 }
 
 impl Net {
     pub fn new(version: &str) -> Arc<Net> {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().thread_name("agu-ui-net").build().expect("tokio runtime");
+        let user_agent = agu_chat_core::backend::user_agent(version);
         let client = reqwest::Client::builder()
-            .user_agent(agu_chat_core::backend::user_agent(version))
+            .user_agent(user_agent.clone())
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("http client");
-        Arc::new(Net { rt, client })
+        Arc::new(Net { rt, client, user_agent })
     }
 
     /// Run `fut` on the net runtime; the returned future resolves with its output (None if it panicked).

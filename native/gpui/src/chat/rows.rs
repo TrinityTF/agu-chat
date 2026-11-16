@@ -218,7 +218,11 @@ impl BuiltRow {
         match self {
             BuiltRow::Frame(f) => f.content.urls(),
             BuiltRow::Event(e) => e.inner.as_ref().map(|f| f.content.urls()).unwrap_or_default(),
-            BuiltRow::Notice(n) => n.text.as_ref().map(|t| t.urls()).unwrap_or_default(),
+            BuiltRow::Notice(n) => {
+                let mut v = n.system.urls();
+                v.extend(n.text.as_ref().map(|t| t.urls()).unwrap_or_default());
+                v
+            }
             _ => vec![],
         }
     }
@@ -771,6 +775,9 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
     let rs = ctx.rs;
     let base = rs.font_size;
     let size = SizeOpt::parse(&rs.emote_size);
+    if let Some(s) = &n.seventv {
+        return seventv_notice(s, base, size);
+    }
     if (n.msg_id == "redeem" || n.msg_id == "powerup") && n.reward.is_some() {
         // A redeem with no message: the same header as one with a message, just nothing under it.
         let r = n.reward.as_ref().unwrap();
@@ -817,6 +824,39 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
         Some(f.finish())
     };
     BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card, bar: None, reply: None })
+}
+
+/// The app's notice of a live 7TV change, one compact line: "A_g_u__ added the 7TV emote [image] PotatWind".
+fn seventv_notice(s: &SevenTvNote, base: f32, size: SizeOpt) -> BuiltRow {
+    let (text, muted) = (token(theme::TEXT), token(theme::MUTED));
+    let mut f = Flow::new(base);
+    let bold = |f: &mut Flow, t: &str| f.push(Item::Text(TextItem::new(t.to_string(), base, text).weight(FontWeight::SEMIBOLD)));
+    let verb = match s.action.as_str() {
+        "added" => "added the 7TV emote",
+        "removed" => "removed the 7TV emote",
+        "renamed" => "renamed the 7TV emote",
+        _ => "switched the channel's 7TV emote set to",
+    };
+    if s.actor.is_empty() {
+        let mut c = verb.chars();
+        let cap = c.next().map(|x| x.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+        f.text(&format!("{cap} "), muted);
+    } else {
+        bold(&mut f, &s.actor);
+        f.text(&format!(" {verb} "), muted);
+    }
+    if !s.emote_id.is_empty() {
+        let e = super::twitch::emotes::seven_tv_emote(&serde_json::json!({"id": s.emote_id, "name": s.name}));
+        let tip = Rc::new(Tip::new(provider_tooltip_url(&e), s.name.clone(), "7TV"));
+        f.push(emote_item(provider_emote_url(&e, size), tip, vec![], base, size));
+        f.text(" ", muted);
+    }
+    if s.action == "renamed" && !s.old_name.is_empty() {
+        bold(&mut f, &s.old_name);
+        f.text(" to ", muted);
+    }
+    bold(&mut f, &s.name);
+    BuiltRow::Notice(NoticeSpec { system: f.finish(), text: None, raid: false, icon: None, head: None, card: None, bar: Some(token_a(theme::SLATE_500, 0.9)), reply: None })
 }
 
 /// A sub / gift notice's sentence without the name it starts with, and the byte range to bold in it (7TV bolds

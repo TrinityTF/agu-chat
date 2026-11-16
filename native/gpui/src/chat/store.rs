@@ -715,6 +715,19 @@ mod tests {
     }
 
     #[test]
+    fn seventv_notice_keeps_its_note() {
+        let (mut s, sk) = store();
+        let note = json!({"actor": "A_g_u__", "action": "added", "emoteId": "E1", "name": "PotatWind", "oldName": ""});
+        s.apply(&sk, &json!({"type": "chatnotice", "notice": {"id": "7tv-1-1", "ts": 5, "msgId": "seventv", "system": "A_g_u__ added the 7TV emote PotatWind", "seventv": note}}));
+        let RowBody::Notice(n) = &s.rows()[0].body else { panic!("not a notice") };
+        let st = n.seventv.as_ref().unwrap();
+        assert_eq!((st.actor.as_str(), st.action.as_str(), st.emote_id.as_str(), st.name.as_str()), ("A_g_u__", "added", "E1", "PotatWind"));
+        // a Twitch notice has none
+        s.apply(&sk, &json!({"type": "chatnotice", "notice": {"id": "n2", "ts": 6, "msgId": "sub", "system": "x subscribed", "user": {"login": "x"}}}));
+        assert!(matches!(&s.rows()[1].body, RowBody::Notice(n) if n.seventv.is_none()));
+    }
+
+    #[test]
     fn chatlog_replaces_and_marks_backlog() {
         let (mut s, sk) = store();
         s.apply(&sk, &chat("1", 10, "a"));
