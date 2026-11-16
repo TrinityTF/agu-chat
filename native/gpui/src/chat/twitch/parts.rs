@@ -1,6 +1,7 @@
 //! Port of src/renderer/chat/twitch/parts.ts: Twitch emote/GIF tag parsing and message -> renderable parts.
 use std::collections::HashMap;
 
+use super::emoji::{split_emoji, Seg};
 use super::emotes::{EmoteProvider, EmoteSets};
 use crate::chat::chat_text::{as_link, mention_word};
 
@@ -115,6 +116,8 @@ pub struct Overlay {
 pub enum MsgPart {
     Text(String),
     Emote { source: EmoteSource, id: String, name: String, overlays: Vec<Overlay> },
+    /// One Unicode emoji (a whole grapheme), drawn as text with the emote popup; zero-width emotes stack on it.
+    Emoji { text: String, overlays: Vec<Overlay> },
     Mention { login: String, name: String, color: String, user_id: String },
     Link { href: String, text: String },
     Gif { id: String, url: String, alt: String },
@@ -131,6 +134,7 @@ enum Raw {
 enum Mid {
     Text(String),
     Emote { source: EmoteSource, id: String, name: String, zero_width: bool },
+    Emoji(String),
     Mention { login: String, name: String, color: String, user_id: String },
     Link { href: String, text: String },
     Gif(String, String, String),
@@ -232,7 +236,12 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
                             mid.push(Mid::Text(trail.to_string()));
                         }
                     } else {
-                        mid.push(Mid::Text(w.to_string()));
+                        for seg in split_emoji(w) {
+                            mid.push(match seg {
+                                Seg::Text(t) => Mid::Text(t.to_string()),
+                                Seg::Emoji(e) => Mid::Emoji(e.to_string()),
+                            });
+                        }
                     }
                 }
             }
@@ -244,6 +253,7 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
         match tok {
             Mid::Gif(id, url, alt) => out.push(MsgPart::Gif { id, url, alt }),
             Mid::Text(t) => out.push(MsgPart::Text(t)),
+            Mid::Emoji(e) => out.push(MsgPart::Emoji { text: e, overlays: Vec::new() }),
             Mid::Link { href, text } => out.push(MsgPart::Link { href, text }),
             Mid::Mention { login, name, color, user_id } => out.push(MsgPart::Mention { login, name, color, user_id }),
             Mid::Emote { source, id, name, zero_width } => {
@@ -306,6 +316,24 @@ mod tests {
         let p = build_parts("@bob, hi", "", None, Some(&k), "");
         assert_eq!(p[0], MsgPart::Mention { login: "bob".into(), name: "Bob".into(), color: "#fff".into(), user_id: "1".into() });
         assert_eq!(p[1], MsgPart::Text(",".into()));
+    }
+
+    #[test]
+    fn emoji_become_their_own_parts() {
+        let p = build_parts("hi🍟! 🍟", "", None, None, "");
+        assert_eq!(
+            p,
+            vec![
+                MsgPart::Text("hi".into()),
+                MsgPart::Emoji { text: "🍟".into(), overlays: vec![] },
+                MsgPart::Text("!".into()),
+                MsgPart::Text(" ".into()),
+                MsgPart::Emoji { text: "🍟".into(), overlays: vec![] },
+            ]
+        );
+        // a Twitch emote range after an emoji still counts code points
+        let p = build_parts("😀 Kappa", "25:2-6", None, None, "");
+        assert_eq!(p[0], MsgPart::Emoji { text: "😀".into(), overlays: vec![] });
     }
 
     #[test]

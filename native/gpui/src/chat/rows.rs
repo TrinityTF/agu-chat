@@ -283,7 +283,7 @@ impl WithTitle for Item {
     fn with_title(mut self, t: &str) -> Self {
         if let Item::Image(i) = &mut self {
             if !t.is_empty() {
-                i.tip = Some(Rc::new(Tip { img: "".into(), name: t.to_string().into(), label: "".into() }));
+                i.tip = Some(Rc::new(Tip::new("", t.to_string(), "")));
             }
         }
         self
@@ -320,12 +320,19 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
             MsgPart::Gif { url, .. } => f.push(Item::Gif(GifItem { url: url.clone().into() })),
             MsgPart::Cheer { name, prefix, amount, color, url } => {
                 // twitch.tv: the tier image at emote height, then the amount, bold, in the tier's colour
-                let tip = Rc::new(Tip { img: url.clone().into(), name: name.clone().into(), label: format!("{prefix} cheermote").into() });
+                let tip = Rc::new(Tip::new(url.clone(), name.clone(), format!("{prefix} cheermote")));
                 f.push(emote_item(url.clone(), tip, vec![], base, size));
                 let c = if color.is_empty() { text_color } else { hex(color) };
                 f.push(Item::Text(TextItem::new(format!("{amount}"), base, if strike { with_alpha(c, 0.45) } else { c }).weight(FontWeight::BOLD)));
             }
             MsgPart::Link { href, text } => f.push(link_item(href, text, base)),
+            MsgPart::Emoji { text, .. } => {
+                let mut ti = TextItem::new(text.clone(), base, text_color).tip(emoji_tip(text));
+                if strike {
+                    ti.color = with_alpha(text_color, 0.45);
+                }
+                f.push(Item::Text(ti));
+            }
             MsgPart::Emote { source, id, name, overlays } => {
                 let entry = match source {
                     EmoteSource::Twitch => None,
@@ -365,7 +372,17 @@ fn emote_tip(source: EmoteSource, id: &str, name: &str, zero_width: bool, entry:
         EmoteSource::Twitch => (format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/3.0"), "Twitch".to_string()),
         EmoteSource::Provider(p) => (entry.map(provider_tooltip_url).unwrap_or_default(), format!("{}{}", p.label(), if zero_width { " zero-width" } else { "" })),
     };
-    Tip { img: img.into(), name: name.to_string().into(), label: label.into() }
+    Tip::new(img, name.to_string(), label)
+}
+
+/// The popup of a Unicode emoji: the emoji drawn large, its name, its shortcode and "Emoji".
+fn emoji_tip(e: &str) -> Tip {
+    let (name, short) = super::twitch::emoji::emoji_names(e);
+    let label = match short {
+        Some(s) => format!(":{s}: \u{b7} Emoji"),
+        None => "Emoji".to_string(),
+    };
+    Tip { glyph: e.to_string().into(), ..Tip::new("", name, label) }
 }
 
 /// TextRun (chatText.tsx): links become links, "@name" a bold mention, whitespace kept.
@@ -882,7 +899,7 @@ fn plain_emote(f: &mut Flow, src: String, alt: &str, tip_label: &str, rs: &Setti
         vmargin: vm,
         margin_x: 1.0,
         valign: VAlign::Middle,
-        tip: Some(Rc::new(Tip { img: src.into(), name: alt.to_string().into(), label: tip_label.to_string().into() })),
+        tip: Some(Rc::new(Tip::new(src, alt.to_string(), tip_label.to_string()))),
         overlays: vec![],
         radius: 0.0,
         act: None,
@@ -950,7 +967,7 @@ fn co_badge_img(url: &str, title: &str, base: f32) -> Item {
         vmargin: 0.0,
         margin_x: 0.0,
         valign: VAlign::BottomAt(0.2 * base),
-        tip: Some(Rc::new(Tip { img: "".into(), name: title.to_string().into(), label: "".into() })),
+        tip: Some(Rc::new(Tip::new("", title.to_string(), ""))),
         overlays: vec![],
         radius: 0.0,
         act: None,

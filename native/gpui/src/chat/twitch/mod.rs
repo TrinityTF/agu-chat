@@ -2,6 +2,7 @@
 pub mod badges;
 pub mod cheermotes;
 pub mod colors;
+pub mod emoji;
 pub mod emotes;
 pub mod events;
 pub mod parts;

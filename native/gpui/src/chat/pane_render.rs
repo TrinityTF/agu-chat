@@ -1048,7 +1048,10 @@ impl ChatPane {
             .text_size(px(12.))
             .line_height(px(16.))
             .shadow_2xl();
-        if !tip.img.is_empty() {
+        if !tip.glyph.is_empty() {
+            // a Unicode emoji, in the system's emoji font at the size an emote image gets
+            b = b.child(div().h(px(64.)).flex().items_center().text_size(px(52.)).line_height(px(64.)).child(tip.glyph.clone()));
+        } else if !tip.img.is_empty() {
             b = b.child(ImageBox { url: tip.img.clone(), side: 64.0, radius: 0.0 });
         }
         b = b.child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(tip.name.clone()));

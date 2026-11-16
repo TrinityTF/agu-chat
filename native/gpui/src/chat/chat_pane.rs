@@ -655,6 +655,7 @@ impl ChatPane {
                                     seven: if rs.seven_tv { ps.seven.clone() } else { empty.clone() },
                                     bttv: if rs.bttv { ps.bttv.clone() } else { empty.clone() },
                                     ffz: if rs.ffz { ps.ffz.clone() } else { empty.clone() },
+                                    ..Default::default()
                                 });
                                 build_twitch_inventory(sets.as_ref(), &d.twitch_emotes, &self.personal)
                             }
@@ -1232,7 +1233,7 @@ impl ChatPane {
             }
         }
         if std::env::var("AGU_TIP").is_ok() {
-            self.tip = Some((Rc::new(Tip { img: "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0".into(), name: "Kappa".into(), label: "Twitch".into() }), gpui::point(gpui::px(120.), gpui::px(200.))));
+            self.tip = Some((Rc::new(Tip::new("https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0", "Kappa", "Twitch")), gpui::point(gpui::px(120.), gpui::px(200.))));
         }
         cx.notify();
     }
