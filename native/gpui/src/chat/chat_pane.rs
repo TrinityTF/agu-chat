@@ -81,6 +81,12 @@ pub(super) struct ShownRow {
     pub built: RefCell<Option<(u64, Option<Rc<BuiltRow>>)>>,
 }
 
+pub(super) struct PinPick {
+    pub sk: String,
+    pub id: String,
+    pub pos: Point<Pixels>,
+}
+
 pub(super) struct PopReq {
     pub sk: String,
     pub msg: ChatMsg,
@@ -194,6 +200,8 @@ pub struct ChatPane {
     /// (card key, showing the "Unpin After" sub-panel)
     pub(super) pin_menu: Option<(String, bool)>,
     pub(super) unpin_after: Option<UnpinAfter>,
+    /// the "Pin for" menu a message's pin button opened
+    pub(super) pin_pick: Option<PinPick>,
     pub(super) confirm: Option<Confirm>,
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
     pub(super) styled_users: Rc<RefCell<Vec<String>>>,
@@ -398,6 +406,7 @@ impl ChatPane {
             pin_open: HashSet::new(),
             pin_menu: None,
             unpin_after: None,
+            pin_pick: None,
             confirm: None,
             images_inbox,
             styled_users,
@@ -1291,6 +1300,17 @@ impl ChatPane {
         input.read(cx).focus(window);
     }
 
+    /// Pin a message for `seconds` (None = until unpinned or the stream ends).
+    pub(super) fn pin_with(&mut self, sk: String, id: String, seconds: Option<u32>, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        let Some(src) = self.ref_of(&sk) else { return };
+        cx.spawn(async move |this, cx| {
+            let (_, t) = mod_actions::pin_message(&bridge, &src, &id, seconds).await;
+            let _ = this.update(cx, |p, cx| p.toast_msg(t, cx));
+        })
+        .detach();
+    }
+
     pub(super) fn run_action(&mut self, a: RowAction, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         match a {
@@ -1302,14 +1322,9 @@ impl ChatPane {
                 self.reply_target = Some(t);
                 cx.notify();
             }
-            RowAction::Pin { sk, id } => {
-                let Some(src) = self.ref_of(&sk) else { return };
-                cx.spawn(async move |this, cx| {
-                    let (_, t) = mod_actions::pin_message(&bridge, &src, &id).await;
-                    let _ = this.update(cx, |p, cx| p.toast_msg(t, cx));
-                })
-                .detach();
-            }
+            // The pin button opens the "Pin for" menu itself (it needs the click position); a pin without a
+            // menu (anything else dispatching this) keeps the 20 minute default.
+            RowAction::Pin { sk, id } => self.pin_with(sk, id, Some(1200), cx),
             RowAction::Delete { sk, id } => {
                 let Some(src) = self.ref_of(&sk) else { return };
                 cx.spawn(async move |this, cx| {
