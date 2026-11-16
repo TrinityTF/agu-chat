@@ -1633,9 +1633,13 @@ impl ChatPane {
                 // the paint / badge definitions came after the rows were built: every row reads them anew
                 self.rebuild_envs();
                 self.gen += 1;
-                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(_)));
+                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(_) | RowBody::Kick(_)));
             } else {
-                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(m) if set.contains(&m.user.id)));
+                self.invalidate_rows(|r| match &r.body {
+                    RowBody::Msg(m) => set.contains(&m.user.id),
+                    RowBody::Kick(m) => set.contains(&super::twitch::cosmetics::kick_key(&m.user.id)),
+                    _ => false,
+                });
             }
         }
         if self.needs_refresh {
@@ -1748,7 +1752,14 @@ impl ChatPane {
             RowBody::Kick(m) => {
                 let st = st?;
                 let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new() };
-                Some(kick_row(row, m, &ctx, &env, rule.as_ref()))
+                let key = super::twitch::cosmetics::kick_key(&m.user.id);
+                let lookup = if rs.seven_tv_cosmetics && !m.user.anonymous { self.svc.cosmetics.style_of(&key, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                let style: Option<ChatterStyle> = match lookup {
+                    StyleLookup::Known(s) => s,
+                    StyleLookup::Unknown => None,
+                };
+                let defs = self.svc.cosmetics.defs();
+                Some(kick_row(row, m, &ctx, &env, rule.as_ref(), style.as_ref(), defs.as_deref()))
             }
             RowBody::YouTube(m) => {
                 let st = st?;

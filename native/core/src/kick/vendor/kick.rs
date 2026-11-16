@@ -373,6 +373,32 @@ mod tests {
     }
 
     #[test]
+    fn subscriber_badge_is_the_highest_tier_not_above_the_months() {
+        let subs = vec![SubBadge { months: 1, url: "b1".into() }, SubBadge { months: 3, url: "b3".into() }, SubBadge { months: 12, url: "b12".into() }];
+        assert_eq!(sub_badge_for(&subs, &json!(1)), "b1");
+        assert_eq!(sub_badge_for(&subs, &json!(2)), "b1");
+        assert_eq!(sub_badge_for(&subs, &json!(3)), "b3");
+        assert_eq!(sub_badge_for(&subs, &json!(11)), "b3");
+        assert_eq!(sub_badge_for(&subs, &json!(12)), "b12");
+        assert_eq!(sub_badge_for(&subs, &json!(400)), "b12");
+        assert_eq!(sub_badge_for(&subs, &Value::Null), "b1");
+    }
+
+    #[test]
+    fn every_badge_of_a_message_is_kept_with_its_type_text_and_count() {
+        let ev = json!({"id": "x", "content": "hi", "sender": {"id": 1, "username": "A", "slug": "a", "identity": {"color": "#fff", "badges": [
+            {"type": "broadcaster", "text": "Broadcaster"}, {"type": "moderator", "text": "Moderator"}, {"type": "vip", "text": "VIP"},
+            {"type": "og", "text": "OG"}, {"type": "founder", "text": "Founder"}, {"type": "verified", "text": "Verified"},
+            {"type": "subscriber", "text": "Subscriber", "count": 14}, {"type": "sub_gifter", "text": "Sub Gifter", "count": 30}]}}});
+        let m = to_kick_chat_msg(&ev);
+        let b = m["badges"].as_array().unwrap();
+        assert_eq!(b.iter().map(|x| x["type"].as_str().unwrap()).collect::<Vec<_>>(), ["broadcaster", "moderator", "vip", "og", "founder", "verified", "subscriber", "sub_gifter"]);
+        assert_eq!(b[6]["count"], 14);
+        assert_eq!(b[7]["count"], 30);
+        assert_eq!(b[7]["text"], "Sub Gifter");
+    }
+
+    #[test]
     fn chat_row_from_socket_and_history_shapes() {
         let ev = json!({
             "id": "abc", "content": "hi [emote:1:Kappa]", "type": "reply", "created_at": "2026-11-05T12:00:00.000000Z",

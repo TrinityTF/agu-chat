@@ -1144,8 +1144,10 @@ pub(super) fn kick_badge_label(b: &KickBadge) -> String {
     agu_chat_core::kick::badges::badge_label(&b.r#type, &b.text, b.count)
 }
 
-pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>) -> BuiltRow {
+pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>, style: Option<&ChatterStyle>, defs: Option<&SevenTvDefs>) -> BuiltRow {
     let rs = ctx.rs;
+    let paint = if rs.seven_tv_cosmetics { style.and_then(|s| s.paint_id.as_ref()).and_then(|id| defs.and_then(|d| d.paints.get(id))) } else { None };
+    let seven_badge = if rs.seven_tv_cosmetics { style.and_then(|s| s.badge_id.clone()).and_then(|id| defs.and_then(|d| d.badges.get(&id)).map(|b| (id, b.clone()))) } else { None };
     let base = rs.font_size;
     let striking = m.deleted && rs.deleted_messages == "strike";
     let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
@@ -1173,9 +1175,20 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
                 simple_badge_chip(&mut f, &label, token(col), token_a(col, 0.2), &g);
             }
         }
+        if let Some((id, def)) = &seven_badge {
+            let title = if def.tooltip.is_empty() { &def.name } else { &def.tooltip };
+            f.push(co_badge_img(&format!("https://cdn.7tv.app/badge/{id}/3x"), title, base));
+            f.push(Item::Gap(4.0));
+        }
     }
     actions.push(RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } });
-    f.push(Item::Text(TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, name_color_of(&m.user.color, rs.readable_colors)).weight(FontWeight::SEMIBOLD).act(Act::Tag(actions.len() as u32 - 1), true)));
+    let name_color = name_color_of(&m.user.color, rs.readable_colors);
+    let mut name = TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, name_color).weight(FontWeight::SEMIBOLD).act(Act::Tag(actions.len() as u32 - 1), true);
+    if let Some(p) = paint {
+        name.gradient = paint_gradient(p, name_color);
+        name.paint = super::paint_text::PaintSpec::from_paint(p).map(Rc::new);
+    }
+    f.push(Item::Text(name));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
     if let Some(r) = &m.reply {
         f.push(Item::Pill(PillItem { text: format!("↩ {}", r.name).into(), size: 10.0, color: token(theme::FAINT), weight: FontWeight::NORMAL, bg: token_a(theme::WHITE, 0.05), pad_x: 4.0, margin_r: 4.0, radius: 4.0 }));

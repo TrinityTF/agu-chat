@@ -129,10 +129,28 @@ pub async fn fetch_seven_tv_defs(client: &reqwest::Client) -> Option<Value> {
     Some(data)
 }
 
+/// Cache key of a Kick chatter: Twitch and Kick ids are both plain numbers and must not share an entry.
+pub fn kick_key(user_id: &str) -> String {
+    if user_id.is_empty() {
+        String::new()
+    } else {
+        format!("kick:{user_id}")
+    }
+}
+
+/// (7TV platform, platform user id) of a cache key: a bare id is a Twitch user, `kick:<id>` a Kick one.
+fn split_key(key: &str) -> (&'static str, &str) {
+    match key.strip_prefix("kick:") {
+        Some(id) => ("kick", id),
+        None => ("twitch", key),
+    }
+}
+
 /// `None`: the lookup failed (network, 5xx, rate limit) and is worth retrying; `Some(None)`: 7TV answered,
 /// and the chatter has no style (or no 7TV account).
-async fn fetch_chatter_style(client: &reqwest::Client, user_id: &str) -> Option<Option<ChatterStyle>> {
-    let r = client.get(format!("https://7tv.io/v3/users/twitch/{user_id}")).send().await.ok()?;
+async fn fetch_chatter_style(client: &reqwest::Client, key: &str) -> Option<Option<ChatterStyle>> {
+    let (platform, user_id) = split_key(key);
+    let r = client.get(format!("https://7tv.io/v3/users/{platform}/{user_id}")).send().await.ok()?;
     if r.status() == reqwest::StatusCode::NOT_FOUND {
         return Some(None);
     }
@@ -390,6 +408,14 @@ mod tests {
         assert!((mid.0 - 0.5).abs() < 0.01 && (mid.2 - 0.5).abs() < 0.01);
         let solid = SevenTvPaint { function: "URL".into(), color: Some(0x00FF00FF), ..Default::default() };
         assert_eq!(paint_color_at(&solid, 0.3), Some((0.0, 1.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn style_keys_keep_the_platforms_apart() {
+        assert_eq!(kick_key("42"), "kick:42");
+        assert_eq!(kick_key(""), "");
+        assert_eq!(split_key("kick:42"), ("kick", "42"));
+        assert_eq!(split_key("42"), ("twitch", "42"));
     }
 
     #[test]
