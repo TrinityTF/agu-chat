@@ -1261,7 +1261,10 @@ impl Render for AguApp {
             self.on_top_applied = Some(on);
             // after this frame, like the window resizes: native window calls inside render can be lost
             cx.spawn_in(window, async move |_, cx| {
-                let _ = cx.update(|window, _| window_fit::set_always_on_top(window, on));
+                let _ = cx.update(|window, cx| {
+                    window_fit::set_always_on_top(window, on);
+                    crate::chat::popout::follow_always_on_top(cx, on);
+                });
             })
             .detach();
         }

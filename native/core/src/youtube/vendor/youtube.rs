@@ -154,6 +154,11 @@ fn text_of(node: &Value) -> String {
 pub fn json_after(html: &str, marker: &str) -> Option<Value> {
     let i = html.find(marker)?;
     let start = i + marker.len() + html[i + marker.len()..].find('{')?;
+    json_object_at(html, start)
+}
+
+/// The JSON object whose `{` is at byte `start`, by brace matching.
+fn json_object_at(html: &str, start: usize) -> Option<Value> {
     let b = html.as_bytes();
     let (mut depth, mut in_str, mut esc) = (0i32, false, false);
     for k in start..b.len() {
@@ -210,8 +215,83 @@ fn capture(re: &Regex, html: &str) -> String {
     re.captures(html).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()).unwrap_or_default()
 }
 
-static KEY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""INNERTUBE_API_KEY":"([^"]+)""#).unwrap());
-static VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""INNERTUBE_CLIENT_VERSION":"([^"]+)""#).unwrap());
+// The page carries these in `ytcfg.set({...})` as JSON ("KEY":"v"), in older shapes with single quotes or
+// escaped quotes ('KEY': 'v', \"KEY\":\"v\"), and the client version also in the INNERTUBE_CONTEXT.
+static KEY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"INNERTUBE_API_KEY\\?["']?\s*:\s*\\?["']([^"'\\]+)"#).unwrap());
+static VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"INNERTUBE_(?:CONTEXT_)?CLIENT_VERSION\\?["']?\s*:\s*\\?["']([^"'\\]+)"#).unwrap());
+static CONTEXT_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\\?"clientVersion\\?"\s*:\s*\\?"([0-9][^"\\]*)"#).unwrap());
+
+/// A JS string literal's body with its `\xNN`, `\uNNNN` and `\`/`\'`/`\"` escapes undone (what `JSON.parse('...')`
+/// pages inline instead of a bare object).
+fn unescape_js(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let take = |it: &mut std::iter::Peekable<std::str::Chars>, n: usize| -> Option<u32> {
+            let h: String = (0..n).filter_map(|_| it.next()).collect();
+            u32::from_str_radix(&h, 16).ok()
+        };
+        match it.next() {
+            Some('x') => out.extend(take(&mut it, 2).and_then(char::from_u32)),
+            Some('u') => out.extend(take(&mut it, 4).and_then(char::from_u32)),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(o) => out.push(o),
+            None => {}
+        }
+    }
+    out
+}
+
+/// `ytInitialData` / `ytInitialPlayerResponse` however the page assigns them: a bare object after `var X = `,
+/// `window.X = `, `window["X"] = `, or `X = JSON.parse('...')` with the JSON as an escaped string.
+fn page_json(html: &str, name: &str) -> Option<Value> {
+    let markers = [format!("var {name} = "), format!("window[\"{name}\"] = "), format!("window.{name} = "), format!("{name} = ")];
+    for m in &markers {
+        let mut from = 0;
+        while let Some(i) = html[from..].find(m.as_str()) {
+            let at = from + i + m.len();
+            from = at;
+            let rest = html[at..].trim_start();
+            if let Some(q) = rest.strip_prefix("JSON.parse(") {
+                let q = q.trim_start();
+                let quote = q.chars().next().filter(|c| *c == '\'' || *c == '"');
+                if let Some(quote) = quote {
+                    let body = &q[1..];
+                    let mut end = None;
+                    let mut esc = false;
+                    for (k, ch) in body.char_indices() {
+                        if esc {
+                            esc = false;
+                        } else if ch == '\\' {
+                            esc = true;
+                        } else if ch == quote {
+                            end = Some(k);
+                            break;
+                        }
+                    }
+                    if let Some(end) = end {
+                        if let Ok(v) = serde_json::from_str::<Value>(&unescape_js(&body[..end])) {
+                            return Some(v);
+                        }
+                    }
+                }
+                continue;
+            }
+            if rest.starts_with('{') {
+                if let Some(v) = json_object_at(html, html.len() - rest.len()) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Which video is this source live on, and everything needed to read its chat.
 ///
@@ -240,13 +320,18 @@ pub async fn read_watch_page(s: &YtSource, user_agent: &str) -> Result<WatchPage
 /// The pure half of `readWatchPage`.
 pub fn parse_watch_page(html: &str) -> WatchPage {
     let key = capture(&KEY_RE, html);
-    let client_version = capture(&VERSION_RE, html);
-    let player = json_after(html, "var ytInitialPlayerResponse = ").or_else(|| json_after(html, "window[\"ytInitialPlayerResponse\"] = "));
-    let data = json_after(html, "var ytInitialData = ").or_else(|| json_after(html, "window[\"ytInitialData\"] = "));
-    let Some(data) = data.filter(|_| !key.is_empty()) else {
-        return WatchPage { exists: true, blocked: true, error: Some("YouTube returned a page this client does not recognise".into()), ..Default::default() };
-    };
-    let player = player.unwrap_or(Value::Null);
+    let mut client_version = capture(&VERSION_RE, html);
+    if client_version.is_empty() {
+        client_version = capture(&CONTEXT_VERSION_RE, html);
+    }
+    let player = page_json(html, "ytInitialPlayerResponse");
+    let data = page_json(html, "ytInitialData");
+    let unreadable = || WatchPage { exists: true, blocked: true, error: Some("YouTube returned a page this client does not recognise".into()), ..Default::default() };
+    // Neither blob: not a watch or browse page at all (a bot check or an unknown layout).
+    if data.is_none() && player.is_none() {
+        return unreadable();
+    }
+    let (data, player) = (data.unwrap_or(Value::Null), player.unwrap_or(Value::Null));
 
     let vd = &player["videoDetails"];
     let channel_meta = &data["metadata"]["channelMetadataRenderer"];
@@ -276,6 +361,10 @@ pub fn parse_watch_page(html: &str) -> WatchPage {
     let live = vd["isLive"] == Value::Bool(true) || truthy(&micro["liveBroadcastDetails"]["isLiveNow"]);
     if !live {
         return base;
+    }
+    // Reading the chat needs the page's own key and data; without them a live stream cannot be followed.
+    if base.key.is_empty() || data.is_null() {
+        return unreadable();
     }
 
     let bar = &data["contents"]["twoColumnWatchNextResults"]["conversationBar"];
@@ -520,6 +609,40 @@ pub fn to_youtube_chat_msg(action: &Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    const OFFLINE_BROWSE: &str = r#"<html><script>ytcfg.set({"INNERTUBE_API_KEY":"KEY1","INNERTUBE_CLIENT_VERSION":"2.2026"});</script><script nonce="x">var ytInitialData = {"metadata":{"channelMetadataRenderer":{"title":"Esfand","externalId":"UC123"}}};</script></html>"#;
+
+    #[test]
+    fn offline_channel_reads_as_offline_not_an_error() {
+        let w = parse_watch_page(OFFLINE_BROWSE);
+        assert!(w.exists && !w.blocked && !w.live && w.error.is_none());
+        assert_eq!((w.author.as_str(), w.channel_id.as_str(), w.key.as_str()), ("Esfand", "UC123", "KEY1"));
+        // even when the page carries no key at all, a channel that is not streaming is just offline
+        let w = parse_watch_page(r#"<script>window["ytInitialData"] = {"metadata":{"channelMetadataRenderer":{"title":"Esfand"}}};</script>"#);
+        assert!(!w.blocked && !w.live && w.error.is_none() && w.author == "Esfand");
+    }
+
+    #[test]
+    fn newer_page_shapes_are_read() {
+        // key and version in single-quoted / escaped ytcfg, data assigned without `var`, as JSON.parse of an escaped string
+        let html = r#"<script>ytcfg.set({'INNERTUBE_API_KEY': 'KEY2', 'INNERTUBE_CONTEXT_CLIENT_VERSION': '2.3'});
+            ytInitialData = JSON.parse('{\x22metadata\x22:{\x22channelMetadataRenderer\x22:{\x22title\x22:\x22It\x27s\x22}}}');</script>"#;
+        let w = parse_watch_page(html);
+        assert!(!w.blocked && w.error.is_none(), "{w:?}");
+        assert_eq!((w.key.as_str(), w.client_version.as_str(), w.author.as_str()), ("KEY2", "2.3", "It's"));
+        // version only in the INNERTUBE_CONTEXT
+        let html = r#"<script>ytcfg.set({"INNERTUBE_API_KEY":"K","INNERTUBE_CONTEXT":{"client":{"clientVersion":"2.9.1"}}});</script><script>window.ytInitialData = {"metadata":{}};</script>"#;
+        assert_eq!(parse_watch_page(html).client_version, "2.9.1");
+    }
+
+    #[test]
+    fn a_live_page_without_a_key_or_an_unknown_page_is_an_error() {
+        let live = r#"<script>var ytInitialPlayerResponse = {"videoDetails":{"videoId":"abc","isLive":true}};var ytInitialData = {};</script>"#;
+        let w = parse_watch_page(live);
+        assert!(w.blocked && w.error.is_some());
+        let w = parse_watch_page("<html>Before you continue</html>");
+        assert!(w.blocked && w.error.is_some());
+    }
+
     use super::*;
 
     fn p(s: &str) -> Option<(&'static str, String)> {
