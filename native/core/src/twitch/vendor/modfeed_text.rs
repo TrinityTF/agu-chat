@@ -220,11 +220,13 @@ fn build_base_moderate_text(action: &str, actor: &str, event: &Value, sub: Optio
 
 // ---------- AutoMod hold/update -> HeldMsg (CHAT v5b) ----------
 
+/// EventSub `automod.message.update` v1 sends "Approved"/"Denied"/"Expired", v2 sends lowercase
+/// "approved"/"denied"/"expired"; accept either case plus the verbs the Helix action uses.
 pub fn map_automod_status(status: &str) -> &'static str {
-    match status {
-        "Approved" => "approved",
-        "Denied" => "denied",
-        _ => "expired", // "Expired" or any other/unrecognized value
+    match status.trim().to_ascii_lowercase().as_str() {
+        "approved" | "approve" | "allowed" | "allow" => "approved",
+        "denied" | "deny" | "rejected" => "denied",
+        _ => "expired", // "expired" or any other/unrecognized value
     }
 }
 
@@ -298,5 +300,12 @@ mod tests {
         assert_eq!(h["level"], 2);
         assert_eq!(h["resolvedBy"], Value::Null);
         assert_eq!(map_automod_status("Approved"), "approved");
+    }
+
+    #[test]
+    fn automod_status_mapping() {
+        for (i, o) in [("approved", "approved"), ("Approved", "approved"), ("ALLOWED", "approved"), ("denied", "denied"), ("Denied", "denied"), ("DENY", "denied"), ("expired", "expired"), ("Expired", "expired"), ("", "expired"), ("weird", "expired")] {
+            assert_eq!(map_automod_status(i), o, "{i}");
+        }
     }
 }
