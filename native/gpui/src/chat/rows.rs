@@ -218,7 +218,11 @@ impl BuiltRow {
         match self {
             BuiltRow::Frame(f) => f.content.urls(),
             BuiltRow::Event(e) => e.inner.as_ref().map(|f| f.content.urls()).unwrap_or_default(),
-            BuiltRow::Notice(n) => n.text.as_ref().map(|t| t.urls()).unwrap_or_default(),
+            BuiltRow::Notice(n) => {
+                let mut v = n.system.urls();
+                v.extend(n.text.as_ref().map(|t| t.urls()).unwrap_or_default());
+                v
+            }
             _ => vec![],
         }
     }
@@ -283,7 +287,7 @@ impl WithTitle for Item {
     fn with_title(mut self, t: &str) -> Self {
         if let Item::Image(i) = &mut self {
             if !t.is_empty() {
-                i.tip = Some(Rc::new(Tip { img: "".into(), name: t.to_string().into(), label: "".into() }));
+                i.tip = Some(Rc::new(Tip::new("", t.to_string(), "")));
             }
         }
         self
@@ -320,12 +324,31 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
             MsgPart::Gif { url, .. } => f.push(Item::Gif(GifItem { url: url.clone().into() })),
             MsgPart::Cheer { name, prefix, amount, color, url } => {
                 // twitch.tv: the tier image at emote height, then the amount, bold, in the tier's colour
-                let tip = Rc::new(Tip { img: url.clone().into(), name: name.clone().into(), label: format!("{prefix} cheermote").into() });
+                let tip = Rc::new(Tip::new(url.clone(), name.clone(), format!("{prefix} cheermote")));
                 f.push(emote_item(url.clone(), tip, vec![], base, size));
                 let c = if color.is_empty() { text_color } else { hex(color) };
                 f.push(Item::Text(TextItem::new(format!("{amount}"), base, if strike { with_alpha(c, 0.45) } else { c }).weight(FontWeight::BOLD)));
             }
             MsgPart::Link { href, text } => f.push(link_item(href, text, base)),
+            MsgPart::Emoji { text, overlays } => {
+                let mut ti = TextItem::new(text.clone(), base, text_color).tip(emoji_tip(text));
+                if strike {
+                    ti.color = with_alpha(text_color, 0.45);
+                }
+                if !overlays.is_empty() {
+                    // zero-width emotes on the emoji: drawn over its centre, fitted like on an emote
+                    let (px, max_w, _) = emote_box(base, size);
+                    ti.overlays = overlays
+                        .iter()
+                        .map(|o| {
+                            let oe = emotes.and_then(|e| e.all.get(&o.name)).cloned();
+                            emote_part_url(o.source, &o.id, size, oe.as_deref()).into()
+                        })
+                        .collect();
+                    ti.overlay_box = (max_w, px);
+                }
+                f.push(Item::Text(ti));
+            }
             MsgPart::Emote { source, id, name, overlays } => {
                 let entry = match source {
                     EmoteSource::Twitch => None,
@@ -365,7 +388,17 @@ fn emote_tip(source: EmoteSource, id: &str, name: &str, zero_width: bool, entry:
         EmoteSource::Twitch => (format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/3.0"), "Twitch".to_string()),
         EmoteSource::Provider(p) => (entry.map(provider_tooltip_url).unwrap_or_default(), format!("{}{}", p.label(), if zero_width { " zero-width" } else { "" })),
     };
-    Tip { img: img.into(), name: name.to_string().into(), label: label.into() }
+    Tip::new(img, name.to_string(), label)
+}
+
+/// The popup of a Unicode emoji: the emoji drawn large, its name, its shortcode and "Emoji".
+fn emoji_tip(e: &str) -> Tip {
+    let (name, short) = super::twitch::emoji::emoji_names(e);
+    let label = match short {
+        Some(s) => format!(":{s}: \u{b7} Emoji"),
+        None => "Emoji".to_string(),
+    };
+    Tip { glyph: e.to_string().into(), ..Tip::new("", name, label) }
 }
 
 /// TextRun (chatText.tsx): links become links, "@name" a bold mention, whitespace kept.
@@ -742,6 +775,9 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
     let rs = ctx.rs;
     let base = rs.font_size;
     let size = SizeOpt::parse(&rs.emote_size);
+    if let Some(s) = &n.seventv {
+        return seventv_notice(s, base, size);
+    }
     if (n.msg_id == "redeem" || n.msg_id == "powerup") && n.reward.is_some() {
         // A redeem with no message: the same header as one with a message, just nothing under it.
         let r = n.reward.as_ref().unwrap();
@@ -788,6 +824,39 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
         Some(f.finish())
     };
     BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card, bar: None, reply: None })
+}
+
+/// The app's notice of a live 7TV change, one compact line: "A_g_u__ added the 7TV emote [image] PotatWind".
+fn seventv_notice(s: &SevenTvNote, base: f32, size: SizeOpt) -> BuiltRow {
+    let (text, muted) = (token(theme::TEXT), token(theme::MUTED));
+    let mut f = Flow::new(base);
+    let bold = |f: &mut Flow, t: &str| f.push(Item::Text(TextItem::new(t.to_string(), base, text).weight(FontWeight::SEMIBOLD)));
+    let verb = match s.action.as_str() {
+        "added" => "added the 7TV emote",
+        "removed" => "removed the 7TV emote",
+        "renamed" => "renamed the 7TV emote",
+        _ => "switched the channel's 7TV emote set to",
+    };
+    if s.actor.is_empty() {
+        let mut c = verb.chars();
+        let cap = c.next().map(|x| x.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+        f.text(&format!("{cap} "), muted);
+    } else {
+        bold(&mut f, &s.actor);
+        f.text(&format!(" {verb} "), muted);
+    }
+    if !s.emote_id.is_empty() {
+        let e = super::twitch::emotes::seven_tv_emote(&serde_json::json!({"id": s.emote_id, "name": s.name}));
+        let tip = Rc::new(Tip::new(provider_tooltip_url(&e), s.name.clone(), "7TV"));
+        f.push(emote_item(provider_emote_url(&e, size), tip, vec![], base, size));
+        f.text(" ", muted);
+    }
+    if s.action == "renamed" && !s.old_name.is_empty() {
+        bold(&mut f, &s.old_name);
+        f.text(" to ", muted);
+    }
+    bold(&mut f, &s.name);
+    BuiltRow::Notice(NoticeSpec { system: f.finish(), text: None, raid: false, icon: None, head: None, card: None, bar: Some(token_a(theme::SLATE_500, 0.9)), reply: None })
 }
 
 /// A sub / gift notice's sentence without the name it starts with, and the byte range to bold in it (7TV bolds
@@ -882,7 +951,7 @@ fn plain_emote(f: &mut Flow, src: String, alt: &str, tip_label: &str, rs: &Setti
         vmargin: vm,
         margin_x: 1.0,
         valign: VAlign::Middle,
-        tip: Some(Rc::new(Tip { img: src.into(), name: alt.to_string().into(), label: tip_label.to_string().into() })),
+        tip: Some(Rc::new(Tip::new(src, alt.to_string(), tip_label.to_string()))),
         overlays: vec![],
         radius: 0.0,
         act: None,
@@ -950,7 +1019,7 @@ fn co_badge_img(url: &str, title: &str, base: f32) -> Item {
         vmargin: 0.0,
         margin_x: 0.0,
         valign: VAlign::BottomAt(0.2 * base),
-        tip: Some(Rc::new(Tip { img: "".into(), name: title.to_string().into(), label: "".into() })),
+        tip: Some(Rc::new(Tip::new("", title.to_string(), ""))),
         overlays: vec![],
         radius: 0.0,
         act: None,

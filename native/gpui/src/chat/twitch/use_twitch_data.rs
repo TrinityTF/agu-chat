@@ -14,7 +14,7 @@ use agu_chat_core::protocol::{AguBridge, SourceRef};
 use serde_json::Value;
 
 use super::badges::{build_badge_map, BadgeMap};
-use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, flush_cache, ProviderScopedMap, TwitchEmotesResp};
+use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, flush_cache, ProviderScopedMap, SevenTvIds, TwitchEmotesResp};
 use crate::chat::mod_caps::{relay_api, ModCaps};
 
 #[derive(Clone, Default)]
@@ -22,6 +22,8 @@ pub struct ProviderSets {
     pub seven: ProviderScopedMap,
     pub bttv: ProviderScopedMap,
     pub ffz: ProviderScopedMap,
+    /// the channel's 7TV user and active emote set (live updates)
+    pub seven_ids: Option<SevenTvIds>,
 }
 
 #[derive(Clone, Default)]
@@ -61,7 +63,14 @@ pub async fn load_badges(bridge: &Arc<dyn AguBridge>, source: &SourceRef, sk: &s
 
 /// 7TV + BTTV + FFZ, kept raw per provider so the pane can apply settings.sevenTv/bttv/ffz.
 pub async fn load_provider_sets(client: reqwest::Client, channel_id: String) -> ProviderSets {
-    let (seven, bttv, ffz) = tokio::join!(fetch_seven_tv(&client, &channel_id), fetch_bttv(&client, &channel_id), fetch_ffz(&client, &channel_id));
+    let ((seven, seven_ids), bttv, ffz) = tokio::join!(fetch_seven_tv(&client, &channel_id, false), fetch_bttv(&client, &channel_id), fetch_ffz(&client, &channel_id));
     flush_cache();
-    ProviderSets { seven, bttv, ffz }
+    ProviderSets { seven, bttv, ffz, seven_ids }
+}
+
+/// Only the channel's 7TV set again, past the cache (it changed live, or changes may have been missed).
+pub async fn reload_seven_tv(client: reqwest::Client, channel_id: String) -> (ProviderScopedMap, Option<SevenTvIds>) {
+    let r = fetch_seven_tv(&client, &channel_id, true).await;
+    flush_cache();
+    r
 }

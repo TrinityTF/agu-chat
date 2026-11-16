@@ -37,9 +37,10 @@ use super::search::{is_empty_query, match_row, parse_search};
 use super::services::Services;
 use super::store::{source_key, ChatStore};
 use super::twitch::cosmetics::{ChatterStyle, StyleLookup};
-use super::twitch::emotes::{merge_emote_sets, EmoteSets, ProviderScopedMap};
+use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, seven_tv_channel_key, EmoteSets, ProviderScopedMap, SevenTvIds};
 use super::twitch::events::notice_visible;
-use super::twitch::use_twitch_data::{load_badges, load_provider_sets, ProviderSets, TwitchData};
+use super::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, EMOTE_SET_UPDATE, USER_UPDATE};
+use super::twitch::use_twitch_data::{load_badges, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
 use super::types::*;
 use crate::layout::tree::{is_whisper, is_whisper_key};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
@@ -155,6 +156,9 @@ pub struct ChatPane {
     pub(super) envs: HashMap<String, Rc<TwitchEnv>>,
     pub(super) co_caps: HashMap<String, CoCaps>,
     requested: HashSet<String>,
+    /// the 7TV EventAPI subscriptions this pane holds, per Twitch source
+    seven_subs: HashMap<String, SevenTvIds>,
+    seven_seq: u64,
 
     // scrolling / pausing
     pub(super) scroll_held: bool,
@@ -209,6 +213,20 @@ pub struct ChatPane {
 }
 
 const MAX_TOASTS: usize = 4;
+
+/// Start or stop hearing about a channel's 7TV emote set and its user (who may switch the active set).
+fn seven_watch(svc: &Services, ids: &SevenTvIds, on: bool) {
+    for (kind, id) in [(EMOTE_SET_UPDATE, &ids.set_id), (USER_UPDATE, &ids.user_id)] {
+        if id.is_empty() {
+            continue;
+        }
+        if on {
+            svc.seven_events.subscribe(kind, id);
+        } else {
+            svc.seven_events.unsubscribe(kind, id);
+        }
+    }
+}
 
 fn hidden_pins_path(svc: &Services) -> std::path::PathBuf {
     svc.data_dir.join("hidden-pins.json")
@@ -295,6 +313,9 @@ impl ChatPane {
             let bridge = bridge.clone();
             let routes = routes.clone();
             cx.on_release(move |this, cx| {
+                for (_, ids) in this.seven_subs.drain() {
+                    seven_watch(&this.svc, &ids, false);
+                }
                 for (_, h) in this.cards.drain(..) {
                     let _ = h.update(cx, |_, w, _| w.remove_window());
                 }
@@ -346,6 +367,12 @@ impl ChatPane {
             .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
             .unwrap_or_default();
 
+        {
+            // live 7TV emote changes; the listener goes when the pane does
+            let weak = cx.entity().downgrade();
+            svc.seven_events.listen(move |ev, cx| weak.update(cx, |p, cx| p.on_seven_event(ev, cx)).is_ok());
+        }
+
         let mut pane = ChatPane {
             sources,
             mod_mode,
@@ -369,6 +396,8 @@ impl ChatPane {
             envs: HashMap::new(),
             co_caps: HashMap::new(),
             requested: HashSet::new(),
+            seven_subs: HashMap::new(),
+            seven_seq: 0,
             scroll_held: false,
             hover_held: false,
             alt_held: false,
@@ -655,6 +684,7 @@ impl ChatPane {
                                     seven: if rs.seven_tv { ps.seven.clone() } else { empty.clone() },
                                     bttv: if rs.bttv { ps.bttv.clone() } else { empty.clone() },
                                     ffz: if rs.ffz { ps.ffz.clone() } else { empty.clone() },
+                                    ..Default::default()
                                 });
                                 build_twitch_inventory(sets.as_ref(), &d.twitch_emotes, &self.personal)
                             }
@@ -729,6 +759,139 @@ impl ChatPane {
             );
         }
         self.envs = envs;
+        self.sync_seven_subs();
+    }
+
+    // ---- live 7TV emote sets (EventAPI) ----------------------------------------------------------------
+
+    /// Hold an EventAPI subscription for each Twitch source whose 7TV ids are known (7TV on), and nothing else.
+    fn sync_seven_subs(&mut self) {
+        let mut want: HashMap<String, SevenTvIds> = HashMap::new();
+        if self.settings.seven_tv {
+            for st in self.store.sources.iter().filter(|s| s.source.platform == Platform::Twitch) {
+                if let Some(ids) = self.twitch.get(&st.sk).and_then(|d| d.provider_sets.as_ref()).and_then(|p| p.seven_ids.clone()) {
+                    want.insert(st.sk.clone(), ids);
+                }
+            }
+        }
+        if want == self.seven_subs {
+            return;
+        }
+        // new ones first: a channel that switched sets keeps its user subscription (and the socket) throughout
+        let old = std::mem::take(&mut self.seven_subs);
+        for (sk, ids) in &want {
+            if old.get(sk) != Some(ids) {
+                seven_watch(&self.svc, ids, true);
+            }
+        }
+        for (sk, ids) in &old {
+            if want.get(sk) != Some(ids) {
+                seven_watch(&self.svc, ids, false);
+            }
+        }
+        self.seven_subs = want;
+    }
+
+    fn on_seven_event(&mut self, ev: &SevenEvent, cx: &mut Context<Self>) {
+        match ev {
+            SevenEvent::Dispatch(Dispatch::EmoteSet { set_id, actor, changes }) => {
+                let sks: Vec<String> = self.seven_subs.iter().filter(|(_, ids)| same_id(&ids.set_id, set_id)).map(|(sk, _)| sk.clone()).collect();
+                if sks.is_empty() || changes.is_empty() {
+                    return;
+                }
+                for sk in &sks {
+                    if let Some(ps) = self.twitch.get_mut(sk).and_then(|d| d.provider_sets.as_mut()) {
+                        apply_changes(&mut Arc::make_mut(ps).seven.channel, changes);
+                    }
+                    self.forget_seven_cache(sk);
+                    for c in changes {
+                        let (action, e, old_name) = match c {
+                            EmoteChange::Added(e) => ("added", e, ""),
+                            EmoteChange::Removed(e) => ("removed", e, ""),
+                            EmoteChange::Updated { old, new } if old.name != new.name => ("renamed", new, old.name.as_str()),
+                            // only its flags changed: nothing to tell
+                            EmoteChange::Updated { .. } => continue,
+                        };
+                        self.push_seven_notice(sk, json!({"actor": actor, "action": action, "emoteId": e.id, "name": e.name, "oldName": old_name}));
+                    }
+                }
+                self.after_seven_change(cx);
+            }
+            SevenEvent::Dispatch(Dispatch::UserSet { user_id, actor, set_id, set_name }) => {
+                let sks: Vec<String> = self.seven_subs.iter().filter(|(_, ids)| same_id(&ids.user_id, user_id) && !same_id(&ids.set_id, set_id)).map(|(sk, _)| sk.clone()).collect();
+                for sk in sks {
+                    self.forget_seven_cache(&sk);
+                    let ids = SevenTvIds { user_id: user_id.clone(), set_id: set_id.clone() };
+                    let note = json!({"actor": actor, "action": "set", "name": if set_name.is_empty() { "another set".to_string() } else { set_name.clone() }});
+                    let client = self.svc.net.client.clone();
+                    let sid = set_id.clone();
+                    let task = self.svc.net.run(async move { fetch_seven_tv_set(&client, &sid).await });
+                    cx.spawn(async move |this, cx| {
+                        let Some(Some(map)) = task.await else { return };
+                        let _ = this.update(cx, |p, cx| {
+                            if let Some(ps) = p.twitch.get_mut(&sk).and_then(|d| d.provider_sets.as_mut()) {
+                                let ps = Arc::make_mut(ps);
+                                ps.seven.channel = map;
+                                ps.seven_ids = Some(ids);
+                            }
+                            p.push_seven_notice(&sk, note);
+                            p.after_seven_change(cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
+            SevenEvent::Dispatch(Dispatch::Other) => {}
+            SevenEvent::Resynced => {
+                // the socket was down for a while: whatever changed meanwhile comes with a fresh load
+                for sk in self.seven_subs.keys().cloned().collect::<Vec<_>>() {
+                    let Some(cid) = self.store.source(&sk).and_then(|s| s.channel_id.clone()) else { continue };
+                    let task = self.svc.net.run(reload_seven_tv(self.svc.net.client.clone(), cid));
+                    cx.spawn(async move |this, cx| {
+                        let Some((seven, Some(ids))) = task.await else { return };
+                        let _ = this.update(cx, |p, cx| {
+                            if let Some(ps) = p.twitch.get_mut(&sk).and_then(|d| d.provider_sets.as_mut()) {
+                                let ps = Arc::make_mut(ps);
+                                ps.seven.channel = seven.channel;
+                                if !seven.global.is_empty() {
+                                    ps.seven.global = seven.global;
+                                }
+                                ps.seven_ids = Some(ids);
+                            }
+                            p.data_changed(cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
+        }
+    }
+
+    /// The channel's cached 7TV answer is stale now: a restart must not bring the old set back.
+    fn forget_seven_cache(&self, sk: &str) {
+        if let Some(cid) = self.store.source(sk).and_then(|s| s.channel_id.clone()) {
+            forget_cache(&seven_tv_channel_key(&cid));
+            let _ = self.svc.net.rt.spawn(async { flush_cache() });
+        }
+    }
+
+    /// One compact line in the channel's chat about a 7TV change (`note`: a `SevenTvNote` as JSON).
+    fn push_seven_notice(&mut self, sk: &str, note: Value) {
+        self.seven_seq += 1;
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        let s = |k: &str| note.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let system = match s("action").as_str() {
+            "renamed" => format!("{} renamed the 7TV emote {} to {}", s("actor"), s("oldName"), s("name")),
+            "set" => format!("{} switched the channel's 7TV emote set to {}", s("actor"), s("name")),
+            a => format!("{} {a} the 7TV emote {}", s("actor"), s("name")),
+        };
+        let notice = json!({"id": format!("7tv-{ts}-{}", self.seven_seq), "ts": ts, "msgId": "seventv", "system": system.trim(), "seventv": note});
+        self.store.apply(sk, &json!({"type": "chatnotice", "notice": notice}));
+    }
+
+    fn after_seven_change(&mut self, cx: &mut Context<Self>) {
+        self.data_changed(cx);
+        self.refresh(cx);
     }
 
     // ---- frames ------------------------------------------------------------------------------------------
@@ -785,7 +948,7 @@ impl ChatPane {
         let visible: Vec<RowRef> = rows
             .iter()
             .filter(|r| match &r.body {
-                RowBody::Notice(n) => notice_visible(&n.msg_id, n.source_msg_id.as_deref(), n.gift_id.as_deref(), &bombs),
+                RowBody::Notice(n) => n.seventv.is_some() || notice_visible(&n.msg_id, n.source_msg_id.as_deref(), n.gift_id.as_deref(), &bombs),
                 RowBody::ModFeed(_) => rs.show_mod_actions,
                 RowBody::Automod(_) => rs.show_automod,
                 RowBody::Msg(m) => !(m.deleted && rs.deleted_messages == "hide"),
@@ -1232,7 +1395,7 @@ impl ChatPane {
             }
         }
         if std::env::var("AGU_TIP").is_ok() {
-            self.tip = Some((Rc::new(Tip { img: "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0".into(), name: "Kappa".into(), label: "Twitch".into() }), gpui::point(gpui::px(120.), gpui::px(200.))));
+            self.tip = Some((Rc::new(Tip::new("https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0", "Kappa", "Twitch")), gpui::point(gpui::px(120.), gpui::px(200.))));
         }
         cx.notify();
     }

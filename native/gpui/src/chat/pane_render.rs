@@ -337,7 +337,14 @@ impl ChatPane {
                 .child(lines)
                 .into_any_element();
         }
-        let (bar, bg) = if n.raid { (token_a(theme::ORANGE_500, 0.9), token_a(theme::ORANGE_500, 0.12)) } else { (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12)) };
+        let (bar, bg) = if let Some(b) = n.bar {
+            // the app's own notices (7TV emote changes): their bar, a faint lift
+            (b, gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.035 }.into())
+        } else if n.raid {
+            (token_a(theme::ORANGE_500, 0.9), token_a(theme::ORANGE_500, 0.12))
+        } else {
+            (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12))
+        };
         let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_3().border_color(bar).bg(bg).px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
         if let Some(t) = &n.text {
             d = d.child(self.flow(t, Rc::new(vec![]), cx));
@@ -1048,7 +1055,10 @@ impl ChatPane {
             .text_size(px(12.))
             .line_height(px(16.))
             .shadow_2xl();
-        if !tip.img.is_empty() {
+        if !tip.glyph.is_empty() {
+            // a Unicode emoji, in the system's emoji font at the size an emote image gets
+            b = b.child(div().h(px(64.)).flex().items_center().text_size(px(52.)).line_height(px(64.)).child(tip.glyph.clone()));
+        } else if !tip.img.is_empty() {
             b = b.child(ImageBox { url: tip.img.clone(), side: 64.0, radius: 0.0 });
         }
         b = b.child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(tip.name.clone()));
