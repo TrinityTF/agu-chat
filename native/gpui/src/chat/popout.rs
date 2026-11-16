@@ -44,8 +44,39 @@ pub fn open_popout<V: Render + 'static>(cx: &mut App, title: &str, x: f32, y: f3
         ..Default::default()
     };
     let handle = cx.open_window(opts, build).ok()?;
-    let _ = handle.update(cx, |_, window, _| tool_window(window));
-    Some(handle.into())
+    let _ = handle.update(cx, |_, window, _| {
+        tool_window(window);
+        // Settings -> Always on top: a card opened while it is on must not land behind the main window.
+        crate::layout::window_fit::set_always_on_top(window, ALWAYS_ON_TOP.load(std::sync::atomic::Ordering::Relaxed));
+    });
+    let any: AnyWindowHandle = handle.into();
+    if let Ok(mut v) = OPEN.lock() {
+        v.push(any);
+    }
+    Some(any)
+}
+
+/// The "Always on top" setting as the pop-outs last saw it, and the pop-outs opened so far (pruned when a window
+/// has gone), so a change of the setting reaches the ones already on screen.
+static ALWAYS_ON_TOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static OPEN: std::sync::Mutex<Vec<AnyWindowHandle>> = std::sync::Mutex::new(Vec::new());
+
+/// Make every pop-out follow the "Always on top" setting: topmost when on, normal when off. Applies to the open
+/// ones now and to those opened later (`open_popout`).
+pub fn follow_always_on_top(cx: &mut App, on: bool) {
+    ALWAYS_ON_TOP.store(on, std::sync::atomic::Ordering::Relaxed);
+    let handles: Vec<AnyWindowHandle> = OPEN.lock().map(|v| v.clone()).unwrap_or_default();
+    let mut gone: Vec<AnyWindowHandle> = Vec::new();
+    for h in handles {
+        if h.update(cx, |_, window, _| crate::layout::window_fit::set_always_on_top(window, on)).is_err() {
+            gone.push(h);
+        }
+    }
+    if !gone.is_empty() {
+        if let Ok(mut v) = OPEN.lock() {
+            v.retain(|h| !gone.contains(h));
+        }
+    }
 }
 
 /// The main window's HWND: pop-outs are owned by it, so they always sit above it (Electron's `parent`) and go
