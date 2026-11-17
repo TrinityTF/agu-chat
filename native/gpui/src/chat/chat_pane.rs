@@ -138,6 +138,9 @@ pub(super) struct ThreadOpen {
     pub scroll: gpui::ScrollHandle,
     pub count: usize,
     pub focus: gpui::FocusHandle,
+    /// the "Reply in thread" box (made on the first frame, which has the window) and its event subscription
+    pub input: Option<(Entity<TextInput>, Subscription)>,
+    pub sending: bool,
 }
 
 pub struct ChatPane {
@@ -544,8 +547,78 @@ impl ChatPane {
             return;
         }
         self.thread_built.borrow_mut().clear();
-        self.thread = Some(ThreadOpen { sk: sk.to_string(), root, scroll: gpui::ScrollHandle::new(), count: 0, focus: cx.focus_handle() });
+        self.thread = Some(ThreadOpen { sk: sk.to_string(), root, scroll: gpui::ScrollHandle::new(), count: 0, focus: cx.focus_handle(), input: None, sending: false });
         cx.notify();
+    }
+
+    /// The open thread can take a reply from here: a Twitch or Kick chat this account can post in.
+    pub(super) fn thread_can_reply(&self) -> bool {
+        let Some(t) = &self.thread else { return false };
+        let Some(st) = self.store.source(&t.sk) else { return false };
+        matches!(st.source.platform, Platform::Twitch | Platform::Kick) && st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false)
+    }
+
+    /// The thread's reply box, made once per open thread: Enter sends, Esc closes the thread.
+    pub(super) fn thread_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TextInput>> {
+        let t = self.thread.as_mut()?;
+        if let Some((i, _)) = &t.input {
+            return Some(i.clone());
+        }
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new(window, cx, "Reply in thread", InputStyle::Chat);
+            i.set_max_chars(Some(500));
+            i
+        });
+        let sub = cx.subscribe(&input, |this, _, ev: &TextInputEvent, cx| match ev {
+            TextInputEvent::Enter => this.send_thread_reply(cx),
+            TextInputEvent::Escape => this.close_thread(cx),
+            _ => {}
+        });
+        t.input = Some((input.clone(), sub));
+        Some(input)
+    }
+
+    /// Send what is in the thread's box as a reply to the thread's first message (Twitch keeps every reply to it
+    /// in the thread).
+    fn send_thread_reply(&mut self, cx: &mut Context<Self>) {
+        if !self.thread_can_reply() {
+            return;
+        }
+        let Some(t) = &self.thread else { return };
+        let Some((input, _)) = &t.input else { return };
+        if t.sending {
+            return;
+        }
+        let text = input.read(cx).text().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if text.starts_with('/') {
+            self.toast("Commands go in the message box below", true, cx);
+            return;
+        }
+        let (sk, root, input) = (t.sk.clone(), t.root.clone(), input.clone());
+        let Some(src) = self.ref_of(&sk) else { return };
+        let Some(path) = super::input::send_box::send_path(src.platform) else { return };
+        let bridge = self.bridge.clone();
+        if let Some(t) = self.thread.as_mut() {
+            t.sending = true;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let err = super::input::send_box::post_text(&bridge, &src, path, &text, Some(&root)).await;
+            let _ = this.update(cx, |p, cx| {
+                if let Some(t) = p.thread.as_mut().filter(|t| t.root == root) {
+                    t.sending = false;
+                }
+                match err {
+                    Some(e) => p.toast(e, true, cx),
+                    None => input.update(cx, |i, cx| i.set_text("", cx)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn thread_open(&self) -> bool {

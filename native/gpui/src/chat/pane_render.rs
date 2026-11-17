@@ -492,9 +492,13 @@ impl ChatPane {
             t.scroll.scroll_to_bottom();
         }
         t.count = built.len();
-        let (scroll, focus) = (t.scroll.clone(), t.focus.clone());
+        let (scroll, focus, sending) = (t.scroll.clone(), t.focus.clone(), t.sending);
+        let input = if self.thread_can_reply() { self.thread_input(window, cx) } else { None };
         if first_frame {
-            window.focus(&focus);
+            match &input {
+                Some(i) => i.read(cx).focus(window),
+                None => window.focus(&focus),
+            }
         }
         let replies = built.len().saturating_sub(if has_root { 1 } else { 0 });
 
@@ -560,7 +564,11 @@ impl ChatPane {
                 }
             }))
             .child(header)
-            .child(list);
+            .child(list)
+            .when_some(input, |d, i| {
+                // a reply to the thread's first message, so Twitch keeps it in this thread
+                d.child(div().flex_none().px(px(8.)).py(px(6.)).border_t_1().border_color(c(theme::LINE)).when(sending, |d| d.opacity(0.6)).child(i))
+            });
 
         // the dimmed list behind the sheet: a click there closes it
         Some(

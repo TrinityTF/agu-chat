@@ -151,7 +151,7 @@ pub async fn post_text(bridge: &Arc<dyn agu_chat_core::protocol::AguBridge>, sou
     })
 }
 
-fn send_path(p: Platform) -> Option<&'static str> {
+pub fn send_path(p: Platform) -> Option<&'static str> {
     match p {
         Platform::Twitch => Some("/api/chat/send"),
         Platform::Rumble => Some("/api/rumble/send"),
