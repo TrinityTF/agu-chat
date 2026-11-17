@@ -770,7 +770,7 @@ impl SendBox {
                                 .justify_center()
                                 .rounded(px(4.))
                                 .hover(|s| s.bg(c(theme::RAISED_2)))
-                                .child(ImageBox { url: it.img.clone().into(), side: 24.0, radius: 0.0 })
+                                .child(ImageBox { url: it.img.clone().into(), side: 24.0, radius: 0.0, fallback: None })
                                 .on_click(move |_: &ClickEvent, w, cx| {
                                     let name = name.clone();
                                     e.update(cx, |sb, cx| sb.insert_emote(&name, w, cx));

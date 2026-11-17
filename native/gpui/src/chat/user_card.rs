@@ -734,7 +734,7 @@ impl UserCardView {
             // a square with softly rounded corners on every platform; a non-square picture (common on Kick) is
             // cropped to its middle instead of shrunk into the box
             let url = if src.ends_with(super::images::SQUARE) { src.to_string() } else { format!("{src}{}", super::images::SQUARE) };
-            return ImageBox { url: url.into(), side: 36.0, radius: 6.0 }.into_any_element();
+            return ImageBox { url: url.into(), side: 36.0, radius: 6.0, fallback: None }.into_any_element();
         }
         div()
             .size(px(36.))
@@ -960,7 +960,7 @@ impl Render for UserCardView {
             let mut grid = div().flex().flex_wrap().gap(px(6.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
             for (i, b) in badge_list.iter().take(shown).enumerate() {
                 let face: AnyElement = match &b.url {
-                    Some(u) => ImageBox { url: u.clone().into(), side: BADGE_SIDE, radius: 3.0 }.into_any_element(),
+                    Some(u) => ImageBox { url: u.clone().into(), side: BADGE_SIDE, radius: 3.0, fallback: None }.into_any_element(),
                     None => div()
                         .h(px(BADGE_SIDE))
                         .min_w(px(BADGE_SIDE))

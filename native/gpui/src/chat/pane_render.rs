@@ -72,6 +72,8 @@ pub struct ImageBox {
     pub side: f32,
     /// corner radius (an avatar is `rounded-full`)
     pub radius: f32,
+    /// drawn (if already loaded) while `url` is not ready: the row's small emote under the popup's big one
+    pub fallback: Option<SharedString>,
 }
 
 impl IntoElement for ImageBox {
@@ -98,7 +100,8 @@ impl Element for ImageBox {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut Window, _: &mut App) {}
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
         let imgs = cx.global::<ImagesHandle>().clone();
-        if let Some(img) = imgs.0.get(&self.url, self.side, self.side, window.scale_factor()) {
+        let img = imgs.0.get(&self.url, self.side, self.side, window.scale_factor()).or_else(|| self.fallback.as_ref().and_then(|f| imgs.0.ready(f)));
+        if let Some(img) = img {
             // a `#square` URL holds the middle square of the picture (images.rs), whatever its natural size
             let (nw, nh) = if self.url.ends_with(super::images::SQUARE) { (1.0, 1.0) } else { (img.w as f32, img.h as f32) };
             let s = (self.side / nw).min(self.side / nh);
@@ -1117,7 +1120,8 @@ impl ChatPane {
             // a Unicode emoji, in the system's emoji font at the size an emote image gets
             b = b.child(div().h(px(64.)).flex().items_center().text_size(px(52.)).line_height(px(64.)).child(tip.glyph.clone()));
         } else if !tip.img.is_empty() {
-            b = b.child(ImageBox { url: tip.img.clone(), side: 64.0, radius: 0.0 });
+            let fallback = Some(tip.fallback.clone()).filter(|f| !f.is_empty() && *f != tip.img);
+            b = b.child(ImageBox { url: tip.img.clone(), side: 64.0, radius: 0.0, fallback });
         }
         b = b.child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(tip.name.clone()));
         if !tip.label.is_empty() {

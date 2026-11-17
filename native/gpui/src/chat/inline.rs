@@ -51,11 +51,13 @@ pub struct Tip {
     pub label: SharedString,
     /// drawn large in place of `img` (a Unicode emoji)
     pub glyph: SharedString,
+    /// the smaller image the row already shows: drawn while `img` (the big one) loads, or if it failed
+    pub fallback: SharedString,
 }
 
 impl Tip {
     pub fn new(img: impl Into<SharedString>, name: impl Into<SharedString>, label: impl Into<SharedString>) -> Tip {
-        Tip { img: img.into(), name: name.into(), label: label.into(), glyph: SharedString::default() }
+        Tip { img: img.into(), name: name.into(), label: label.into(), glyph: SharedString::default(), fallback: SharedString::default() }
     }
 }
 

@@ -106,6 +106,14 @@ impl Images {
         self.get(url, max_w, max_h, scale).map(|i| (i.w, i.h))
     }
 
+    /// The decoded image if it is already in memory, at whatever size it was decoded; never starts a fetch.
+    pub fn ready(&self, url: &str) -> Option<GpuImg> {
+        match self.cache.borrow().peek(url) {
+            Some(State::Ready(i)) => Some(i.clone()),
+            _ => None,
+        }
+    }
+
     pub fn failed(&self, url: &str) -> bool {
         matches!(self.cache.borrow().peek(url), Some(State::Failed))
     }

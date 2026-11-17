@@ -256,6 +256,8 @@ impl Flow {
 
 fn emote_item(url: String, tip: Rc<Tip>, overlays: Vec<SharedStr>, font_px: f32, size: SizeOpt) -> Item {
     let (px, max_w, vm) = emote_box(font_px, size);
+    // the popup shows the row's emote until its bigger image is in
+    let tip = if tip.fallback.is_empty() && tip.img.as_ref() != url.as_str() { Rc::new(Tip { fallback: url.clone().into(), ..(*tip).clone() }) } else { tip };
     Item::Image(ImageItem { url: url.into(), max_w, max_h: px, fixed: false, wrap: true, vmargin: vm, margin_x: 0.0, valign: VAlign::Middle, tip: Some(tip), overlays, radius: 0.0, act: None })
 }
 
