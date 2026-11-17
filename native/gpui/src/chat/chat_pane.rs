@@ -130,6 +130,16 @@ pub(super) struct Confirm {
     pub run: Option<RowAction>,
 }
 
+/// An open reply thread: which chat, its first message's id, the list's scroll, how many lines it showed last
+/// frame (a new one scrolls it down) and the focus that Esc closes it from.
+pub(super) struct ThreadOpen {
+    pub sk: String,
+    pub root: String,
+    pub scroll: gpui::ScrollHandle,
+    pub count: usize,
+    pub focus: gpui::FocusHandle,
+}
+
 pub struct ChatPane {
     pub sources: Vec<SourceRef>,
     pub mod_mode: bool,
@@ -207,6 +217,10 @@ pub struct ChatPane {
     /// the "Pin for" menu a message's pin button opened
     pub(super) pin_pick: Option<PinPick>,
     pub(super) confirm: Option<Confirm>,
+    /// the reply thread open over the message list (DankChat's reply sheet)
+    pub(super) thread: Option<ThreadOpen>,
+    /// built rows of the open thread: row key -> (generation, the row they were built from, built)
+    pub(super) thread_built: RefCell<HashMap<String, (u64, RowRef, Rc<BuiltRow>)>>,
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
     pub(super) styled_users: Rc<RefCell<Vec<String>>>,
     seen_ord: u64,
@@ -437,6 +451,8 @@ impl ChatPane {
             unpin_after: None,
             pin_pick: None,
             confirm: None,
+            thread: None,
+            thread_built: RefCell::new(HashMap::new()),
             images_inbox,
             styled_users,
             seen_ord: 0,
@@ -519,6 +535,48 @@ impl ChatPane {
 
     fn me_id(&self) -> String {
         self.accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.id.clone()).unwrap_or_default()
+    }
+
+    /// Open the reply thread a reply belongs to, over the message list.
+    pub(super) fn open_thread(&mut self, sk: &str, parent: &str, thread: &str, cx: &mut Context<Self>) {
+        let root = super::thread::thread_root(self.store.rows(), sk, parent, thread);
+        if root.is_empty() {
+            return;
+        }
+        self.thread_built.borrow_mut().clear();
+        self.thread = Some(ThreadOpen { sk: sk.to_string(), root, scroll: gpui::ScrollHandle::new(), count: 0, focus: cx.focus_handle() });
+        cx.notify();
+    }
+
+    pub fn thread_open(&self) -> bool {
+        self.thread.is_some()
+    }
+
+    pub fn close_thread(&mut self, cx: &mut Context<Self>) {
+        if self.thread.take().is_some() {
+            self.thread_built.borrow_mut().clear();
+            cx.notify();
+        }
+    }
+
+    /// The open thread's lines, built like the list's rows (cached by row and generation).
+    pub(super) fn thread_built_rows(&mut self, cx: &mut gpui::App) -> Vec<(String, Rc<BuiltRow>)> {
+        let Some(t) = &self.thread else { return Vec::new() };
+        let rows = super::thread::thread_rows(self.store.rows(), &t.sk, &t.root);
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let cached = self.thread_built.borrow().get(&r.key).filter(|(g, from, _)| *g == self.gen && Arc::ptr_eq(from, &r)).map(|(_, _, b)| b.clone());
+            let b = match cached {
+                Some(b) => b,
+                None => {
+                    let Some(b) = self.build_row(&r, cx).map(Rc::new) else { continue };
+                    self.thread_built.borrow_mut().insert(r.key.clone(), (self.gen, r.clone(), b.clone()));
+                    b
+                }
+            };
+            out.push((r.key.clone(), b));
+        }
+        out
     }
 
     /// A Twitch user's newest chat line in this source (their badges and colour, for lines that carry neither).
@@ -1556,6 +1614,7 @@ impl ChatPane {
                 cx.notify();
             }
             RowAction::Card { sk, user } => self.open_card(sk, user, cx),
+            RowAction::Thread { sk, parent, thread } => self.open_thread(&sk, &parent, &thread, cx),
             RowAction::Automod { sk, id, allow } => {
                 let Some(src) = self.ref_of(&sk) else { return };
                 cx.spawn(async move |this, cx| {
@@ -1813,6 +1872,14 @@ impl ChatPane {
                     }
                 }
                 self.list_state.invalidate(i);
+            }
+            // the open thread's lines lay out anew too
+            for (_, _, b) in self.thread_built.borrow().values() {
+                if b.urls().iter().any(|u| set.contains(u.as_str())) {
+                    for it in b_contents(b) {
+                        it.invalidate();
+                    }
+                }
             }
         }
         let styled: Vec<String> = std::mem::take(&mut *self.styled_users.borrow_mut());

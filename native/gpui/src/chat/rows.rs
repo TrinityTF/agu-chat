@@ -130,9 +130,35 @@ pub enum RowAction {
     RumbleMod { sk: String, action: &'static str, msg: Box<RumbleMsg>, seconds: u32 },
     KickMod { sk: String, action: &'static str, msg: Box<KickMsg>, seconds: Option<u32> },
     YoutubeMod { sk: String, action: &'static str, msg: Box<YouTubeMsg> },
+    /// open the reply thread a reply belongs to (its parent and, on Twitch, the thread's first message)
+    Thread { sk: String, parent: String, thread: String },
 }
 
 // ---- built rows -------------------------------------------------------------------------------------
+
+/// The "↩ replying to @name: ..." line above a reply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplyLine {
+    /// the line as shown (cut off with an ellipsis when long)
+    pub text: String,
+    /// the whole parent message, for the hover tooltip
+    pub full: String,
+    pub sk: String,
+    pub parent: String,
+    pub thread: String,
+}
+
+impl ReplyLine {
+    pub fn new(sk: &str, user: &str, text: &str, parent: &str, thread: &str) -> ReplyLine {
+        let who = if user.is_empty() { String::new() } else { format!("@{user}: ") };
+        ReplyLine { text: format!("↩ replying to {who}{text}"), full: format!("{who}{text}"), sk: sk.to_string(), parent: parent.to_string(), thread: thread.to_string() }
+    }
+
+    /// What a click does: open the thread, when the reply says which message it answers.
+    pub fn action(&self) -> Option<RowAction> {
+        (!self.parent.is_empty() || !self.thread.is_empty()).then(|| RowAction::Thread { sk: self.sk.clone(), parent: self.parent.clone(), thread: self.thread.clone() })
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct Hover {
@@ -155,7 +181,8 @@ pub struct FrameSpec {
     pub border: Option<Hsla>,
     pub margin_y: f32,
     pub label: Option<(String, Hsla)>,
-    pub before: Option<String>,
+    /// the "replying to" line above a reply: hover shows the whole parent, a click opens the thread
+    pub before: Option<ReplyLine>,
     pub hover: Hover,
 }
 
@@ -779,7 +806,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     if highlighted && spec.bg.is_none() {
         spec.tint_class = Some(token_a(theme::PURPLE_500, 0.10));
     }
-    spec.before = msg.reply.as_ref().map(|r| format!("↩ replying to @{}: {}", r.user, r.text));
+    spec.before = msg.reply.as_ref().map(|r| ReplyLine::new(&sk, &r.user, &r.text, &r.parent_id, &r.thread_id));
     spec.hover = Hover {
         copy: Some(msg.text.clone()),
         reply: Some(ReplyTarget { sk: sk.clone(), platform: Platform::Twitch, id: msg.id.clone(), user: msg.user.name.clone(), text: msg.text.clone() }),
@@ -1338,9 +1365,6 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     }
     f.push(Item::Text(name));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
-    if let Some(r) = &m.reply {
-        f.push(Item::Pill(PillItem { text: format!("↩ {}", r.name).into(), size: 10.0, color: token(theme::FAINT), weight: FontWeight::NORMAL, bg: token_a(theme::WHITE, 0.05), pad_x: 4.0, margin_r: 4.0, radius: 4.0 }));
-    }
     let col = if striking { token(theme::FAINT) } else if m.deleted && rs.deleted_messages != "show" { token(theme::FAINT) } else { token(theme::TEXT) };
     for (is_emote, a, name) in split_kick(&m.text) {
         if is_emote {
@@ -1351,6 +1375,11 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     }
     let mut spec = frame(f.finish(), actions, ctx, row.ord);
     co_frame_style(&mut spec, rule);
+    // like Twitch: the line it answers above it (emote codes as their names), the whole of it on hover
+    spec.before = m.reply.as_ref().map(|r| {
+        let text: String = split_kick(&r.text).into_iter().map(|(emote, a, name)| if emote { name } else { a }).collect();
+        ReplyLine::new(&sk, &r.name, &text, &r.id, "")
+    });
     spec.hover = Hover {
         copy: Some(m.text.clone()),
         reply: (env.can_send && !m.deleted).then(|| ReplyTarget { sk: sk.clone(), platform: Platform::Kick, id: m.id.clone(), user: if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() }, text: m.text.clone() }),
@@ -1612,5 +1641,24 @@ mod held_tests {
         // nothing to delete: it has no message id
         assert!(m.id.is_empty());
         assert_eq!(n.reward_id.as_deref(), Some("rw"));
+    }
+}
+
+#[cfg(test)]
+mod reply_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_reply_line_keeps_the_whole_parent_and_opens_its_thread() {
+        let long = "word ".repeat(60);
+        let l = ReplyLine::new("twitch:a", "Al", long.trim(), "p1", "root");
+        assert!(l.text.starts_with("↩ replying to @Al: word"));
+        assert_eq!(l.full, format!("@Al: {}", long.trim()));
+        match l.action() {
+            Some(RowAction::Thread { sk, parent, thread }) => assert_eq!((sk.as_str(), parent.as_str(), thread.as_str()), ("twitch:a", "p1", "root")),
+            _ => panic!("no thread action"),
+        }
+        // a reply that names no parent (old backlog) only has the tooltip
+        assert!(ReplyLine::new("twitch:a", "Al", "hi", "", "").action().is_none());
     }
 }

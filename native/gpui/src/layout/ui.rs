@@ -37,6 +37,32 @@ pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> g
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }
 
+/// A tooltip for long text (a whole chat message): wraps at `max_w` instead of running off in one line.
+pub struct WrapTip(pub SharedString, pub f32);
+
+impl Render for WrapTip {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(self.1))
+            .font_family(theme::FONT)
+            .text_size(px(12.))
+            .line_height(px(16.))
+            .text_color(c(theme::TEXT))
+            .bg(c(theme::RAISED))
+            .border_1()
+            .border_color(c(theme::LINE))
+            .rounded(px(4.))
+            .px(px(8.))
+            .py(px(4.))
+            .child(self.0.clone())
+    }
+}
+
+pub fn tip_wrap(text: impl Into<SharedString>, max_w: f32) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_, cx| cx.new(|_| WrapTip(text.clone(), max_w)).into()
+}
+
 // ---- Modal ------------------------------------------------------------------------
 
 pub type CloseFn = Rc<dyn Fn(&mut Window, &mut App)>;

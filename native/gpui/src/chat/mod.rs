@@ -20,6 +20,7 @@ pub mod rows;
 pub mod search;
 pub mod services;
 pub mod store;
+pub mod thread;
 pub mod twitch;
 pub mod types;
 pub mod ui_util;

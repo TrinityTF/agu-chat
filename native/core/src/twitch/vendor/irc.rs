@@ -147,7 +147,8 @@ pub fn build_chat_msg(m: &IrcLine, display_user: &str) -> Value {
         "gifs": m.tag("gifs"),
         "action": action.is_some(),
         "firstMsg": m.tag("first-msg") == "1",
-        "reply": if reply_user.is_empty() { Value::Null } else { json!({ "user": reply_user, "text": m.tag("reply-parent-msg-body") }) },
+        // a reply: who and what it answers, plus the ids that group a thread (`threadId` is the thread's first message)
+        "reply": if reply_user.is_empty() { Value::Null } else { json!({ "user": reply_user, "text": m.tag("reply-parent-msg-body"), "login": m.tag("reply-parent-user-login"), "parentId": m.tag("reply-parent-msg-id"), "threadId": m.tag("reply-thread-parent-msg-id") }) },
         "rewardId": or_null("custom-reward-id"),
         "msgId": or_null("msg-id"),
         "returning": m.tag("returning-chatter") == "1",
@@ -243,7 +244,10 @@ mod tests {
         assert_eq!(msg["ts"], 1_700_000_000_123i64);
         assert_eq!(msg["bits"], 100);
         assert!(msg["bits"].is_i64());
-        assert_eq!(msg["reply"], json!({"user":"Al","text":"hi there"}));
+        assert_eq!(msg["reply"], json!({"user":"Al","text":"hi there","login":"","parentId":"","threadId":""}));
+        let m2 = parse_irc_line("@display-name=Cy;id=r2;user-id=9;reply-parent-display-name=Bob;reply-parent-user-login=bob;reply-parent-msg-id=r1;reply-parent-msg-body=yo;reply-thread-parent-msg-id=root;reply-thread-parent-user-login=al :cy!cy@cy.tmi.twitch.tv PRIVMSG #chan :@Bob same");
+        let msg2 = build_chat_msg(&m2, "Cy");
+        assert_eq!(msg2["reply"], json!({"user":"Bob","text":"yo","login":"bob","parentId":"r1","threadId":"root"}));
         assert_eq!(msg["rewardId"], Value::Null);
         assert_eq!(msg["user"]["color"], "#FF0000");
     }

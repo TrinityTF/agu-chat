@@ -202,18 +202,23 @@ impl ChatPane {
         if spec.label.is_some() {
             d = d.child(div().w_full().h(px(LABEL_LINE)));
         }
-        if let Some(text) = &spec.before {
-            d = d.child(
-                div()
-                    .w_full()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(base * 0.85))
-                    .line_height(px(base * 0.85 * LINE_HEIGHT))
-                    .text_color(c(theme::FAINT))
-                    .child(SharedString::from(text.clone())),
-            );
+        if let Some(line) = &spec.before {
+            // cut off at the row's width; hovering shows the whole message it answers, a click opens the thread
+            let mut el = div()
+                .id(eid("reply-line-", key))
+                .w_full()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(base * 0.85))
+                .line_height(px(base * 0.85 * LINE_HEIGHT))
+                .text_color(c(theme::FAINT))
+                .tooltip(crate::layout::ui::tip_wrap(line.full.clone(), 360.0))
+                .child(SharedString::from(line.text.clone()));
+            if let Some(act) = line.action() {
+                el = el.cursor_pointer().hover(|s| s.text_color(c(theme::MUTED))).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.run_action(act.clone(), cx)));
+            }
+            d = d.child(el);
         }
         d = d.child(self.flow(&spec.content, actions, cx));
         if let Some((text, col)) = &spec.label {
@@ -451,13 +456,125 @@ impl ChatPane {
         }
         let key = self.shown[ix].row.key.clone();
         let Some(b) = self.built(ix, cx) else { return div().into_any_element() };
-        match &*b {
-            BuiltRow::Frame(f) => self.frame_el(&key, f, false, cx),
-            BuiltRow::Event(e) => self.event_el(&key, e, cx),
-            BuiltRow::Notice(n) => self.notice_el(&key, n, cx),
-            BuiltRow::Feed(f) => self.feed_el(&key, f),
-            BuiltRow::Automod(a) => self.automod_el(&key, a, cx),
+        self.built_el(&key, &b, cx)
+    }
+
+    fn built_el(&mut self, key: &str, b: &BuiltRow, cx: &mut Context<Self>) -> AnyElement {
+        match b {
+            BuiltRow::Frame(f) => self.frame_el(key, f, false, cx),
+            BuiltRow::Event(e) => self.event_el(key, e, cx),
+            BuiltRow::Notice(n) => self.notice_el(key, n, cx),
+            BuiltRow::Feed(f) => self.feed_el(key, f),
+            BuiltRow::Automod(a) => self.automod_el(key, a, cx),
         }
+    }
+
+    // ---- reply thread --------------------------------------------------------------------------------------
+
+    /// The open reply thread, like DankChat's: over the message list, its first message then every reply in the
+    /// order they came, drawn as the list draws them (names open cards, hover tools, mod buttons) and kept live.
+    /// Esc, the close button or a click beside the sheet closes it.
+    fn thread_el(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (sk, root) = {
+            let t = self.thread.as_ref()?;
+            (t.sk.clone(), t.root.clone())
+        };
+        if self.store.source(&sk).is_none() {
+            self.thread = None;
+            return None;
+        }
+        let built = self.thread_built_rows(cx);
+        let has_root = super::thread::thread_rows(self.store.rows(), &sk, &root).first().and_then(|r| super::thread::reply_link(r).map(|l| l.id == root)).unwrap_or(false);
+        let t = self.thread.as_mut()?;
+        let first_frame = t.count == 0 && !built.is_empty();
+        if built.len() > t.count {
+            // a new reply (or the first frame): show the newest line
+            t.scroll.scroll_to_bottom();
+        }
+        t.count = built.len();
+        let (scroll, focus) = (t.scroll.clone(), t.focus.clone());
+        if first_frame {
+            window.focus(&focus);
+        }
+        let replies = built.len().saturating_sub(if has_root { 1 } else { 0 });
+
+        let mut list = div().id("thread-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).flex().flex_col().pt(px(14.)).pb(px(4.));
+        if !has_root {
+            list = list.child(div().px(px(8.)).pb(px(4.)).text_size(px(11.)).line_height(px(15.)).text_color(c(theme::FAINT)).child("The message that started this thread is no longer in chat."));
+        }
+        for (key, b) in &built {
+            list = list.child(self.built_el(&format!("thread|{key}"), b, cx));
+        }
+
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(c(theme::LINE))
+            .text_size(px(12.))
+            .line_height(px(16.))
+            .child(div().flex_none().text_color(c(theme::MUTED)).child(icon(icons::REPLY, 14.0)))
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("Reply thread"))
+            .child(div().flex_1().text_color(c(theme::FAINT)).child(SharedString::from(match replies {
+                1 => "1 reply".to_string(),
+                n => format!("{n} replies"),
+            })))
+            .child(
+                div()
+                    .id("thread-close")
+                    .flex_none()
+                    .p(px(3.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(c(theme::MUTED))
+                    .hover(|s| s.bg(c(theme::RAISED_2)).text_color(c(theme::TEXT)))
+                    .child(icon(icons::X, 14.0))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| this.close_thread(cx))),
+            );
+
+        let sheet = div()
+            .id("thread-sheet")
+            .occlude()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(relative(0.7))
+            .flex()
+            .flex_col()
+            .bg(c(theme::PANEL))
+            .border_t_1()
+            .border_color(c(theme::LINE))
+            .shadow_2xl()
+            .track_focus(&focus)
+            // a click inside the sheet is not a click on the backdrop behind it
+            .on_mouse_down(gpui::MouseButton::Left, |_: &gpui::MouseDownEvent, _w, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _w, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.close_thread(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(header)
+            .child(list);
+
+        // the dimmed list behind the sheet: a click there closes it
+        Some(
+            div()
+                .id("thread-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.35 })
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _: &gpui::MouseDownEvent, _w, cx| this.close_thread(cx)))
+                .child(sheet)
+                .into_any_element(),
+        )
     }
 
     // ---- empty state ---------------------------------------------------------------------------------------
@@ -1198,7 +1315,8 @@ chat_list(
             .children(self.scrollbar(cx))
             .children(self.pill(cx));
 
-        let message_list = div().relative().flex().flex_col().flex_1().min_h_0().children(self.search_bar(cx)).child(list_area);
+        let thread = self.thread_el(window, cx);
+        let message_list = div().relative().flex().flex_col().flex_1().min_h_0().children(self.search_bar(cx)).child(list_area).children(thread);
 
         div()
             .relative()

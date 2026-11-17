@@ -27,7 +27,11 @@ lenient! {
 }
 lenient! { pub struct PinBy { pub id: String, pub login: String, pub name: String } }
 lenient! { pub struct PinInfo { pub by: PinBy, pub starts_at: Option<String>, pub ends_at: Option<String> } }
-lenient! { pub struct ReplyInfo { pub user: String, pub text: String } }
+lenient! {
+    /// What a Twitch reply answers: the parent's author and text, its id, and the id of the thread's first message
+    /// (`thread_id`; Twitch gives every reply in a thread the same one).
+    pub struct ReplyInfo { pub user: String, pub text: String, pub login: String, pub parent_id: String, pub thread_id: String }
+}
 
 lenient! {
     pub struct ChatMsg {

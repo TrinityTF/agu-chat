@@ -859,6 +859,13 @@ impl AguApp {
             // Esc closes the focused split's search (MessageList.tsx)
             let tab = self.active_tab().clone();
             if let Some(slot) = self.focused_of(&tab).and_then(|id| self.panes.get(&id)) {
+                // an open reply thread closes first
+                if self.menu.is_none() && self.dialog.is_none() && slot.view.read(cx).thread_open() {
+                    let v = slot.view.clone();
+                    v.update(cx, |p, cx| p.close_thread(cx));
+                    stop(window, cx);
+                    return;
+                }
                 if self.menu.is_none() && self.dialog.is_none() && slot.view.read(cx).search_open {
                     let v = slot.view.clone();
                     v.update(cx, |p, cx| p.close_search(window, cx));
