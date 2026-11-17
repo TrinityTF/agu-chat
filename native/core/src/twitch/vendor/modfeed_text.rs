@@ -237,11 +237,16 @@ pub fn build_held_msg(event: &Value, status: &str, resolved_by: Option<&str>) ->
     let s = |k: &str| js_str_or_empty(event.get(k));
     let or_empty = |a: String, b: String| if a.is_empty() { b } else { a };
     let automod = event.get("automod").filter(|v| truthy(v));
+    // The message's emotes as an IRC `emotes` tag (positions into the fragments' text), so the held line draws
+    // them like a chat line does.
+    let (frag_text, emotes) = event.get("message").map(text_from_fragments).unwrap_or_default();
+    let text = if frag_text.is_empty() { event.get("message").map(|m| js_str_or_empty(m.get("text"))).unwrap_or_default() } else { frag_text };
     json!({
         "id": event.get("message_id").cloned().unwrap_or(Value::Null),
         "ts": event.get("held_at").and_then(Value::as_str).and_then(parse_rfc3339_ms).filter(|t| *t != 0).unwrap_or_else(now_ms),
         "user": { "id": s("user_id"), "login": s("user_login"), "name": or_empty(s("user_name"), s("user_login")) },
-        "text": event.get("message").map(|m| js_str_or_empty(m.get("text"))).unwrap_or_default(),
+        "text": text,
+        "emotes": emotes,
         "reason": if is_blocked_term { "blocked_term" } else { "automod" },
         "category": if is_blocked_term { Value::Null } else { automod.and_then(|a| a.get("category")).filter(|v| truthy(v)).cloned().unwrap_or(Value::Null) },
         "level": if is_blocked_term { Value::Null } else { automod.and_then(|a| a.get("level")).filter(|v| v.is_number()).cloned().unwrap_or(Value::Null) },
@@ -300,6 +305,19 @@ mod tests {
         assert_eq!(h["level"], 2);
         assert_eq!(h["resolvedBy"], Value::Null);
         assert_eq!(map_automod_status("Approved"), "approved");
+    }
+
+    #[test]
+    fn held_carries_its_emotes() {
+        let e = json!({"message_id":"m2","user_id":"1","user_login":"x","user_name":"X","message":{"text":"bad Kappa","fragments":[{"type":"text","text":"bad "},{"type":"emote","text":"Kappa","emote":{"id":"25"}}]},"reason":"blocked_term"});
+        let h = build_held_msg(&e, "held", None);
+        assert_eq!(h["text"], "bad Kappa");
+        assert_eq!(h["emotes"], "25:4-8");
+        assert_eq!(h["user"]["name"], "X");
+        // no fragments: just the text, no emotes
+        let e = json!({"message_id":"m3","user_id":"1","user_login":"x","message":{"text":"plain"}});
+        let h = build_held_msg(&e, "held", None);
+        assert_eq!((h["text"].as_str(), h["emotes"].as_str()), (Some("plain"), Some("")));
     }
 
     #[test]

@@ -65,6 +65,8 @@ lenient! {
         pub gift_id: Option<String>,
         pub gift_count: Option<f64>,
         pub reward: Option<RewardInfo>,
+        /// a redeem: its reward, to pair it with a chat line of the same redeem
+        pub reward_id: Option<String>,
         pub user: ChatUser,
         pub text: String,
         pub emotes: Option<String>,
@@ -88,6 +90,8 @@ lenient! {
         pub ts: i64,
         pub user: HeldUser,
         pub text: String,
+        /// the IRC `emotes` tag of the text (from EventSub's fragments)
+        pub emotes: String,
         pub reason: String,
         pub category: Option<String>,
         pub level: Option<f64>,

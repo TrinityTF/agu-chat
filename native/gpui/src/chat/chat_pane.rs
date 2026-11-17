@@ -521,6 +521,17 @@ impl ChatPane {
         self.accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.id.clone()).unwrap_or_default()
     }
 
+    /// A Twitch user's newest chat line in this source (their badges and colour, for lines that carry neither).
+    fn last_line_of(&self, sk: &str, user_id: &str) -> Option<ChatMsg> {
+        if user_id.is_empty() {
+            return None;
+        }
+        self.store.rows().iter().rev().find_map(|r| match &r.body {
+            RowBody::Msg(m) if r.sk == sk && m.user.id == user_id => Some(m.clone()),
+            _ => None,
+        })
+    }
+
     // ---- data loading (useTwitchData) -------------------------------------------------------------------
 
     fn start_loads(&mut self, cx: &mut Context<Self>) {
@@ -1811,10 +1822,11 @@ impl ChatPane {
                 // the paint / badge definitions came after the rows were built: every row reads them anew
                 self.rebuild_envs();
                 self.gen += 1;
-                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(_) | RowBody::Kick(_)));
+                self.invalidate_rows(|r| matches!(&r.body, RowBody::Msg(_) | RowBody::Kick(_) | RowBody::Automod(_)));
             } else {
                 self.invalidate_rows(|r| match &r.body {
                     RowBody::Msg(m) => set.contains(&m.user.id),
+                    RowBody::Automod(h) => set.contains(&h.user.id),
                     RowBody::Kick(m) => set.contains(&super::twitch::cosmetics::kick_key(&m.user.id)),
                     _ => false,
                 });
@@ -1873,7 +1885,8 @@ impl ChatPane {
                 let chip_w = super::inline::plain_text_width(window, &a.chip, 10.0, gpui::FontWeight::NORMAL) + 12.0 + 2.0;
                 let fits = 14.0 + 6.0 + a.header.width_at(name_w, window, cx) + 6.0 + chip_w <= w;
                 let head = if fits { a.header.height_at(name_w, window, cx).max(18.5) } else { a.header.height_at(name_w, window, cx).max(14.0) + 6.0 + 18.5 };
-                let body = a.body.height_at(w, window, cx);
+                // the held line is a row frame of its own (its px-2 inside the card's 3px bar)
+                let body = frame_h(&a.msg, width - 3.0, window, cx);
                 let tail = if a.status == "held" { if a.can_resolve { 4.0 + 19.95 } else { 0.0 } } else { 15.95 };
                 ItemMetrics { h: 8.0 + head + body + tail, mt: 1.0, mb: 1.0 }
             }
@@ -1917,11 +1930,28 @@ impl ChatPane {
                 };
                 let defs = env.seven_defs.clone();
                 let susp = st.suspicious.get(&m.user.id).map(|s| s.status.clone());
-                Some(twitch_message_row(&TwitchInput { row, msg: m, ctx: &ctx, env: &env, known: &st.known, susp: susp.as_deref(), rule: rule.as_ref(), style: style.as_ref(), defs: defs.as_deref() }))
+                Some(twitch_message_row(&TwitchInput { row, msg: m, ctx: &ctx, env: &env, known: &st.known, susp: susp.as_deref(), rule: rule.as_ref(), style: style.as_ref(), defs: defs.as_deref(), held: false }))
             }
-            RowBody::Notice(n) => Some(notice_row(row, n, &ctx, self.envs.get(&row.sk)?)),
+            RowBody::Notice(n) => {
+                let seen = self.last_line_of(&row.sk, &n.user.id);
+                Some(notice_row(row, n, &ctx, self.envs.get(&row.sk)?, seen.as_ref()))
+            }
             RowBody::ModFeed(f) => Some(feed_row(f, &ctx)),
-            RowBody::Automod(h) => Some(automod_row(row, h, &ctx, self.envs.get(&row.sk)?)),
+            RowBody::Automod(h) => {
+                // the held message drawn as the chat line it would be: badges and colour from the user's last line
+                let env = self.envs.get(&row.sk)?.clone();
+                let st = st?;
+                let seen = self.last_line_of(&row.sk, &h.user.id);
+                let known_color = st.known.get(&h.user.login.to_lowercase()).map(|k| k.color.as_str());
+                let msg = held_chat_msg(h, seen.as_ref(), known_color);
+                let lookup = if rs.seven_tv_cosmetics { self.svc.cosmetics.style_of(&h.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                let style: Option<ChatterStyle> = match lookup {
+                    StyleLookup::Known(s) => s,
+                    StyleLookup::Unknown => None,
+                };
+                let defs = env.seven_defs.clone();
+                Some(automod_row(&TwitchInput { row, msg: &msg, ctx: &ctx, env: &env, known: &st.known, susp: None, rule: None, style: style.as_ref(), defs: defs.as_deref(), held: true }, h))
+            }
             RowBody::Rumble(m) => {
                 let st = st?;
                 let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble), viewer_id: String::new() };
@@ -1977,7 +2007,7 @@ fn b_contents(b: &BuiltRow) -> Vec<Rc<super::inline::InlineContent>> {
             }
             v
         }
-        BuiltRow::Automod(a) => vec![a.header.clone(), a.body.clone()],
+        BuiltRow::Automod(a) => vec![a.header.clone(), a.msg.content.clone()],
         BuiltRow::Feed(_) => vec![],
     }
 }

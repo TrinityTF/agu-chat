@@ -272,7 +272,7 @@ impl ChatPane {
         if e.inner.is_none() {
             head = head.pb(px(2.));
         }
-        let left = div().flex_1().min_w_0().child(self.flow(&e.content, Rc::new(vec![]), cx));
+        let left = div().flex_1().min_w_0().child(self.flow(&e.content, Rc::new(e.actions.clone()), cx));
         let mut right = div().flex().flex_none().items_center().gap(px(4.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::MUTED)).text_size(px(base)).line_height(px(base * LINE_HEIGHT));
         if e.is_bits {
             let (path, col) = bits_icon(amount.unwrap_or(1.0));
@@ -377,7 +377,6 @@ impl ChatPane {
             .w_full()
             .flex_none()
             .rounded(px(4.))
-            .px(px(8.))
             .py(px(4.))
             .border_l_3()
             .border_color(gpui::rgb(0xf59e0b))
@@ -388,9 +387,10 @@ impl ChatPane {
                 .flex_wrap()
                 .items_center()
                 .gap(px(6.))
+                .px(px(8.))
                 .text_size(px(hs))
                 .child(div().flex_none().text_color(c(theme::AMBER_200)).child(icon(icons::WARNING, 14.0)))
-                .child(div().flex_none().child(self.flow(&a.header, Rc::new(vec![RowAction::Card { sk: a.sk.clone(), user: a.user.clone() }]), cx).fit()))
+                .child(div().flex_none().child(self.flow(&a.header, Rc::new(vec![]), cx).fit()))
                 .child(
                     div()
                         .flex_none()
@@ -406,7 +406,9 @@ impl ChatPane {
                         .child(SharedString::from(a.chip.clone())),
                 ),
         );
-        d = d.child(self.flow(&a.body, Rc::new(vec![]), cx));
+        // the held message as a chat line: badges, a name that opens the card, emotes, the mod buttons that
+        // apply to a message not in chat yet, Copy on hover
+        d = d.child(self.frame_el(key, &a.msg, true, cx));
         if a.status == "held" {
             if a.can_resolve {
                 let (sk1, id1, sk2, id2) = (a.sk.clone(), a.id.clone(), a.sk.clone(), a.id.clone());
@@ -430,6 +432,7 @@ impl ChatPane {
                 d = d.child(
                     div()
                         .mt(px(4.))
+                        .px(px(8.))
                         .flex()
                         .gap(px(6.))
                         .child(btn("Allow", format!("allow-{key}"), theme::GREEN_300, cx, RowAction::Automod { sk: sk1, id: id1, allow: true }))
@@ -437,7 +440,7 @@ impl ChatPane {
                 );
             }
         } else {
-            d = d.child(div().text_size(px(11.)).line_height(px(15.95)).text_color(c(theme::FAINT)).child(SharedString::from(a.resolved_line.clone())));
+            d = d.child(div().px(px(8.)).text_size(px(11.)).line_height(px(15.95)).text_color(c(theme::FAINT)).child(SharedString::from(a.resolved_line.clone())));
         }
         d.into_any_element()
     }

@@ -540,6 +540,8 @@ impl TwitchSource {
                 "text": "",
                 "emotes": "",
                 "reward": info,
+                // lets the app pair it with the redeem's chat line, should one turn up
+                "rewardId": id,
             });
             let mut entry = notice.clone();
             entry["notice"] = json!(true);

@@ -162,6 +162,8 @@ pub struct FrameSpec {
 #[derive(Clone)]
 pub struct EventSpec {
     pub content: Rc<InlineContent>,
+    /// what the header's clickable items do (the name's card, mod buttons)
+    pub actions: Vec<RowAction>,
     pub amount: Option<f64>,
     pub is_bits: bool,
     pub inner: Option<FrameSpec>,
@@ -197,7 +199,8 @@ pub struct AutomodSpec {
     pub id: String,
     pub header: Rc<InlineContent>,
     pub chip: String,
-    pub body: Rc<InlineContent>,
+    /// the held message as a chat line (`twitch_message_row` in held mode)
+    pub msg: FrameSpec,
     pub status: String,
     pub resolved_line: String,
     pub can_resolve: bool,
@@ -223,6 +226,7 @@ impl BuiltRow {
                 v.extend(n.text.as_ref().map(|t| t.urls()).unwrap_or_default());
                 v
             }
+            BuiltRow::Automod(a) => a.msg.content.urls(),
             _ => vec![],
         }
     }
@@ -589,6 +593,60 @@ pub struct TwitchInput<'a> {
     pub rule: Option<&'a HighlightRule>,
     pub style: Option<&'a ChatterStyle>,
     pub defs: Option<&'a SevenTvDefs>,
+    /// An AutoMod hold drawn as a chat line inside its card: not in chat yet, so nothing to delete, pin or reply
+    /// to, no highlight of its own (the card is the highlight) and never a redeem / cheer frame.
+    pub held: bool,
+}
+
+/// The ChatMsg an AutoMod hold is drawn (and moderated) as. `seen` is the user's last chat line here, if any:
+/// EventSub's hold carries no badges or colour, so they come from there (or from the known chatters' colour).
+pub fn held_chat_msg(h: &HeldMsg, seen: Option<&ChatMsg>, known_color: Option<&str>) -> ChatMsg {
+    let color = seen.map(|m| m.user.color.clone()).filter(|c| !c.is_empty()).or_else(|| known_color.map(str::to_string)).unwrap_or_default();
+    ChatMsg {
+        id: h.id.clone(),
+        ts: h.ts,
+        user: ChatUser { id: h.user.id.clone(), login: h.user.login.clone(), name: if h.user.name.is_empty() { h.user.login.clone() } else { h.user.name.clone() }, color },
+        badges: seen.map(|m| m.badges.clone()).unwrap_or_default(),
+        badge_info: seen.map(|m| m.badge_info.clone()).unwrap_or_default(),
+        text: h.text.clone(),
+        emotes: h.emotes.clone(),
+        ..Default::default()
+    }
+}
+
+/// The ChatMsg a redeem without text acts on (its mod buttons): the redeemer, badges from their last line here.
+pub fn redeemer_chat_msg(n: &Notice, seen: Option<&ChatMsg>) -> ChatMsg {
+    ChatMsg {
+        id: String::new(),
+        ts: n.ts,
+        user: ChatUser { color: seen.map(|m| m.user.color.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| n.user.color.clone()), ..n.user.clone() },
+        badges: seen.map(|m| m.badges.clone()).unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// The inline mod buttons for a Twitch user's line, by what this account may do to them. `msg` is what the
+/// buttons act on; `can_delete` is false where there is no chat message to delete.
+fn twitch_mod_buttons(f: &mut Flow, ctx: &RowCtx, env: &TwitchEnv, sk: &str, msg: &ChatMsg, can_delete: bool, actions: &mut Vec<RowAction>) {
+    let reach = mod_reach(&env.viewer, &msg.user.id, &msg.badges);
+    let caps = &env.caps;
+    let (can_ban, can_timeout) = (caps.ban && reach.ban, caps.ban && reach.timeout);
+    let is_mod = caps.ban || caps.delete || caps.warn;
+    let can = |b: &ModButton| match b.action.as_str() {
+        "ban" => can_ban && !msg.deleted,
+        "timeout" => can_timeout && !msg.deleted,
+        "warn" => caps.warn && reach.warn && !msg.deleted,
+        "delete" => can_delete,
+        _ => is_mod,
+    };
+    let run = |b: &ModButton| match b.action.as_str() {
+        "ban" => RowAction::Popover { sk: sk.to_string(), msg: Box::new(msg.clone()), kind: "ban" },
+        "timeout" => RowAction::QuickTimeout { sk: sk.to_string(), msg: Box::new(msg.clone()), seconds: b.seconds },
+        "warn" => RowAction::Popover { sk: sk.to_string(), msg: Box::new(msg.clone()), kind: "warn" },
+        "delete" => RowAction::Delete { sk: sk.to_string(), id: msg.id.clone() },
+        _ => RowAction::TwitchCommand { sk: sk.to_string(), msg: Box::new(msg.clone()), template: b.command.clone() },
+    };
+    mod_button_items(f, ctx.mod_list, &can, &run, actions);
 }
 
 /// A name with a 7TV paint: per-character colours across the width.
@@ -605,7 +663,8 @@ fn paint_gradient(paint: &super::twitch::cosmetics::SevenTvPaint, fallback: Hsla
 }
 
 pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
-    let TwitchInput { row, msg, ctx, env, known, susp, rule, style, defs } = inp;
+    let TwitchInput { row, msg, ctx, env, known, susp, rule, style, defs, held } = inp;
+    let held = *held;
     let rs = ctx.rs;
     let base = rs.font_size;
     let size = SizeOpt::parse(&rs.emote_size);
@@ -628,31 +687,15 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     };
     let reach = mod_reach(&env.viewer, &msg.user.id, &msg.badges);
     let caps = &env.caps;
-    let can_ban = caps.ban && reach.ban;
-    let can_timeout = caps.ban && reach.timeout;
-    let can_delete = caps.delete && reach.delete && !msg.deleted;
+    // a held message is not in chat: nothing to delete until it is allowed (then it comes in as a normal line)
+    let can_delete = caps.delete && reach.delete && !msg.deleted && !held;
     let struck = msg.deleted && rs.deleted_messages == "strike";
-    let is_mod = caps.ban || caps.delete || caps.warn;
     let sk = row.sk.clone();
 
     let mut f = Flow::new(base);
     let mut actions: Vec<RowAction> = Vec::new();
     if ctx.mod_buttons {
-        let can = |b: &ModButton| match b.action.as_str() {
-            "ban" => can_ban && !msg.deleted,
-            "timeout" => can_timeout && !msg.deleted,
-            "warn" => caps.warn && reach.warn && !msg.deleted,
-            "delete" => can_delete,
-            _ => is_mod,
-        };
-        let run = |b: &ModButton| match b.action.as_str() {
-            "ban" => RowAction::Popover { sk: sk.clone(), msg: Box::new((*msg).clone()), kind: "ban" },
-            "timeout" => RowAction::QuickTimeout { sk: sk.clone(), msg: Box::new((*msg).clone()), seconds: b.seconds },
-            "warn" => RowAction::Popover { sk: sk.clone(), msg: Box::new((*msg).clone()), kind: "warn" },
-            "delete" => RowAction::Delete { sk: sk.clone(), id: msg.id.clone() },
-            _ => RowAction::TwitchCommand { sk: sk.clone(), msg: Box::new((*msg).clone()), template: b.command.clone() },
-        };
-        mod_button_items(&mut f, ctx.mod_list, &can, &run, &mut actions);
+        twitch_mod_buttons(&mut f, ctx, env, &sk, msg, can_delete, &mut actions);
     }
     frame_prefix(&mut f, ctx, msg.ts, Platform::Twitch);
 
@@ -723,6 +766,12 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
 
     let content = f.finish();
     let mut spec = frame(content, actions, ctx, row.ord);
+    if held {
+        // drawn inside the AutoMod card, which is its highlight; Copy is the one hover tool that applies
+        spec.alt = false;
+        spec.hover = Hover { copy: Some(msg.text.clone()), ..Hover::default() };
+        return BuiltRow::Frame(spec);
+    }
     let highlighted = msg.msg_id.as_deref() == Some("highlighted-message");
     spec.bar = hl.bar;
     spec.bg = hl.bg;
@@ -743,35 +792,57 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     let builtin = msg.msg_id.as_deref().and_then(builtin_redeem);
     let is_bits = msg.reward.as_ref().map(|r| r.bits.unwrap_or(0.0) != 0.0).unwrap_or(false) || builtin.map(|b| b.1).unwrap_or(false);
     let frame_color = hex(&name_color(&msg.user, rs.readable_colors));
+    let who = EventWho { sk: &sk, user: &msg.user, color: frame_color, buttons: None };
     if (msg.reward_id.is_some() || builtin.is_some()) && !msg.deleted && (if is_bits { ev.cheers } else { ev.redeems }) {
         let reward_title = builtin.map(|b| b.0.to_string()).or_else(|| msg.reward.as_ref().map(|r| r.title.clone()));
         let amount = if builtin.is_some() { None } else { msg.reward.as_ref().and_then(|r| r.bits.filter(|b| *b != 0.0).or(r.cost)) };
-        return BuiltRow::Event(event_frame(&msg.user.name, frame_color, "redeemed", reward_title, amount, is_bits, if is_bits { "cheer" } else { "redeem" }, Some(spec), base));
+        return BuiltRow::Event(event_frame(&who, "redeemed", reward_title, amount, is_bits, if is_bits { "cheer" } else { "redeem" }, Some(spec), base));
     }
     if let Some(b) = msg.bits.filter(|b| *b != 0.0) {
         if ev.cheers && !msg.deleted {
-            return BuiltRow::Event(event_frame(&msg.user.name, frame_color, "cheered", None, Some(b), true, "cheer", Some(spec), base));
+            return BuiltRow::Event(event_frame(&who, "cheered", None, Some(b), true, "cheer", Some(spec), base));
         }
     }
     BuiltRow::Frame(spec)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn event_frame(user: &str, color: Hsla, verb: &str, reward: Option<String>, amount: Option<f64>, is_bits_hint: bool, tone: &str, inner: Option<FrameSpec>, base: f32) -> EventSpec {
+/// Who a redeem / cheer header names: their name opens their card. `buttons` puts the mod buttons in front of
+/// it, for a redeem with no chat line under it to carry them.
+struct EventWho<'a> {
+    sk: &'a str,
+    user: &'a ChatUser,
+    color: Hsla,
+    buttons: Option<(&'a RowCtx<'a>, &'a TwitchEnv, &'a ChatMsg)>,
+}
+
+fn event_frame(who: &EventWho, verb: &str, reward: Option<String>, amount: Option<f64>, is_bits_hint: bool, tone: &str, inner: Option<FrameSpec>, base: f32) -> EventSpec {
     let mut f = Flow::new(base);
-    f.push(Item::Text(TextItem::new(user.to_string(), base, color).weight(FontWeight::SEMIBOLD)));
+    let mut actions: Vec<RowAction> = Vec::new();
+    if let Some((ctx, env, msg)) = who.buttons {
+        if ctx.mod_buttons {
+            twitch_mod_buttons(&mut f, ctx, env, who.sk, msg, false, &mut actions);
+        }
+    }
+    let u = who.user;
+    let mut name = TextItem::new(u.name.clone(), base, who.color).weight(FontWeight::SEMIBOLD);
+    if !u.id.is_empty() || !u.login.is_empty() {
+        actions.push(RowAction::Card { sk: who.sk.to_string(), user: CardUser { id: u.id.clone(), login: u.login.clone(), name: u.name.clone(), avatar: String::new() } });
+        name = name.act(Act::Tag(actions.len() as u32 - 1), true);
+    }
+    f.push(Item::Text(name));
     f.push(Item::Text(TextItem::new(format!(" {verb}"), base, token(theme::MUTED))));
     if let Some(r) = reward {
         f.push(Item::Text(TextItem::new(" ", base, token(theme::MUTED))));
         f.push(Item::Text(TextItem::new(r, base, token(theme::TEXT)).weight(FontWeight::SEMIBOLD)));
     }
     let is_bits = is_bits_hint || (tone == "cheer" && amount.is_none());
-    EventSpec { content: f.finish(), amount, is_bits, inner }
+    EventSpec { content: f.finish(), actions, amount, is_bits, inner }
 }
 
 // ---- notices ----------------------------------------------------------------------------------------
 
-pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> BuiltRow {
+/// `seen` is the notice's user's last chat line here (badges for a redeem's mod buttons).
+pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv, seen: Option<&ChatMsg>) -> BuiltRow {
     let rs = ctx.rs;
     let base = rs.font_size;
     let size = SizeOpt::parse(&rs.emote_size);
@@ -779,12 +850,15 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv) -> Built
         return seventv_notice(s, base, size);
     }
     if (n.msg_id == "redeem" || n.msg_id == "powerup") && n.reward.is_some() {
-        // A redeem with no message: the same header as one with a message, just nothing under it.
+        // A redeem with no message: the same header as one with a message, just nothing under it. Its name opens
+        // the card and, in mod mode, the timeout / ban buttons sit in front of it (there is no line to delete).
         let r = n.reward.as_ref().unwrap();
         let bits = r.bits.unwrap_or(0.0) != 0.0;
         let amount = if bits { r.bits } else { r.cost };
-        let color = hex(&name_color(&n.user, rs.readable_colors));
-        return BuiltRow::Event(event_frame(&n.user.name, color, "redeemed", Some(r.title.clone()), amount, bits, if bits { "cheer" } else { "redeem" }, None, base));
+        let target = redeemer_chat_msg(n, seen);
+        let color = hex(&name_color(&target.user, rs.readable_colors));
+        let who = EventWho { sk: &row.sk, user: &target.user, color, buttons: Some((ctx, env, &target)) };
+        return BuiltRow::Event(event_frame(&who, "redeemed", Some(r.title.clone()), amount, bits, if bits { "cheer" } else { "redeem" }, None, base));
     }
     let kind = notice_kind(&n.msg_id, n.source_msg_id.as_deref());
     let raid = kind == Some(ChatEventKind::Raids);
@@ -893,7 +967,10 @@ pub fn feed_row(f: &ModFeedEntry, ctx: &RowCtx) -> BuiltRow {
     BuiltRow::Feed(FeedSpec { time, text: f.text.clone(), base: ctx.rs.font_size })
 }
 
-pub fn automod_row(row: &Row, h: &HeldMsg, ctx: &RowCtx, env: &TwitchEnv) -> BuiltRow {
+/// The AutoMod card: its header (what was held and why), the held message as a chat line (`inp.msg`, from
+/// `held_chat_msg`: badges, a name that opens the card, emotes, the mod buttons that apply), then Allow / Deny.
+pub fn automod_row(inp: &TwitchInput, h: &HeldMsg) -> BuiltRow {
+    let (row, ctx, env) = (inp.row, inp.ctx, inp.env);
     let base = ctx.rs.font_size;
     let chip = if h.reason == "blocked_term" {
         "Blocked term".to_string()
@@ -904,10 +981,12 @@ pub fn automod_row(row: &Row, h: &HeldMsg, ctx: &RowCtx, env: &TwitchEnv) -> Bui
     };
     let hs = base * 0.92;
     let mut head = Flow::new(hs);
-    head.push(Item::Text(TextItem::new("AutoMod held a message from ", hs, token(theme::AMBER_200))));
-    head.push(Item::Text(TextItem::new(h.user.name.clone(), hs, token(theme::AMBER_200)).weight(FontWeight::SEMIBOLD).act(Act::Tag(0), true)));
-    let mut body = Flow::new(base);
-    body.push(Item::Text(TextItem::new(h.text.clone(), base, token(theme::TEXT))));
+    // who sent it is the line below (badges, coloured name that opens the card)
+    head.push(Item::Text(TextItem::new("AutoMod held a message", hs, token(theme::AMBER_200))));
+    let msg = match twitch_message_row(&TwitchInput { held: true, ..*inp }) {
+        BuiltRow::Frame(f) => f,
+        _ => unreachable!("a held line is always a plain frame"),
+    };
     let resolved = match h.status.as_str() {
         "approved" => format!("Allowed by {}", h.resolved_by.clone().filter(|s| !s.is_empty()).unwrap_or("?".into())),
         "denied" => format!("Denied by {}", h.resolved_by.clone().filter(|s| !s.is_empty()).unwrap_or("?".into())),
@@ -919,7 +998,7 @@ pub fn automod_row(row: &Row, h: &HeldMsg, ctx: &RowCtx, env: &TwitchEnv) -> Bui
         id: h.id.clone(),
         header: head.finish(),
         chip,
-        body: body.finish(),
+        msg,
         status: h.status.clone(),
         resolved_line: resolved,
         can_resolve: env.caps.automod,
@@ -1486,5 +1565,52 @@ mod tests {
     fn money_formats() {
         assert_eq!(money(500.0), "$5");
         assert_eq!(money(250.0), "$2.50");
+    }
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::*;
+    use crate::chat::twitch::parts::build_parts;
+
+    fn held() -> HeldMsg {
+        serde_json::from_value(serde_json::json!({"id": "h1", "ts": 5, "user": {"id": "42", "login": "falconrogue9sr", "name": "FalconRogue9sr"}, "text": "bad Kappa", "emotes": "25:4-8", "reason": "blocked_term", "status": "held"})).unwrap()
+    }
+
+    #[test]
+    fn a_hold_becomes_a_chat_line_with_its_emotes() {
+        let h = held();
+        let m = held_chat_msg(&h, None, None);
+        assert_eq!((m.id.as_str(), m.ts, m.text.as_str(), m.emotes.as_str()), ("h1", 5, "bad Kappa", "25:4-8"));
+        assert_eq!((m.user.id.as_str(), m.user.login.as_str(), m.user.name.as_str()), ("42", "falconrogue9sr", "FalconRogue9sr"));
+        assert!(!m.deleted && m.reward_id.is_none() && m.reply.is_none());
+        let parts = build_parts(&m.text, &m.emotes, None, None, "");
+        assert!(parts.iter().any(|p| matches!(p, MsgPart::Emote { id, name, .. } if id == "25" && name == "Kappa")));
+    }
+
+    #[test]
+    fn a_hold_takes_badges_and_colour_from_the_users_last_line() {
+        let h = held();
+        let seen = ChatMsg { badges: "subscriber/12,vip/1".into(), badge_info: "subscriber/14".into(), user: ChatUser { color: "#FF0000".into(), ..Default::default() }, ..Default::default() };
+        let m = held_chat_msg(&h, Some(&seen), Some("#00FF00"));
+        assert_eq!((m.badges.as_str(), m.badge_info.as_str(), m.user.color.as_str()), ("subscriber/12,vip/1", "subscriber/14", "#FF0000"));
+        // no line seen: the known chatters' colour, no badges
+        let m = held_chat_msg(&h, None, Some("#00FF00"));
+        assert_eq!((m.badges.as_str(), m.user.color.as_str()), ("", "#00FF00"));
+        // a hold without a display name shows the login
+        let mut h2 = held();
+        h2.user.name.clear();
+        assert_eq!(held_chat_msg(&h2, None, None).user.name, "falconrogue9sr");
+    }
+
+    #[test]
+    fn a_redeem_without_text_acts_on_its_redeemer() {
+        let n: Notice = serde_json::from_value(serde_json::json!({"id": "r1", "ts": 9, "msgId": "redeem", "rewardId": "rw", "reward": {"title": "Hydrate", "cost": 100}, "user": {"id": "7", "login": "bob", "name": "Bob", "color": ""}})).unwrap();
+        let seen = ChatMsg { badges: "moderator/1".into(), user: ChatUser { color: "#123456".into(), ..Default::default() }, ..Default::default() };
+        let m = redeemer_chat_msg(&n, Some(&seen));
+        assert_eq!((m.user.id.as_str(), m.user.login.as_str(), m.user.name.as_str(), m.user.color.as_str(), m.badges.as_str()), ("7", "bob", "Bob", "#123456", "moderator/1"));
+        // nothing to delete: it has no message id
+        assert!(m.id.is_empty());
+        assert_eq!(n.reward_id.as_deref(), Some("rw"));
     }
 }

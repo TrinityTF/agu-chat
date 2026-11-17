@@ -303,7 +303,7 @@ impl ChatStore {
                     let h: HeldMsg = Self::parse(h);
                     rows.push(Self::row(sk, Platform::Twitch, Self::mk(sk, "a", &h.id), h.ts, RowBody::Automod(h)));
                 }
-                self.replace_backlog(sk, rows);
+                self.replace_backlog(sk, pair_redeems(rows));
                 let st = self.source_mut(sk).unwrap();
                 for u in &users {
                     Self::register(st, u);
@@ -322,8 +322,15 @@ impl ChatStore {
             }
             "chat" => {
                 let Some(m) = f.get("msg").filter(|m| !m.is_null()) else { return false };
-                let m: ChatMsg = Self::parse(m);
+                let mut m: ChatMsg = Self::parse(m);
                 Self::register(self.source_mut(sk).unwrap(), &m.user);
+                // the redeem's line takes the place of its notice, if that came first
+                if let Some(i) = self.rows.iter().rposition(|r| r.sk == sk && matches!(&r.body, RowBody::Notice(n) if same_redeem(&m, n))) {
+                    let r = self.rows.remove(i); // its key stays known, so a replay of the notice is dropped too
+                    if let (RowBody::Notice(n), None) = (&r.body, &m.reward) {
+                        m.reward = n.reward.clone();
+                    }
+                }
                 self.add_row(msg_row(m));
                 self.trim();
             }
@@ -331,6 +338,18 @@ impl ChatStore {
                 let Some(n) = f.get("notice").filter(|n| !n.is_null()) else { return false };
                 let n: Notice = Self::parse(n);
                 Self::register(self.source_mut(sk).unwrap(), &n.user);
+                // A redeem whose chat line is already here: one line for it, the message row (with the reward
+                // filled in when it was unknown), not a second notice line.
+                let paired = self.rows.iter().rposition(|r| r.sk == sk && matches!(&r.body, RowBody::Msg(m) if same_redeem(m, &n)));
+                if let Some(i) = paired {
+                    if let RowBody::Msg(m) = &self.rows[i].body {
+                        if m.reward.is_none() && n.reward.is_some() {
+                            self.rows[i] = with_body(&self.rows[i], RowBody::Msg(ChatMsg { reward: n.reward.clone(), ..m.clone() }));
+                            return true;
+                        }
+                    }
+                    return false;
+                }
                 self.add_row(notice_row(n));
                 self.trim();
             }
@@ -605,6 +624,34 @@ fn with_body(r: &RowRef, body: RowBody) -> RowRef {
     Arc::new(Row { body, ..(**r).clone() })
 }
 
+/// How far apart a redeem's notice and its chat line may land and still be one redeem.
+const REDEEM_PAIR_MS: i64 = 60_000;
+
+/// A redeem notice (EventSub) and a chat line (IRC, tagged `custom-reward-id`) that are the same redeem: the
+/// same reward by the same user, close together.
+pub fn same_redeem(m: &ChatMsg, n: &Notice) -> bool {
+    let same_user = (!m.user.id.is_empty() && m.user.id == n.user.id) || (!m.user.login.is_empty() && m.user.login.eq_ignore_ascii_case(&n.user.login));
+    matches!(n.msg_id.as_str(), "redeem" | "powerup") && n.reward_id.as_deref().is_some_and(|r| !r.is_empty()) && m.reward_id == n.reward_id && same_user && (m.ts - n.ts).abs() <= REDEEM_PAIR_MS
+}
+
+/// A snapshot's redeems as one line each: a notice whose chat line is also there is dropped, its reward going to
+/// the line when the line had none.
+fn pair_redeems(mut rows: Vec<Row>) -> Vec<Row> {
+    let mut drop: HashSet<usize> = HashSet::new();
+    for i in 0..rows.len() {
+        let RowBody::Notice(n) = &rows[i].body else { continue };
+        let Some(j) = rows.iter().position(|r| matches!(&r.body, RowBody::Msg(m) if same_redeem(m, n))) else { continue };
+        let reward = n.reward.clone();
+        drop.insert(i);
+        if let RowBody::Msg(m) = &mut rows[j].body {
+            if m.reward.is_none() {
+                m.reward = reward;
+            }
+        }
+    }
+    rows.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, r)| r).collect()
+}
+
 /// Display names newest-first, for @name completion.
 pub fn chatter_names(rows: &[RowRef], sks: Option<&HashSet<String>>) -> Vec<String> {
     let mut out = Vec::new();
@@ -753,6 +800,77 @@ mod tests {
         assert_eq!(s.rows().len(), 1200);
         s.set_held(false);
         assert_eq!(s.rows().len(), ROW_CAP);
+    }
+
+    fn redeem_line(id: &str, ts: i64, user: &str, reward_id: &str) -> Value {
+        json!({"type": "chat", "msg": {"id": id, "ts": ts, "user": {"id": format!("u-{user}"), "login": user, "name": user, "color": ""}, "text": "my input", "badges": "", "emotes": "", "rewardId": reward_id}})
+    }
+
+    fn redeem_notice(id: &str, ts: i64, user: &str, reward_id: &str) -> Value {
+        json!({"type": "chatnotice", "notice": {"id": id, "ts": ts, "msgId": "redeem", "system": format!("{user} redeemed Hydrate"), "rewardId": reward_id, "reward": {"title": "Hydrate", "cost": 100}, "user": {"id": format!("u-{user}"), "login": user, "name": user, "color": ""}, "text": ""}})
+    }
+
+    fn kinds(s: &ChatStore) -> Vec<&'static str> {
+        s.rows().iter().map(|r| match &r.body {
+            RowBody::Msg(_) => "msg",
+            RowBody::Notice(_) => "notice",
+            _ => "other",
+        }).collect()
+    }
+
+    #[test]
+    fn a_redeem_line_replaces_its_notice() {
+        let (mut s, sk) = store();
+        s.apply(&sk, &redeem_notice("n1", 1000, "bob", "rw"));
+        s.apply(&sk, &redeem_line("m1", 1500, "bob", "rw"));
+        assert_eq!(kinds(&s), vec!["msg"]);
+        let RowBody::Msg(m) = &s.rows()[0].body else { panic!() };
+        assert_eq!(m.reward.as_ref().map(|r| r.title.as_str()), Some("Hydrate"));
+        // the notice replayed (a resubscribe) does not come back
+        s.apply(&sk, &redeem_notice("n1", 1000, "bob", "rw"));
+        assert_eq!(kinds(&s), vec!["msg"]);
+    }
+
+    #[test]
+    fn a_redeem_notice_after_its_line_only_fills_the_reward() {
+        let (mut s, sk) = store();
+        s.apply(&sk, &redeem_line("m1", 1500, "bob", "rw"));
+        assert!(s.apply(&sk, &redeem_notice("n1", 1600, "bob", "rw")));
+        assert_eq!(kinds(&s), vec!["msg"]);
+        let RowBody::Msg(m) = &s.rows()[0].body else { panic!() };
+        assert_eq!(m.reward.as_ref().and_then(|r| r.cost), Some(100.0));
+    }
+
+    #[test]
+    fn different_redeems_stay_apart() {
+        let (mut s, sk) = store();
+        s.apply(&sk, &redeem_line("m1", 1500, "bob", "rw"));
+        s.apply(&sk, &redeem_notice("n1", 1600, "amy", "rw")); // someone else
+        s.apply(&sk, &redeem_notice("n2", 1700, "bob", "other")); // another reward
+        s.apply(&sk, &redeem_notice("n3", 1500 + REDEEM_PAIR_MS + 1, "bob", "rw")); // much later
+        assert_eq!(kinds(&s), vec!["msg", "notice", "notice", "notice"]);
+    }
+
+    #[test]
+    fn a_snapshot_pairs_its_redeems() {
+        let (mut s, sk) = store();
+        let line = redeem_line("m1", 1500, "bob", "rw")["msg"].clone();
+        let mut notice = redeem_notice("n1", 1400, "bob", "rw")["notice"].clone();
+        notice["notice"] = json!(true);
+        let mut lone = redeem_notice("n2", 2000, "amy", "rw")["notice"].clone();
+        lone["notice"] = json!(true);
+        s.apply(&sk, &json!({"type": "chatlog", "messages": [notice, line, lone], "modfeed": [], "automod": [], "pinned": null}));
+        assert_eq!(kinds(&s), vec!["msg", "notice"]);
+        let RowBody::Msg(m) = &s.rows()[0].body else { panic!() };
+        assert_eq!(m.reward.as_ref().map(|r| r.title.as_str()), Some("Hydrate"));
+    }
+
+    #[test]
+    fn an_automod_hold_keeps_its_emotes() {
+        let (mut s, sk) = store();
+        s.apply(&sk, &json!({"type": "automod", "held": {"id": "h1", "ts": 5, "user": {"id": "1", "login": "x", "name": "X"}, "text": "bad Kappa", "emotes": "25:4-8", "reason": "automod", "status": "held"}}));
+        let RowBody::Automod(h) = &s.rows()[0].body else { panic!() };
+        assert_eq!((h.text.as_str(), h.emotes.as_str()), ("bad Kappa", "25:4-8"));
     }
 
     #[test]
