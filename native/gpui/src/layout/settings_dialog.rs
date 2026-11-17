@@ -944,6 +944,7 @@ impl SettingsDialog {
             .child(Self::row("Font size", Some("Chat text, in pixels"), font, false))
             .child(self.bool_row(&sv, "readableColors", "Readable name colors", Some("Lighten dark name colors so they stay legible"), false, false, cx))
             .child(self.bool_row(&sv, "showPlatformMarks", "Platform marks on rows", Some("A small platform icon in merged co-chats"), false, false, cx))
+            .child(self.bool_row(&sv, "linkPreviews", "Link previews", Some("A card with the title and picture under Twitch clip, YouTube, X, Streamable and Instagram links"), false, false, cx))
             .child(Self::h("Emotes and badges"))
             .child(Self::row("Emote size", None, emote, false))
             .child(self.bool_row(&sv, "showBadges", "Show badges", None, false, false, cx))

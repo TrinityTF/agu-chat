@@ -15,6 +15,7 @@ use serde_json::Value;
 use super::chat_text::{as_link, mention_word, text_mentions_login};
 use super::highlights::{parse_hex, rule_row_style};
 use super::inline::*;
+use super::link_card::{first_link, LinkCard};
 use super::mod_buttons::describe_mod_button;
 use super::mod_caps::{badge_names, mod_reach, CoCaps, ModCaps, ModViewer};
 use super::twitch::badges::{parse_badge_list, BadgeMap, BADGE_PX, BADGE_VMARGIN};
@@ -184,6 +185,8 @@ pub struct FrameSpec {
     /// the "replying to" line above a reply: hover shows the whole parent, a click opens the thread
     pub before: Option<ReplyLine>,
     pub hover: Hover,
+    /// the message's first link a preview card can be made for (settings.linkPreviews)
+    pub link: Option<LinkCard>,
 }
 
 #[derive(Clone)]
@@ -273,6 +276,15 @@ impl BuiltRow {
     /// kept the height measured before their emotes loaded.
     pub fn urls(&self) -> Vec<String> {
         self.contents().iter().flat_map(|c| c.urls()).collect()
+    }
+
+    /// The preview card's link, when the row has one: its preview arriving changes the row's height.
+    pub fn link(&self) -> Option<&LinkCard> {
+        match self {
+            BuiltRow::Frame(f) => f.link.as_ref(),
+            BuiltRow::Event(e) => e.inner.as_ref().and_then(|f| f.link.as_ref()),
+            _ => None,
+        }
     }
 }
 
@@ -580,7 +592,13 @@ fn frame(content: Rc<InlineContent>, actions: Vec<RowAction>, ctx: &RowCtx, ord:
         label: None,
         before: None,
         hover: Hover::default(),
+        link: None,
     }
+}
+
+/// The preview card of a message: its first previewable link, unless the setting is off or the message is gone.
+fn with_link(spec: &mut FrameSpec, ctx: &RowCtx, removed: bool) {
+    spec.link = if ctx.rs.link_previews && !removed { first_link(&spec.content) } else { None };
 }
 
 fn rgb_a(r: u8, g: u8, b: u8, a: f32) -> Hsla {
@@ -818,6 +836,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
         spec.hover = Hover { copy: Some(msg.text.clone()), ..Hover::default() };
         return BuiltRow::Frame(spec);
     }
+    with_link(&mut spec, ctx, msg.deleted);
     let highlighted = msg.msg_id.as_deref() == Some("highlighted-message");
     spec.bar = hl.bar;
     spec.bg = hl.bg;
@@ -1207,6 +1226,7 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
         co_frame_style(&mut spec, rule);
     }
     spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::RumbleMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: 300 }), ..Default::default() };
+    with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
 }
 
@@ -1405,6 +1425,7 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
         delete: can_delete.then(|| RowAction::KickMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: None }),
         pin: None,
     };
+    with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
 }
 
@@ -1459,7 +1480,8 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
             if p.t == "emoji" {
                 plain_emote(&mut f, p.u.clone(), &p.a, if p.custom { "YouTube member emote" } else { "YouTube" }, rs);
             } else {
-                f.text(&p.v, token(theme::TEXT));
+                // links clickable (and previewable), like on the other platforms
+                text_run_items(&mut f, &p.v, token(theme::TEXT));
             }
         }
     }
@@ -1476,6 +1498,7 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
         co_frame_style(&mut spec, rule);
     }
     spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), ..Default::default() };
+    with_link(&mut spec, ctx, false);
     BuiltRow::Frame(spec)
 }
 
@@ -1539,6 +1562,7 @@ pub fn x_row(row: &Row, m: &XMsg, ctx: &RowCtx, rule: Option<&HighlightRule>) ->
     let mut spec = frame(f.finish(), vec![RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } }], ctx, row.ord);
     co_frame_style(&mut spec, rule);
     spec.hover = Hover { copy: Some(m.text.clone()), ..Default::default() };
+    with_link(&mut spec, ctx, false);
     BuiltRow::Frame(spec)
 }
 

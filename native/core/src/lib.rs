@@ -5,6 +5,7 @@ pub mod backend;
 pub mod highlight_rules;
 pub mod images;
 pub mod kick;
+pub mod link_preview;
 pub mod log;
 pub mod net;
 pub mod platforms;

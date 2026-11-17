@@ -224,6 +224,9 @@ impl ChatPane {
             d = d.child(el);
         }
         d = d.child(self.flow(&spec.content, actions, cx));
+        if let Some(card) = spec.link.as_ref().and_then(|l| self.link_card_el(key, l, cx)) {
+            d = d.child(card);
+        }
         if let Some((text, col)) = &spec.label {
             d = d.child(div().absolute().right(px(6.)).top(px(2.)).text_size(px(9.)).line_height(px(12.)).font_weight(FontWeight::BOLD).text_color(*col).child(tracked(text)));
         }
@@ -271,6 +274,61 @@ impl ChatPane {
             d = d.child(bar);
         }
         d.into_any_element()
+    }
+
+    /// The link preview card under a message, once its preview is in. A click opens the link; a title cut short
+    /// shows whole on hover. In the message list it is drawn at the size the row's measure gave it.
+    fn link_card_el(&mut self, key: &str, link: &super::link_card::LinkCard, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use super::link_card::*;
+        let svc = self.svc.clone();
+        let p = svc.previews.get(&link.target, &svc.net, cx)?;
+        let base = self.settings.font_size;
+        let (title_px, title_lh, sub_px, sub_lh) = fonts(base);
+        let lay = link.layout.get();
+        let lines = lay.map(|l| l.title_lines as usize).unwrap_or(2);
+        let href = link.href.clone();
+        let mut card = div()
+            .id(eid("link-card-", key))
+            .mt(px(MARGIN_T))
+            .mb(px(MARGIN_B))
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(GAP))
+            .p(px(PAD))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c(theme::LINE))
+            .bg(c(theme::RAISED))
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(|s| s.bg(c(theme::RAISED_2)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _w, _cx| this.open_url(&href)));
+        card = match lay {
+            Some(l) => card.w(px(l.w)).h(px(l.h)),
+            None => card.w_full().max_w(px(CARD_MAX_W)),
+        };
+        if lines > 1 || lay.is_none() {
+            card = card.tooltip(crate::layout::ui::tip_wrap(p.title.clone(), 360.0));
+        }
+        let lead = match &p.thumb {
+            Some(u) => Thumb { url: u.clone().into(), w: THUMB_W, h: THUMB_H }.into_any_element(),
+            None => div().flex_none().text_color(c(theme::TEXT)).child(icon(provider_icon(p.provider), MARK)).into_any_element(),
+        };
+        let mut text = div().flex_1().min_w_0().flex().flex_col().child(
+            div()
+                .text_size(px(title_px))
+                .line_height(px(title_lh))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(theme::TEXT))
+                .line_clamp(lines)
+                .text_ellipsis()
+                .child(SharedString::from(p.title.clone())),
+        );
+        if !p.subtitle.is_empty() {
+            text = text.child(div().text_size(px(sub_px)).line_height(px(sub_lh)).text_color(c(theme::MUTED)).truncate().child(SharedString::from(p.subtitle.clone())));
+        }
+        Some(card.child(lead).child(text).into_any_element())
     }
 
     fn event_el(&mut self, key: &str, e: &EventSpec, cx: &mut Context<Self>) -> AnyElement {

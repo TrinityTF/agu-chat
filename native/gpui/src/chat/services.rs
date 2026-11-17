@@ -14,6 +14,7 @@ use gpui::{App, Global};
 use super::alerts::Alerts;
 use super::images::{Images, ImagesHandle};
 use super::net::Net;
+use super::previews::Previews;
 use super::twitch::cosmetics::Cosmetics;
 use super::twitch::emotes::init_cache;
 use super::twitch::seven_events::SevenEvents;
@@ -25,6 +26,8 @@ pub struct ServicesInner {
     /// live 7TV emote set changes (EventAPI), shared by every pane
     pub seven_events: SevenEvents,
     pub alerts: Alerts,
+    /// link preview cards, shared by every pane
+    pub previews: Previews,
     pub bridge: Arc<dyn AguBridge>,
     pub data_dir: PathBuf,
     pub window_active: Cell<bool>,
@@ -58,6 +61,7 @@ pub fn init(cx: &mut App, bridge: Arc<dyn AguBridge>, data_dir: PathBuf) -> Serv
         cosmetics: Cosmetics::new(),
         seven_events,
         alerts: Alerts::new(),
+        previews: Previews::new(),
         bridge,
         data_dir,
         window_active: Cell::new(true),

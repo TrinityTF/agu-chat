@@ -187,6 +187,8 @@ pub struct Settings {
     /// scroll | hover | alt
     pub pause_chat: String,
     pub show_platform_marks: bool,
+    /// a card under a message that links to a Twitch clip, a YouTube video, a post on X, Streamable or Instagram
+    pub link_previews: bool,
     pub hotkeys: HashMap<String, Vec<String>>,
     pub mod_buttons: Vec<ModButton>,
     pub highlight_rules: Vec<HighlightRule>,
@@ -232,6 +234,7 @@ impl Default for Settings {
             show_automod: true,
             pause_chat: "scroll".into(),
             show_platform_marks: true,
+            link_previews: true,
             hotkeys: HashMap::new(),
             mod_buttons: vec![
                 mb("ban", "ban", "ban", 0),

@@ -225,6 +225,8 @@ pub struct ChatPane {
     /// built rows of the open thread: row key -> (generation, the row they were built from, built)
     pub(super) thread_built: RefCell<HashMap<String, (u64, RowRef, Rc<BuiltRow>)>>,
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
+    /// link previews that just arrived (their rows get measured again)
+    pub(super) previews_inbox: Rc<RefCell<Vec<String>>>,
     pub(super) styled_users: Rc<RefCell<Vec<String>>>,
     seen_ord: u64,
     aid_frames: u32,
@@ -379,6 +381,8 @@ impl ChatPane {
         }
 
         let images_inbox = svc.images.0.add_inbox();
+        let previews_inbox = svc.previews.add_inbox();
+        svc.previews.set_enabled(settings.link_previews);
         let styled_users: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let inbox = styled_users.clone();
@@ -457,6 +461,7 @@ impl ChatPane {
             thread: None,
             thread_built: RefCell::new(HashMap::new()),
             images_inbox,
+            previews_inbox,
             styled_users,
             seen_ord: 0,
             aid_frames: 0,
@@ -477,6 +482,7 @@ impl ChatPane {
         let old = std::mem::replace(&mut self.settings, s);
         let new = &self.settings;
         self.svc.images.0.set_animate(new.animated_emotes);
+        self.svc.previews.set_enabled(new.link_previews);
         if old.highlight_rules != new.highlight_rules {
             self.highlighter = compile_highlights(&new.highlight_rules);
             self.rule_cache.clear();
@@ -1955,6 +1961,21 @@ impl ChatPane {
                 }
             }
         }
+        let previews: Vec<String> = std::mem::take(&mut *self.previews_inbox.borrow_mut());
+        if !previews.is_empty() {
+            // a card appeared under these rows: measured again (the built rows stay, the card is drawn from the cache)
+            let set: HashSet<&str> = previews.iter().map(|s| s.as_str()).collect();
+            let waiting: Vec<usize> = self
+                .shown
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.built.borrow().as_ref().and_then(|(_, b)| b.as_ref()).and_then(|b| b.link().map(|l| set.contains(l.target.key.as_str()))).unwrap_or(false))
+                .map(|(i, _)| i)
+                .collect();
+            for i in waiting {
+                self.list_state.invalidate(i);
+            }
+        }
         let styled: Vec<String> = std::mem::take(&mut *self.styled_users.borrow_mut());
         if !styled.is_empty() {
             let set: HashSet<String> = styled.into_iter().collect();
@@ -1987,11 +2008,24 @@ impl ChatPane {
         let Some(b) = self.built(ix, cx) else { return ItemMetrics::default() };
         let base = self.settings.font_size;
         let fl = |v: f32| (v * 64.0).floor() / 64.0;
+        let svc = self.svc.clone();
         let frame_h = |f: &FrameSpec, w: f32, window: &mut Window, cx: &mut gpui::App| -> f32 {
             let side = if f.bar.is_some() { 3.0 + 6.0 + 8.0 } else { 16.0 } + if f.border.is_some() { 2.0 } else { 0.0 };
             let flow = f.content.height_at(w - side, window, cx);
             let before = if f.before.is_some() { fl(base * 0.85 * LINE_HEIGHT) } else { 0.0 } + if f.label.is_some() { super::pane_render::LABEL_LINE } else { 0.0 };
-            2.0 + before + flow + if f.border.is_some() { 2.0 } else { 0.0 }
+            // the link preview card, once its preview is in (asking starts the request)
+            let card = f.link.as_ref().map_or(0.0, |l| match svc.previews.get(&l.target, &svc.net, cx) {
+                Some(p) => {
+                    let lay = super::link_card::measure(&p, w - side, base, window);
+                    l.layout.set(Some(lay));
+                    lay.row_h()
+                }
+                None => {
+                    l.layout.set(None);
+                    0.0
+                }
+            });
+            2.0 + before + flow + card + if f.border.is_some() { 2.0 } else { 0.0 }
         };
         match &*b {
             BuiltRow::Frame(f) => {

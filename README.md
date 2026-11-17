@@ -88,6 +88,7 @@
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges. Animated emotes can be turned off in Settings, which takes most of the GPU load away.
 - **Subs, gifts and Super Chats:** subscriptions, resubs and gifted subs show as their own notices, with who gave and who got them. YouTube Super Chats and Super Stickers show the same way, in the Super Chat's colour, with a Reply button.
 - **Removed messages:** a timed-out, banned or deleted message stays readable but greyed out, with the reason after it (for example "Timed out (10m)").
+- **Link previews:** Twitch clip, YouTube, X, Streamable and Instagram links get a card with the title and thumbnail under the message. Turn them off in Settings.
 - **Recent history** loads when you open a Twitch channel, so a new split isn't empty.
 - **Search:** Ctrl+F in a split filters it to matching messages; `from:name` shows one person's messages.
 
