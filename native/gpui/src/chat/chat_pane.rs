@@ -1960,26 +1960,7 @@ impl ChatPane {
 }
 
 fn b_contents(b: &BuiltRow) -> Vec<Rc<super::inline::InlineContent>> {
-    match b {
-        BuiltRow::Frame(f) => vec![f.content.clone()],
-        BuiltRow::Event(e) => {
-            let mut v = vec![e.content.clone()];
-            if let Some(i) = &e.inner {
-                v.push(i.content.clone());
-            }
-            v
-        }
-        BuiltRow::Notice(n) => {
-            let mut v: Vec<_> = n.head.iter().cloned().collect();
-            v.push(n.system.clone());
-            if let Some(t) = &n.text {
-                v.push(t.clone());
-            }
-            v
-        }
-        BuiltRow::Automod(a) => vec![a.header.clone(), a.body.clone()],
-        BuiltRow::Feed(_) => vec![],
-    }
+    b.contents()
 }
 
 #[cfg(test)]

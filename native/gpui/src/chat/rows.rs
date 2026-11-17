@@ -214,17 +214,35 @@ pub enum BuiltRow {
 }
 
 impl BuiltRow {
-    pub fn urls(&self) -> Vec<String> {
+    /// Every inline flow the row draws.
+    pub fn contents(&self) -> Vec<Rc<InlineContent>> {
         match self {
-            BuiltRow::Frame(f) => f.content.urls(),
-            BuiltRow::Event(e) => e.inner.as_ref().map(|f| f.content.urls()).unwrap_or_default(),
-            BuiltRow::Notice(n) => {
-                let mut v = n.system.urls();
-                v.extend(n.text.as_ref().map(|t| t.urls()).unwrap_or_default());
+            BuiltRow::Frame(f) => vec![f.content.clone()],
+            BuiltRow::Event(e) => {
+                let mut v = vec![e.content.clone()];
+                if let Some(i) = &e.inner {
+                    v.push(i.content.clone());
+                }
                 v
             }
-            _ => vec![],
+            BuiltRow::Notice(n) => {
+                let mut v: Vec<_> = n.head.iter().cloned().collect();
+                v.push(n.system.clone());
+                if let Some(t) = &n.text {
+                    v.push(t.clone());
+                }
+                v
+            }
+            BuiltRow::Automod(a) => vec![a.header.clone(), a.body.clone()],
+            BuiltRow::Feed(_) => vec![],
         }
+    }
+
+    /// The images of every flow: when one of them loads, the row is measured again (its size can change the
+    /// line breaks). An AutoMod body, a sub's name line and an event's own line were missing here, so their rows
+    /// kept the height measured before their emotes loaded.
+    pub fn urls(&self) -> Vec<String> {
+        self.contents().iter().flat_map(|c| c.urls()).collect()
     }
 }
 
