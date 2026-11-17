@@ -17,6 +17,7 @@ impl Net {
         let user_agent = agu_chat_core::backend::user_agent(version);
         let client = reqwest::Client::builder()
             .user_agent(user_agent.clone())
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("http client");
