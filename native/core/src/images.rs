@@ -173,7 +173,11 @@ const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// Images used within this long are never evicted (they are on screen).
 const KEEP_MS: u64 = 3_000;
 const MAX_FRAMES: usize = 150;
+/// Largest animation (and SVG) accepted, per frame.
 const MAX_PIXELS: u64 = 512 * 512;
+/// Largest still image accepted (link preview thumbnails are often 1280x720 or more). It is shrunk to the box
+/// it is drawn in right away, so only the source decode is this big, and only for a moment.
+const MAX_STILL_PIXELS: u64 = 4096 * 4096;
 
 /// The size an image of `w` x `h` is stored at for the box `want`: scaled down to fit, never up.
 pub fn stored_size(w: u32, h: u32, want: Want) -> (u32, u32) {
@@ -319,10 +323,11 @@ pub fn decode(bytes: &[u8], want: Want, one_frame: bool) -> Result<Decoded, Stri
     if frames.is_empty() || w == 0 || h == 0 {
         return Err("empty image".into());
     }
-    if (w as u64) * (h as u64) > MAX_PIXELS {
+    let limit = if frames.len() > 1 { MAX_PIXELS } else { MAX_STILL_PIXELS };
+    if (w as u64) * (h as u64) > limit {
         return Err("image too large".into());
     }
-    if frames.len() > 1 && (fw as u64) * (fh as u64) * 4 * frames.len() as u64 > MAX_IMAGE_BYTES {
+    if frames.len() > 1 &&(fw as u64) * (fh as u64) * 4 * frames.len() as u64 > MAX_IMAGE_BYTES {
         frames.truncate(1);
     }
     let cut = one_frame && matches!(fmt, image::ImageFormat::Gif | image::ImageFormat::WebP);
@@ -569,6 +574,17 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let c = ImageCache::new(rt.handle().clone(), reqwest::Client::new(), Arc::new(|| {}));
         (rt, c)
+    }
+
+    #[test]
+    fn a_big_still_image_is_shrunk_instead_of_refused() {
+        let img = image::RgbImage::from_pixel(1280, 720, image::Rgb([200, 30, 30]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let d = decode(&png, (178, 100), false).expect("a 1280x720 thumbnail loads");
+        assert_eq!((d.w, d.h), (1280, 720));
+        assert!(d.fw <= 178 && d.fh <= 100, "stored at the drawn size, got {}x{}", d.fw, d.fh);
+        assert_eq!(d.frames.len(), 1);
     }
 
     fn decoded(frames: usize) -> Decoded {
