@@ -607,6 +607,8 @@ fn parse_conn(f: &Value) -> ConnFrame {
         read_only_reason: s("readOnlyReason"),
         logged_out: f.get("loggedOut").and_then(|v| v.as_bool()),
         channel_id: f.get("channelId").filter(|v| !v.is_null()).map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())),
+        chat_modes: f.get("chatModes").and_then(|v| serde_json::from_value(v.clone()).ok()),
+        chat_viewer: f.get("chatViewer").and_then(|v| serde_json::from_value(v.clone()).ok()),
     }
 }
 
@@ -773,6 +775,18 @@ mod tests {
         // a Twitch notice has none
         s.apply(&sk, &json!({"type": "chatnotice", "notice": {"id": "n2", "ts": 6, "msgId": "sub", "system": "x subscribed", "user": {"login": "x"}}}));
         assert!(matches!(&s.rows()[1].body, RowBody::Notice(n) if n.seventv.is_none()));
+    }
+
+    #[test]
+    fn conn_frames_carry_the_chat_modes_and_the_viewer() {
+        let (mut s, sk) = store();
+        s.apply(&sk, &json!({"type": "conn", "state": "open", "canSend": true, "chatModes": {"followersMin": 60, "slowSecs": 5}, "chatViewer": {"exempt": false, "subscribed": false, "follows": false}}));
+        let c = s.source(&sk).unwrap().conn.clone().unwrap();
+        assert_eq!(c.chat_modes, Some(agu_chat_core::chat_rules::ChatModes { followers_min: Some(60), slow_secs: 5, ..Default::default() }));
+        assert_eq!(c.chat_viewer.map(|v| (v.subscribed, v.follows)), Some((Some(false), Some(false))));
+        // a source that says nothing about modes
+        s.apply(&sk, &json!({"type": "conn", "state": "open", "canSend": true}));
+        assert!(s.source(&sk).unwrap().conn.as_ref().unwrap().chat_modes.is_none());
     }
 
     #[test]

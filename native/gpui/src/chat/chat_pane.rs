@@ -901,9 +901,32 @@ impl ChatPane {
                 pending: conn.map(|c| c.state == "connecting").unwrap_or(true),
                 caps: self.twitch.get(&st.sk).map(|d| d.caps.clone()).unwrap_or_default(),
                 inventory: inv,
+                gate: self.chat_gate(st),
             });
         }
         out
+    }
+
+    /// The source's chat modes as they apply to the logged-in account. Kick says who the account is in the channel;
+    /// on Twitch it is pieced together from the mod rights and the badges on the account's own latest line there;
+    /// YouTube says nothing about the viewer.
+    fn chat_gate(&self, st: &super::store::SourceState) -> Option<agu_chat_core::chat_rules::ChatGate> {
+        let conn = st.conn.as_ref()?;
+        let modes = conn.chat_modes.as_ref()?;
+        // who the account is only matters for the modes that keep people out
+        let gated = modes.subs_only || modes.members_only || modes.followers_min.is_some() || modes.account_age_min.is_some();
+        let viewer = match st.source.platform {
+            Platform::Twitch if gated => {
+                let caps = self.twitch.get(&st.sk).map(|d| d.caps.clone()).unwrap_or_default();
+                let me_login = self.me_login_lower();
+                let broadcaster = caps.is_broadcaster.unwrap_or(!me_login.is_empty() && st.source.channel.to_lowercase().trim_start_matches('#') == me_login);
+                let own = self.last_line_of(&st.sk, &self.me_id());
+                super::input::send_box::twitch_viewer(broadcaster, caps.is_mod == Some(true), own.as_ref().map(|m| m.badges.as_str()))
+            }
+            _ => conn.chat_viewer.clone().unwrap_or_default(),
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        agu_chat_core::chat_rules::chat_gate(modes, &viewer, now)
     }
 
     fn data_changed(&mut self, cx: &mut Context<Self>) {

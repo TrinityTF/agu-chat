@@ -62,6 +62,12 @@ pub struct ConnFrame {
     pub logged_out: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    /// the channel's chat modes, when the platform tells them
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_modes: Option<crate::chat_rules::ChatModes>,
+    /// who the logged-in account is in the channel, when the platform tells it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_viewer: Option<crate::chat_rules::ChatViewer>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

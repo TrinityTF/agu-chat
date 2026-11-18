@@ -19,6 +19,7 @@
 //! `AbortController`.
 pub mod auth;
 pub mod badges;
+pub mod chat_rules;
 pub mod vendor;
 
 use std::collections::HashMap;
@@ -318,6 +319,9 @@ async fn route_action(req: RouteReq) -> Result<RouteRes, RouteError> {
 }
 
 struct St {
+    /// the chatroom's modes and who the logged-in account is there (`chatModes` / `chatViewer` in the conn frame)
+    chat_modes: Option<crate::chat_rules::ChatModes>,
+    chat_viewer: Option<crate::chat_rules::ChatViewer>,
     info_present: bool, // `info !== null`
     status: Map<String, Value>,
     backlog: Vec<Value>,
@@ -367,6 +371,12 @@ fn conn_frame(st: &St) -> Value {
         f["readOnlyReason"] = json!(auth::LOGGED_OUT_REASON);
         f["loggedOut"] = json!(true);
     }
+    if let Some(m) = &st.chat_modes {
+        f["chatModes"] = json!(m);
+    }
+    if let Some(v) = st.chat_viewer.as_ref().filter(|_| can_send) {
+        f["chatViewer"] = json!(v);
+    }
     f
 }
 
@@ -393,6 +403,8 @@ impl KickSource {
             client_id: uuid_v4(),
             jobs: Jobs::new(),
             st: Mutex::new(St {
+                chat_modes: None,
+                chat_viewer: None,
                 info_present: false,
                 status,
                 backlog: Vec::new(),
@@ -544,10 +556,68 @@ impl KickSource {
             s.st.lock().unwrap().status_poll_armed = false;
             let s2 = s.clone();
             s2.refresh_status().await;
+            if s.viewer_matters() {
+                // following on the website (or the wait running out) shows within a minute
+                s.clone().refresh_chat_rules(false).await;
+            }
             if !s.stopped() {
                 s.schedule_status_poll();
             }
         });
+    }
+
+    // ---------- chat modes ----------
+
+    /// Whether the account's follow / subscription / age can change what the send box says (a rule is on and the
+    /// account is not exempt).
+    fn viewer_matters(&self) -> bool {
+        let st = self.st.lock().unwrap();
+        let Some(m) = &st.chat_modes else { return false };
+        auth::is_logged_in() && (m.followers_min.is_some() || m.subs_only || m.account_age_min.is_some()) && !st.chat_viewer.as_ref().is_some_and(|v| v.exempt)
+    }
+
+    /// The chatroom's modes (when `modes`) and, logged in, who the account is in this channel.
+    async fn refresh_chat_rules(self: Arc<Self>, modes: bool) {
+        let ua = self.ctx.user_agent.clone();
+        if modes {
+            match chat_rules::get_kick_chatroom(&self.slug, &ua).await {
+                Ok(Some(c)) => self.st.lock().unwrap().chat_modes = Some(chat_rules::modes_from_chatroom(&c)),
+                Ok(None) => {}
+                // the modes are a hint: chat works without them
+                Err(e) => self.ctx.log(&format!("[kick:{}] chatroom modes: {e}", self.slug)),
+            }
+        }
+        self.refresh_viewer().await;
+    }
+
+    async fn refresh_viewer(self: Arc<Self>) {
+        let viewer = match auth::me() {
+            Some(me) => {
+                // keyed by USERNAME, like the user card's lookup
+                let who = if me.name.is_empty() { me.slug.clone() } else { me.name.clone() };
+                match get_channel_user(&self.slug, &who, &self.ctx.user_agent).await {
+                    Ok(Some(u)) => Some(chat_rules::viewer_from_channel_user(&u)),
+                    Ok(None) => None,
+                    Err(_) => return, // keep what we knew
+                }
+            }
+            None => None,
+        };
+        if self.stopped() {
+            return;
+        }
+        self.st.lock().unwrap().chat_viewer = viewer;
+        self.publish_conn();
+    }
+
+    fn on_chatroom_updated(self: &Arc<Self>, data: &Value) {
+        let modes = chat_rules::modes_from_chatroom(data);
+        self.st.lock().unwrap().chat_modes = Some(modes);
+        self.publish_conn();
+        if self.viewer_matters() {
+            let s = self.clone();
+            self.jobs.spawn(async move { s.refresh_viewer().await });
+        }
     }
 
     // ---------- connect lifecycle ----------
@@ -591,6 +661,8 @@ impl KickSource {
         }
         let first_time = !self.st.lock().unwrap().info_present;
         self.apply_channel(&c);
+        let s = self.clone();
+        self.jobs.spawn(async move { s.refresh_chat_rules(true).await });
 
         if first_time {
             // Backlog and emotes are decoration on a working chat: failures leave them empty.
@@ -819,6 +891,10 @@ impl KickSource {
             },
             other => other.clone(),
         };
+        if ev.ends_with("ChatroomUpdatedEvent") && truthy(&data) {
+            self.on_chatroom_updated(&data);
+            return;
+        }
         if m["channel"] == chan {
             // Livestream start/stop events: one authoritative read beats trusting a partial payload.
             let l = ev.to_lowercase();
@@ -911,6 +987,9 @@ impl Source for KickSource {
         let id = auth::EVENTS.on(Arc::new(move |_| {
             if let Some(s) = me.upgrade() {
                 s.publish_conn();
+                // a different account (or none) is a different viewer
+                let s2 = s.clone();
+                s.jobs.spawn(async move { s2.refresh_viewer().await });
             }
         }));
         self.st.lock().unwrap().auth_listener = Some(id);

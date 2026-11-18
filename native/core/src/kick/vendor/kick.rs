@@ -48,7 +48,7 @@ pub fn parse_kick_source(input: &str) -> Option<String> {
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
-async fn kick_fetch(url: &str, user_agent: &str, method: &'static str, body: Option<Value>) -> Result<reqwest::Response, net::FetchError> {
+pub(crate) async fn kick_fetch(url: &str, user_agent: &str, method: &'static str, body: Option<Value>) -> Result<reqwest::Response, net::FetchError> {
     let mut o = FetchOpts::new(12_000).method(method).header("Accept", "application/json").header("User-Agent", user_agent);
     if let Some(b) = body {
         o = o.header("Content-Type", "application/json").body(b.to_string());
@@ -57,7 +57,7 @@ async fn kick_fetch(url: &str, user_agent: &str, method: &'static str, body: Opt
 }
 
 /// `encodeURIComponent`
-fn enc(s: &str) -> String {
+pub(crate) fn enc(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
