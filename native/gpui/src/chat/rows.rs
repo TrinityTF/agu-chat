@@ -52,11 +52,42 @@ pub fn emote_box(font_px: f32, size: SizeOpt) -> (f32, f32, f32) {
     (px, (px * EMOTE_MAX_ASPECT).round(), (-((px - font_px * LINE_HEIGHT) / 2.0).round()).min(0.0))
 }
 
-pub fn twitch_emote_url(id: &str, size: SizeOpt) -> String {
-    let d = match size {
-        SizeOpt::Small => "1.0",
-        SizeOpt::Medium => "2.0",
-        SizeOpt::Large => "3.0",
+/// Height of a 1x emote file on the CDNs (Twitch and BTTV 28 px, 7TV and FFZ up to 32): 2x is twice that, and so on.
+const EMOTE_1X_PX: f32 = 28.0;
+
+/// The smallest CDN density (1..=4) whose file covers an emote drawn `px` logical pixels tall at display `scale`,
+/// so a 25 px emote on a 100% screen fetches the 1x file and the same emote at 125% the 2x one. The decode shrinks
+/// a bigger file to the drawn size anyway; a smaller one would be blurry.
+pub fn emote_density(px: f32, scale: f32) -> usize {
+    let need = px * scale.max(1.0);
+    (1..=4).find(|d| *d as f32 * EMOTE_1X_PX + 0.5 >= need).unwrap_or(4)
+}
+
+/// The display scale emote files are picked for (f32 bits): the highest window scale seen this session, so two
+/// windows on screens with different scales never flip it back and forth.
+static EMOTE_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn emote_scale_factor() -> f32 {
+    f32::from_bits(EMOTE_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// A window draws at `scale`; raises the scale emote files are picked for when it is higher.
+pub fn note_scale_factor(scale: f32) {
+    if scale.is_finite() && scale > emote_scale_factor() {
+        EMOTE_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The density for an emote of the `size` option at font `font_px` on the current display scale.
+fn density_for(font_px: f32, size: SizeOpt) -> usize {
+    emote_density(emote_px(font_px, size), emote_scale_factor())
+}
+
+pub fn twitch_emote_url(id: &str, density: usize) -> String {
+    let d = match density {
+        0 | 1 => "1.0",
+        2 => "2.0",
+        _ => "3.0",
     };
     format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/{d}")
 }
@@ -365,6 +396,7 @@ fn link_item(href: &str, text: &str, base: f32) -> Item {
 /// MessageText: the message's parts as inline items.
 fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<&EmoteSets>, text_color: Hsla, strike: bool, readable_mentions: bool, mut mention_acts: Option<(&mut Vec<RowAction>, &str)>) {
     let base = f.base;
+    let density = density_for(base, size);
     for p in parts {
         match p {
             MsgPart::Text(t) => {
@@ -406,7 +438,7 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                         .iter()
                         .map(|o| {
                             let oe = emotes.and_then(|e| e.all.get(&o.name)).cloned();
-                            emote_part_url(o.source, &o.id, size, oe.as_deref()).into()
+                            emote_part_url(o.source, &o.id, density, oe.as_deref()).into()
                         })
                         .collect();
                     ti.overlay_box = (max_w, px);
@@ -418,13 +450,13 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                     EmoteSource::Twitch | EmoteSource::Kick => None,
                     EmoteSource::Provider(_) => emotes.and_then(|e| e.all.get(name)).cloned(),
                 };
-                let url = emote_part_url(*source, id, size, entry.as_deref());
+                let url = emote_part_url(*source, id, density, entry.as_deref());
                 let tip = Rc::new(emote_tip(*source, id, name, false, entry.as_deref()));
                 let ov: Vec<SharedStr> = overlays
                     .iter()
                     .map(|o| {
                         let oe = emotes.and_then(|e| e.all.get(&o.name)).cloned();
-                        emote_part_url(o.source, &o.id, size, oe.as_deref()).into()
+                        emote_part_url(o.source, &o.id, density, oe.as_deref()).into()
                     })
                     .collect();
                 f.push(emote_item(url, tip, ov, base, size));
@@ -440,11 +472,11 @@ pub fn message_flow(base: f32, parts: &[MsgPart], size: SizeOpt, emotes: Option<
     f.items
 }
 
-fn emote_part_url(source: EmoteSource, id: &str, size: SizeOpt, entry: Option<&ProviderEmote>) -> String {
+fn emote_part_url(source: EmoteSource, id: &str, density: usize, entry: Option<&ProviderEmote>) -> String {
     match source {
-        EmoteSource::Twitch => twitch_emote_url(id, size),
+        EmoteSource::Twitch => twitch_emote_url(id, density),
         EmoteSource::Kick => kick_emote_url(id),
-        _ => entry.map(|e| provider_emote_url(e, size)).unwrap_or_default(),
+        _ => entry.map(|e| provider_emote_url_at(e, density)).unwrap_or_default(),
     }
 }
 
@@ -991,7 +1023,7 @@ fn seventv_notice(s: &SevenTvNote, base: f32, size: SizeOpt) -> BuiltRow {
     if !s.emote_id.is_empty() {
         let e = super::twitch::emotes::seven_tv_emote(&serde_json::json!({"id": s.emote_id, "name": s.name}));
         let tip = Rc::new(Tip::new(provider_tooltip_url(&e), s.name.clone(), "7TV"));
-        f.push(emote_item(provider_emote_url(&e, size), tip, vec![], base, size));
+        f.push(emote_item(provider_emote_url_at(&e, density_for(base, size)), tip, vec![], base, size));
         f.text(" ", muted);
     }
     if s.action == "renamed" && !s.old_name.is_empty() {
@@ -1610,6 +1642,28 @@ mod tests {
         let (px, _, vm) = emote_box(13.0, SizeOpt::Small);
         assert_eq!(px, 19.0);
         assert_eq!(vm, 0.0);
+    }
+
+    #[test]
+    fn emote_files_are_the_smallest_that_cover_the_drawn_size() {
+        let med = emote_px(13.0, SizeOpt::Medium); // 25 px
+        let large = emote_px(13.0, SizeOpt::Large); // 33 px
+        let small = emote_px(13.0, SizeOpt::Small); // 19 px
+        assert_eq!(emote_density(med, 1.0), 1, "a 25 px emote on a 100% screen: the 28 px file");
+        assert_eq!(emote_density(med, 1.25), 2);
+        assert_eq!(emote_density(med, 1.5), 2);
+        assert_eq!(emote_density(med, 2.0), 2);
+        assert_eq!(emote_density(med, 2.5), 3);
+        assert_eq!(emote_density(large, 1.0), 2, "drawn larger than 1x");
+        assert_eq!(emote_density(small, 1.0), 1);
+        assert_eq!(emote_density(small, 1.5), 1);
+        assert_eq!(emote_density(small, 2.0), 2);
+        assert_eq!(emote_density(28.0, 1.0), 1);
+        assert_eq!(emote_density(200.0, 3.0), 4, "never past 4x");
+        assert_eq!(emote_density(med, 0.5), 1, "a scale under 1 still gets 1x");
+        assert_eq!(twitch_emote_url("25", 1), "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0");
+        assert_eq!(twitch_emote_url("25", 2), "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0");
+        assert_eq!(twitch_emote_url("25", 4), "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0");
     }
 
     /// A core Kick row's badges as the chat page reads them: kick.com's labels, Kick's own pictures, and the

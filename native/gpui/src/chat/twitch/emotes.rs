@@ -70,6 +70,12 @@ pub fn provider_emote_url(e: &ProviderEmote, size: SizeOpt) -> String {
     e.url(want).or_else(|| e.url(2)).or_else(|| e.url(1)).or_else(|| e.url(3)).or_else(|| e.url(4)).unwrap_or("").to_string()
 }
 
+/// The URL at CDN density `d` (1..=4); when the provider has no such file, the next bigger one, else the next smaller.
+pub fn provider_emote_url_at(e: &ProviderEmote, d: usize) -> String {
+    let d = d.clamp(1, 4);
+    (d..=4).chain((1..d).rev()).find_map(|i| e.url(i)).unwrap_or("").to_string()
+}
+
 pub fn provider_tooltip_url(e: &ProviderEmote) -> String {
     e.url(4).or_else(|| e.url(3)).or_else(|| e.url(2)).or_else(|| e.url(1)).unwrap_or("").to_string()
 }
@@ -803,6 +809,20 @@ mod tests {
         let e = bttv_emote(&json!({"id": "x", "code": "OMEGALUL", "imageType": "gif"}));
         assert_eq!(provider_tooltip_url(&e), "https://cdn.betterttv.net/emote/x/3x");
         assert!(e.animated);
+        assert_eq!(provider_emote_url_at(&e, 4), "https://cdn.betterttv.net/emote/x/3x");
+    }
+
+    #[test]
+    fn a_density_the_provider_lacks_takes_the_next_bigger_file() {
+        let e = seven_tv_emote(&json!({"id": "s", "name": "S"}));
+        assert_eq!(provider_emote_url_at(&e, 1), "https://cdn.7tv.app/emote/s/1x.webp");
+        assert_eq!(provider_emote_url_at(&e, 2), "https://cdn.7tv.app/emote/s/2x.webp");
+        // FFZ often has 1x and 4x only
+        let f = ffz_emote(&json!({"id": 1, "name": "F", "urls": {"1": "//cdn.ffz/1", "4": "//cdn.ffz/4"}}));
+        assert_eq!(provider_emote_url_at(&f, 1), "https://cdn.ffz/1");
+        assert_eq!(provider_emote_url_at(&f, 2), "https://cdn.ffz/4");
+        let g = ffz_emote(&json!({"id": 2, "name": "G", "urls": {"1": "//cdn.ffz/g1"}}));
+        assert_eq!(provider_emote_url_at(&g, 3), "https://cdn.ffz/g1");
     }
 
     #[test]
