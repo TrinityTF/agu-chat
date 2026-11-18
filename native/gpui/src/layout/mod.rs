@@ -6,6 +6,7 @@ pub mod channel_modes;
 pub mod dev_mock;
 pub mod highlights_section;
 pub mod hotkeys;
+pub mod mentions_panel;
 pub mod settings_dialog;
 pub mod settings_widgets;
 pub mod notebook_tabs;

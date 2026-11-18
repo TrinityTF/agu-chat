@@ -83,6 +83,7 @@
 - **A window that fits:** the window grows to fit a new split and shrinks back when you take one away. A split only goes beside another when your screen has room for both.
 - **Merged chats:** put channels from different platforms into one split, each message marked with its platform.
 - **Tab markers:** the dot on a tab is green while one of its channels is live, grey when new messages arrive while you're elsewhere, and red when one of them mentions you or matches a highlight.
+- **Mentions:** the bell at the top turns red with a count when a message mentions you or matches a highlight in any open chat. Click it to see them all in one list; click one to jump to it in its chat.
 
 **Chat**
 - **Emotes and badges:** Twitch, 7TV, BTTV and FFZ emotes, 7TV name paints, and each platform's own emotes and badges. Animated emotes can be turned off in Settings, which takes most of the GPU load away.

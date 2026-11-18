@@ -164,7 +164,11 @@ impl ChatPane {
             .text_color(c(theme::MUTED))
             .hover(move |s| s.bg(c(theme::RAISED_2)).text_color(c(if danger { theme::RED_400 } else { theme::TEXT })))
             .child(icon(icon_path, 14.0))
-            .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| on(this, e.position(), cx)))
+            .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
+                // not also a click on what holds the row (a Mentions panel entry jumps on click)
+                cx.stop_propagation();
+                on(this, e.position(), cx)
+            }))
             .into_any_element()
     }
 
@@ -219,7 +223,15 @@ impl ChatPane {
                 .tooltip(crate::layout::ui::tip_wrap(line.full.clone(), 360.0))
                 .child(SharedString::from(line.text.clone()));
             if let Some(act) = line.action() {
-                el = el.cursor_pointer().hover(|s| s.text_color(c(theme::MUTED))).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.run_action(act.clone(), cx)));
+                let reveal = key.starts_with(super::mentions::PANEL_KEY);
+                el = el.cursor_pointer().hover(|s| s.text_color(c(theme::MUTED))).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    cx.stop_propagation();
+                    this.run_action(act.clone(), cx);
+                    if reveal {
+                        // the thread opens over this split's list: show it
+                        cx.emit(super::chat_pane::PaneEvent::Reveal);
+                    }
+                }));
             }
             d = d.child(el);
         }
@@ -261,7 +273,8 @@ impl ChatPane {
             }
             // The user's order: copy, pin, reply. No delete here (deleting stays on the mod buttons and the
             // user card), so a stray click on the hover bar can't remove a message.
-            if let Some((sk, id)) = h.pin.clone() {
+            let in_panel = key.starts_with(super::mentions::PANEL_KEY);
+            if let Some((sk, id)) = h.pin.clone().filter(|_| !in_panel) {
                 bar = bar.child(self.toolbar_button_at(format!("pin-{key}"), icons::PIN, "Pin", false, cx, move |p, pos, cx| {
                     // opens the "Pin for" menu at the button; choosing an entry does the pinning
                     p.pin_pick = Some(super::chat_pane::PinPick { sk: sk.clone(), id: id.clone(), pos });
@@ -269,7 +282,13 @@ impl ChatPane {
                 }));
             }
             if let Some(r) = h.reply.clone() {
-                bar = bar.child(self.toolbar_button(format!("reply-{key}"), icons::REPLY, "Reply", false, cx, move |p, cx| p.run_action(RowAction::Reply(r.clone()), cx)));
+                bar = bar.child(self.toolbar_button(format!("reply-{key}"), icons::REPLY, "Reply", false, cx, move |p, cx| {
+                    p.run_action(RowAction::Reply(r.clone()), cx);
+                    if in_panel {
+                        // the reply is typed in this split's message box: show it
+                        cx.emit(super::chat_pane::PaneEvent::Reveal);
+                    }
+                }));
             }
             d = d.child(bar);
         }
@@ -303,7 +322,10 @@ impl ChatPane {
             .overflow_hidden()
             .cursor_pointer()
             .hover(|s| s.bg(c(theme::RAISED_2)))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _w, _cx| this.open_url(&href)));
+            .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                cx.stop_propagation();
+                this.open_url(&href)
+            }));
         card = match lay {
             Some(l) => card.w(px(l.w)).h(px(l.h)),
             None => card.w_full().max_w(px(CARD_MAX_W)),
@@ -376,6 +398,7 @@ impl ChatPane {
                 lines = lines.child(self.flow(t, Rc::new(vec![]), cx));
             }
             if let Some(user) = n.reply.clone() {
+                let in_panel = key.starts_with(super::mentions::PANEL_KEY);
                 lines = lines.child(
                     div().flex().mt(px(NOTICE_BUTTON_GAP)).child(
                         div()
@@ -393,7 +416,13 @@ impl ChatPane {
                             .text_color(c(theme::TEXT))
                             .child(icon(icons::REPLY, 12.0))
                             .child("Reply")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| this.mention_user(&user, w, cx))),
+                            .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
+                                cx.stop_propagation();
+                                this.mention_user(&user, w, cx);
+                                if in_panel {
+                                    cx.emit(super::chat_pane::PaneEvent::Reveal);
+                                }
+                            })),
                     ),
                 );
             }
@@ -517,7 +546,28 @@ impl ChatPane {
         }
         let key = self.shown[ix].row.key.clone();
         let Some(b) = self.built(ix, cx) else { return div().into_any_element() };
-        self.built_el(&key, &b, cx)
+        let el = self.built_el(&key, &b, cx);
+        if self.flash.as_deref() == Some(key.as_str()) {
+            // a jump from the Mentions panel landed here: a short tint over the row (no change to its height)
+            return div()
+                .relative()
+                .w_full()
+                .child(el)
+                .child(
+                    div().absolute().top_0().left_0().size_full().bg(theme::a(theme::ACCENT, 0.28)).with_animation(
+                        "mention-flash",
+                        gpui::Animation::new(std::time::Duration::from_millis(1400)),
+                        |d, t| d.opacity(1.0 - t * t),
+                    ),
+                )
+                .into_any_element();
+        }
+        el
+    }
+
+    /// A row in the Mentions panel (its key prefixed, so its hover state and ids stay apart from the list's).
+    pub(super) fn panel_row_el(&mut self, key: &str, b: &BuiltRow, cx: &mut Context<Self>) -> AnyElement {
+        self.built_el(&format!("{}{key}", super::mentions::PANEL_KEY), b, cx)
     }
 
     fn built_el(&mut self, key: &str, b: &BuiltRow, cx: &mut Context<Self>) -> AnyElement {
@@ -1284,7 +1334,7 @@ impl ChatPane {
         Some(deferred(anchored().position(at).anchor(corner).snap_to_window_with_margin(gpui::Edges::all(px(4.))).child(menu)).with_priority(4).into_any_element())
     }
 
-    fn tip_el(&self, window: &Window) -> Option<AnyElement> {
+    pub(super) fn tip_el(&self, window: &Window) -> Option<AnyElement> {
         let (tip, pos) = self.tip.as_ref()?;
         let vp = window.viewport_size();
         let left = (pos.x.f() + 14.0).min(vp.width.f() - 140.0);

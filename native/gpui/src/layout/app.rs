@@ -156,6 +156,12 @@ pub struct AguApp {
     pub tab_drag: Option<String>,
     /// Tabs that got live chat while not selected.
     pub unread: HashMap<String, Activity>,
+    /// Messages that mentioned the user this session (the bell and the Mentions panel).
+    pub mentions: crate::chat::mentions::Mentions,
+    pub mentions_open: bool,
+    pub mentions_scroll: gpui::ScrollHandle,
+    /// how many entries the open panel showed last frame (a new one scrolls it to the bottom)
+    pub mentions_count: usize,
     pub updater: UpdaterState,
     pub bar_dismissed: Option<String>,
     pub settings: Settings,
@@ -218,6 +224,10 @@ impl AguApp {
             settings_view: None,
             tab_drag: None,
             unread: HashMap::new(),
+            mentions: Default::default(),
+            mentions_open: false,
+            mentions_scroll: gpui::ScrollHandle::new(),
+            mentions_count: 0,
             updater,
             bar_dismissed: None,
             settings,
@@ -395,6 +405,9 @@ impl AguApp {
                 let sub = cx.subscribe(&view, move |this, _p, ev: &PaneEvent, cx| match ev {
                     PaneEvent::Status => cx.notify(),
                     PaneEvent::Activity(kind) => this.on_activity(&leaf_id, *kind, cx),
+                    PaneEvent::Mentions(rows) => this.on_mentions(&leaf_id, rows, cx),
+                    PaneEvent::MentionsGone(ids) => this.on_mentions_gone(ids, cx),
+                    PaneEvent::Reveal => this.reveal_leaf(&leaf_id, cx),
                 });
                 self.panes.insert(leaf.id.clone(), PaneSlot { sig, view, _sub: sub });
             } else if let Some(slot) = self.panes.get(&leaf.id) {
@@ -446,6 +459,14 @@ impl AguApp {
         let tab = new_tab(Some(vec![SourceRef { platform: Platform::Twitch, channel }]));
         let id = tab.id.clone();
         self.mutate(cx, |l| l.tabs.push(tab));
+        // the conversation comes in as a snapshot (never news by itself): its newest line goes to the Mentions panel
+        if let Some(t) = self.layout.tabs.iter().find(|t| t.id == id) {
+            for l in leaves(t.root.as_ref()) {
+                if let Some(slot) = self.panes.get(&l.id) {
+                    slot.view.update(cx, |p, _| p.whisper_pending = true);
+                }
+            }
+        }
         self.unread.insert(id, Activity::Highlight);
         cx.notify();
     }
@@ -856,6 +877,12 @@ impl AguApp {
             cx.stop_propagation();
         };
         if ks.key == "escape" {
+            // the Mentions panel is on top of everything but menus and dialogs: it closes first
+            if self.mentions_open && self.menu.is_none() && self.dialog.is_none() {
+                self.close_mentions(cx);
+                stop(window, cx);
+                return;
+            }
             // Esc closes the focused split's search (MessageList.tsx)
             let tab = self.active_tab().clone();
             if let Some(slot) = self.focused_of(&tab).and_then(|id| self.panes.get(&id)) {
@@ -1278,6 +1305,7 @@ impl Render for AguApp {
         let tabs_bar = self.render_tabs(window, cx);
         let update_bar = self.render_update_bar(cx);
         let content = self.render_split_view(window, cx);
+        let mentions = self.render_mentions_panel(window, cx);
         let dialog = self.render_dialog(cx);
         let menu = self.menu.as_ref().map(|m| popup_menu(m, cx));
         let resizing = self.sv.resize.as_ref().map(|r| r.horizontal);
@@ -1308,7 +1336,7 @@ impl Render for AguApp {
             .when(resizing == Some(false), |d| d.cursor_row_resize())
             .child(tabs_bar)
             .children(update_bar)
-            .child(div().relative().min_h_0().flex_1().child(content))
+            .child(div().relative().min_h_0().flex_1().child(content).children(mentions))
             .children(dialog)
             .children(menu)
     }

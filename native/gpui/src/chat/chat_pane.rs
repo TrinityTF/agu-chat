@@ -19,13 +19,13 @@ use std::time::Duration;
 use agu_chat_core::protocol::{AccountsState, AguBridge, ConnFrame, Frame, HighlightRule, Platform, Settings, SourceRef, SubId, Unsubscribe};
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
-use gpui::{point, px, AppContext as _, Context, Entity, EventEmitter, Point, Pixels, Subscription, Window};
+use gpui::{point, px, AnyElement, AppContext as _, Context, Entity, EventEmitter, Point, Pixels, Subscription, Window};
 use super::chat_list::{ChatListState, ItemMetrics};
 use serde_json::{json, Value};
 
 use super::alerts::AlertWants;
+use super::mentions::Alert;
 use super::PxF;
-use super::chat_text::text_mentions_login;
 use super::highlights::{compile_highlights, match_input_of, Highlighter};
 use super::ignores::{apply_ignores, compile_ignores, filter_ignored, ignore_login, toggle_ignored_user, CompiledIgnores, IgnoreCache};
 use super::inline::Tip;
@@ -57,6 +57,12 @@ pub enum PaneEvent {
     Status,
     /// Live chat arrived (drives the tab's unread / highlight marker).
     Activity(Activity),
+    /// Messages that mention the user arrived (the same ones that turn the tab dot red): the Mentions panel.
+    Mentions(Vec<RowRef>),
+    /// Mentions reported earlier were deleted since (by `mentions::mention_id`).
+    MentionsGone(Vec<String>),
+    /// A hover tool in the Mentions panel acted on this pane (reply, open the thread): show its tab.
+    Reveal,
 }
 
 impl EventEmitter<PaneEvent> for ChatPane {}
@@ -228,6 +234,14 @@ pub struct ChatPane {
     pub(super) thread: Option<ThreadOpen>,
     /// built rows of the open thread: row key -> (generation, the row they were built from, built)
     pub(super) thread_built: RefCell<HashMap<String, (u64, RowRef, Rc<BuiltRow>)>>,
+    /// built rows drawn in the Mentions panel: row key -> (generation, the row they were built from, built)
+    pub(super) mention_built: RefCell<HashMap<String, (u64, RowRef, Rc<BuiltRow>)>>,
+    /// keys of the rows this pane reported as mentions (their later deletion takes them off the panel)
+    mention_keys: HashSet<String>,
+    /// a whisper opened this tab: its conversation came in as a snapshot, whose newest line is the mention
+    pub whisper_pending: bool,
+    /// the row a jump from the Mentions panel landed on, flashed for a moment
+    pub(super) flash: Option<String>,
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
     /// link previews that just arrived (their rows get measured again)
     pub(super) previews_inbox: Rc<RefCell<Vec<String>>>,
@@ -466,6 +480,10 @@ impl ChatPane {
             confirm: None,
             thread: None,
             thread_built: RefCell::new(HashMap::new()),
+            mention_built: RefCell::new(HashMap::new()),
+            mention_keys: HashSet::new(),
+            whisper_pending: false,
+            flash: None,
             images_inbox,
             previews_inbox,
             styled_users,
@@ -662,6 +680,95 @@ impl ChatPane {
             out.push((r.key.clone(), b));
         }
         out
+    }
+
+    // ---- the Mentions panel (its rows are drawn by the pane that has their chat) --------------------------
+
+    /// This pane shows the chat `sk`.
+    pub fn has_source(&self, sk: &str) -> bool {
+        self.store.source(sk).is_some()
+    }
+
+    /// The Mentions panel's rows from this pane's chats, drawn like the list draws them (badges, name that opens
+    /// the card, emotes, hover tools), from the row as the store has it now when it is still there. None for a
+    /// row that can't be drawn here or is hidden now (deleted, or its author ignored since).
+    pub fn mention_row_els(&mut self, rows: &[RowRef], cx: &mut Context<Self>) -> Vec<Option<AnyElement>> {
+        let wanted: HashSet<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        let current: HashMap<String, RowRef> = self.store.rows().iter().filter(|r| wanted.contains(r.key.as_str())).map(|r| (r.key.clone(), r.clone())).collect();
+        let mut keep: HashSet<String> = HashSet::new();
+        let mut out = Vec::with_capacity(rows.len());
+        for snap in rows {
+            let r = current.get(&snap.key).cloned().unwrap_or_else(|| snap.clone());
+            if super::mentions::row_deleted(&r) || apply_ignores(&r, &self.ignores).is_none() || self.store.source(&r.sk).is_none() {
+                out.push(None);
+                continue;
+            }
+            keep.insert(r.key.clone());
+            let cached = self.mention_built.borrow().get(&r.key).filter(|(g, from, _)| *g == self.gen && Arc::ptr_eq(from, &r)).map(|(_, _, b)| b.clone());
+            let b = match cached {
+                Some(b) => b,
+                None => match self.build_row_as(&r, false, cx).map(Rc::new) {
+                    Some(b) => {
+                        self.mention_built.borrow_mut().insert(r.key.clone(), (self.gen, r.clone(), b.clone()));
+                        b
+                    }
+                    None => {
+                        out.push(None);
+                        continue;
+                    }
+                },
+            };
+            out.push(Some(self.panel_row_el(&r.key, &b, cx)));
+        }
+        self.mention_built.borrow_mut().retain(|k, _| keep.contains(k));
+        out
+    }
+
+    /// A short note at the bottom of this split (the Mentions panel's jump that found no chat to go to).
+    pub fn notify_toast(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.toast(text.to_string(), false, cx);
+    }
+
+    /// The panel closed: its built rows can go.
+    pub fn forget_mention_rows(&mut self) {
+        self.mention_built.borrow_mut().clear();
+    }
+
+    /// The hover tooltip (emote / badge) of a row in the Mentions panel, when this pane's own view isn't drawn.
+    pub fn tip_overlay(&self, window: &Window) -> Option<AnyElement> {
+        self.tip_el(window)
+    }
+
+    /// Jump from the Mentions panel: scroll the list to the row and flash it, or say why it can't be shown.
+    pub fn jump_to(&mut self, key: &str, cx: &mut Context<Self>) {
+        // a hover / Alt pause would keep the list as it was
+        self.hover_held = false;
+        self.alt_held = false;
+        self.refresh(cx);
+        let Some(ix) = self.shown.iter().position(|s| s.row.key == key) else {
+            let msg = if self.store.rows().iter().any(|r| r.key == key) { "That message is hidden in this chat right now" } else { "That message is no longer in this chat" };
+            self.toast(msg, false, cx);
+            return;
+        };
+        let (_, vh) = self.list_state.viewport();
+        self.list_state.scroll_to_item(ix, if vh > 0.0 { (vh / 3.0).round() } else { 40.0 });
+        self.scroll_held = true;
+        self.pause_mark = self.last_ord();
+        self.update_store_hold();
+        self.settle = 3;
+        self.flash = Some(key.to_string());
+        let k = key.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1400)).await;
+            let _ = this.update(cx, |p, cx| {
+                if p.flash.as_deref() == Some(k.as_str()) {
+                    p.flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// A Twitch user's newest chat line in this source (their badges and colour, for lines that carry neither).
@@ -1327,38 +1434,35 @@ impl ChatPane {
         let mut max_ord = self.seen_ord;
         let mut activity: Option<Activity> = None;
         let mut fire: Vec<(String, AlertWants)> = Vec::new();
-        let bombs: HashSet<String> = HashSet::new();
+        let mut mentions: Vec<RowRef> = Vec::new();
+        // A whisper that opened its tab came in with the conversation's snapshot: its newest line is the news.
+        if self.whisper_pending {
+            if let Some(r) = rows.iter().rev().find(|r| is_whisper_key(&r.sk) && matches!(r.body, RowBody::Msg(_))) {
+                self.whisper_pending = false;
+                if !self.is_own(r) && !super::mentions::row_deleted(r) && apply_ignores(r, &self.ignores).is_some() {
+                    mentions.push(r.clone());
+                }
+            }
+        }
         for r in &rows {
             if r.ord <= self.seen_ord {
                 continue;
             }
             max_ord = max_ord.max(r.ord);
-            if r.backlog || matches!(r.body, RowBody::ModFeed(_)) || self.is_own(r) || apply_ignores(r, &self.ignores).is_none() {
-                continue; // ignored rows never ring
-            }
-            if let RowBody::Notice(n) = &r.body {
-                if !notice_visible(&n.msg_id, n.source_msg_id.as_deref(), n.gift_id.as_deref(), &bombs) {
-                    continue;
-                }
-            }
+            let (own, hidden) = (self.is_own(r), apply_ignores(r, &self.ignores).is_none());
+            // ignored rows never ring
+            let Some(alert) = super::mentions::classify(r, own, hidden, &me_login, || self.rule_of(r)) else { continue };
             activity.get_or_insert(Activity::Message);
-            // A whisper is addressed to the user by definition.
-            let mention = matches!(&r.body, RowBody::Msg(m) if is_whisper_key(&r.sk) || text_mentions_login(&m.text, &me_login));
-            let rule = if mention { None } else { self.rule_of(r) };
-            if !mention && rule.is_none() {
-                continue;
-            }
-            // badge-only matches are frequent (mods, VIPs): sound and flash apply, but the tab stays a plain message
-            if mention || rule.as_ref().is_some_and(|r| r.kind != "badge") {
+            if alert.red() {
                 activity = Some(Activity::Highlight);
+                mentions.push(r.clone());
             }
-            let key = format!("{}|{}", r.sk.to_lowercase(), &r.key[r.sk.len()..]);
-            let wants = if mention {
-                AlertWants { sound: self.settings.mention_sound, sound_file: String::new(), flash: self.settings.mention_flash }
-            } else {
-                let rule = rule.unwrap();
-                AlertWants { sound: rule.sound, sound_file: rule.sound_file.clone(), flash: rule.flash }
+            let wants = match alert {
+                Alert::Plain => continue,
+                Alert::Mention => AlertWants { sound: self.settings.mention_sound, sound_file: String::new(), flash: self.settings.mention_flash },
+                Alert::Rule(rule) => AlertWants { sound: rule.sound, sound_file: rule.sound_file.clone(), flash: rule.flash },
             };
+            let key = super::mentions::mention_id(r);
             fire.push((key, wants));
         }
         self.seen_ord = max_ord;
@@ -1374,6 +1478,27 @@ impl ChatPane {
         }
         if let Some(a) = activity {
             cx.emit(PaneEvent::Activity(a));
+        }
+        // mentions reported before that were deleted since leave the panel
+        if !self.mention_keys.is_empty() {
+            let gone: Vec<RowRef> = rows.iter().filter(|r| self.mention_keys.contains(&r.key) && super::mentions::row_deleted(r)).cloned().collect();
+            if !gone.is_empty() {
+                for r in &gone {
+                    self.mention_keys.remove(&r.key);
+                }
+                cx.emit(PaneEvent::MentionsGone(gone.iter().map(|r| super::mentions::mention_id(r)).collect()));
+            }
+        }
+        if !mentions.is_empty() {
+            for r in &mentions {
+                self.mention_keys.insert(r.key.clone());
+            }
+            // the panel keeps 200: so many keys here can't all still be on it
+            if self.mention_keys.len() > 2 * super::mentions::MAX_MENTIONS {
+                let live: HashSet<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+                self.mention_keys.retain(|k| live.contains(k.as_str()));
+            }
+            cx.emit(PaneEvent::Mentions(mentions));
         }
     }
 
@@ -2155,6 +2280,12 @@ impl ChatPane {
     }
 
     fn build_row(&mut self, row: &RowRef, cx: &mut gpui::App) -> Option<BuiltRow> {
+        self.build_row_as(row, true, cx)
+    }
+
+    /// `mod_buttons`: false where the inline mod buttons must not show (the Mentions panel: their popovers open
+    /// in the split, under the panel).
+    fn build_row_as(&mut self, row: &RowRef, mod_buttons: bool, cx: &mut gpui::App) -> Option<BuiltRow> {
         let mod_list = self.mod_list.clone();
         let rule = self.rule_of(row);
         let rs = self.settings.clone();
@@ -2162,7 +2293,7 @@ impl ChatPane {
         // co-chat used to force the marks on regardless of the setting, so switching it off did nothing.)
         let mixed = self.sources.iter().any(|s| s.platform != self.sources[0].platform);
         let show_platform = rs.show_platform_marks && mixed;
-        let ctx = RowCtx { rs: &rs, show_platform, mod_buttons: self.mod_mode && rs.show_mod_buttons, mod_list: &mod_list };
+        let ctx = RowCtx { rs: &rs, show_platform, mod_buttons: mod_buttons && self.mod_mode && rs.show_mod_buttons, mod_list: &mod_list };
         let st = self.store.source(&row.sk);
         match &row.body {
             RowBody::Msg(m) => {

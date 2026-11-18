@@ -24,7 +24,7 @@ icons! {
     POPOUT => "popout", CHEVRON => "chevron", CHEVRON_LEFT => "chevron-left", CHEVRON_RIGHT => "chevron-right", CHEVRON_UP => "chevron-up", SELECT_ARROW => "select-arrow", UPLOAD => "upload", LINK => "link", GEAR => "gear", SMILE => "smile",
     WARNING => "warning", CAMERA => "camera", SPEAKER => "speaker", SHIELD => "shield", SCREEN => "screen",
     BOT => "bot", MIC => "mic", GLOBE => "globe", FLAME => "flame", TROPHY => "trophy", TREND => "trend",
-    CLOCK => "clock", MUSIC => "music", PENCIL => "pencil", CHAT => "chat", BELL => "bell", LIST => "list",
+    CLOCK => "clock", MUSIC => "music", PENCIL => "pencil", CHAT => "chat", BELL => "bell", BELL_FILL => "bell-fill", LIST => "list",
     TAG => "tag", GIFT => "gift", FISH => "fish", IMAGE => "image", TEXT => "text", COINS => "coins",
     SWORD => "sword", FLAG => "flag", CHECK => "check", WIN_MIN => "win-min", WIN_MAX => "win-max",
     WIN_RESTORE => "win-restore", STAR => "star", CROWN => "crown",

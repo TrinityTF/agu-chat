@@ -9,6 +9,7 @@ pub mod ignores;
 pub mod images;
 pub mod inline;
 pub mod link_card;
+pub mod mentions;
 pub mod mod_actions;
 pub mod mod_buttons;
 pub mod mod_caps;

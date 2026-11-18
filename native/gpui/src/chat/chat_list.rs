@@ -121,6 +121,18 @@ impl ChatListState {
         self.0.borrow().placed.iter().find(|(i, _, _)| *i == ix).map(|(_, y, m)| (*y, m.h))
     }
 
+    /// Put item `ix`'s top `from_top` px below the viewport top (a jump to a message). Content that ends above
+    /// the bottom snaps back to following at the next layout.
+    pub fn scroll_to_item(&self, ix: usize, from_top: f32) {
+        let mut s = self.0.borrow_mut();
+        if ix >= s.items.len() {
+            return;
+        }
+        s.anchor = Some((ix, -from_top));
+        // not at the bottom until the next layout measures it (the pane would follow again at once)
+        s.dist_to_bottom = f32::MAX;
+    }
+
     /// Scroll by `d` px (positive = toward the newest messages).
     pub fn scroll_by(&self, d: f32) {
         let mut s = self.0.borrow_mut();

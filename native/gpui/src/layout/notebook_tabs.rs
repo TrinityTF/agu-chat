@@ -254,7 +254,7 @@ impl AguApp {
         // ---- which tabs fit ----
         let widths: Vec<f32> = tabs.iter().map(|t| self.tab_width(window, t, t.id == active_id, &live_tabs)).collect();
         let vw: f32 = window.viewport_size().width.into();
-        let zone_w = self.anchor("tabs-zone").map(|b| f32::from(b.size.width)).unwrap_or(vw - 28.0 - 3.0 * 36.0);
+        let zone_w = self.anchor("tabs-zone").map(|b| f32::from(b.size.width)).unwrap_or(vw - 28.0 - crate::layout::mentions_panel::BELL_W - 3.0 * 36.0);
         let full = zone_w - PLUS_W;
         let total: f32 = widths.iter().sum();
         let (start, end) = if total <= full {
@@ -538,6 +538,8 @@ impl AguApp {
                 d.child(div().w(px(macwin::TRAFFIC_INSET)).flex_none().h_full().on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, w, _| macwin::titlebar_press(ev, w)))
             })
             .child(zone)
+            // the Mentions bell (DankChat's): red with a count while a mention is unread
+            .child(self.render_bell(cx))
             // Always some bare title bar to grab the window by, however many tabs there are.
             .child(
                 div()
