@@ -23,7 +23,7 @@ use super::twitch::colors::{name_color, readable_color};
 use super::twitch::cosmetics::{paint_color_at, ChatterStyle, SevenTvDefs};
 use super::twitch::emotes::*;
 use super::twitch::events::{builtin_redeem, notice_kind, ChatEventKind, DEFAULT_EVENTS};
-use super::twitch::parts::{build_parts, split_keep_ws, EmoteSource, KnownChatter, MsgPart};
+use super::twitch::parts::{build_kick_parts, build_parts, split_keep_ws, split_kick, EmoteSource, KnownChatter, MsgPart};
 use super::twitch::reply_mention::drop_reply_mention;
 use super::types::*;
 use super::ui_util::*;
@@ -78,6 +78,8 @@ pub struct TwitchEnv {
 #[derive(Clone)]
 pub struct CoEnv {
     pub source: SourceRef,
+    /// Kick: the channel's Kick-linked 7TV set and 7TV global, merged (None with 7TV emotes off or not loaded yet).
+    pub emotes: Option<Arc<EmoteSets>>,
     pub caps: CoCaps,
     /// The conn frame says this account can post here (Kick replies need it).
     pub can_send: bool,
@@ -413,8 +415,8 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
             }
             MsgPart::Emote { source, id, name, overlays } => {
                 let entry = match source {
-                    EmoteSource::Twitch => None,
-                    _ => emotes.and_then(|e| e.all.get(name)).cloned(),
+                    EmoteSource::Twitch | EmoteSource::Kick => None,
+                    EmoteSource::Provider(_) => emotes.and_then(|e| e.all.get(name)).cloned(),
                 };
                 let url = emote_part_url(*source, id, size, entry.as_deref());
                 let tip = Rc::new(emote_tip(*source, id, name, false, entry.as_deref()));
@@ -441,6 +443,7 @@ pub fn message_flow(base: f32, parts: &[MsgPart], size: SizeOpt, emotes: Option<
 fn emote_part_url(source: EmoteSource, id: &str, size: SizeOpt, entry: Option<&ProviderEmote>) -> String {
     match source {
         EmoteSource::Twitch => twitch_emote_url(id, size),
+        EmoteSource::Kick => kick_emote_url(id),
         _ => entry.map(|e| provider_emote_url(e, size)).unwrap_or_default(),
     }
 }
@@ -448,6 +451,7 @@ fn emote_part_url(source: EmoteSource, id: &str, size: SizeOpt, entry: Option<&P
 fn emote_tip(source: EmoteSource, id: &str, name: &str, zero_width: bool, entry: Option<&ProviderEmote>) -> Tip {
     let (img, label) = match source {
         EmoteSource::Twitch => (format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/3.0"), "Twitch".to_string()),
+        EmoteSource::Kick => (kick_emote_url(id), "Kick".to_string()),
         EmoteSource::Provider(p) => (entry.map(provider_tooltip_url).unwrap_or_default(), format!("{}{}", p.label(), if zero_width { " zero-width" } else { "" })),
     };
     Tip::new(img, name.to_string(), label)
@@ -1300,34 +1304,9 @@ fn run_text(f: &mut Flow, text: &str, col: Hsla, strike: bool) {
     }
 }
 
-fn split_kick(text: &str) -> Vec<(bool, String, String)> {
-    // (is_emote, id-or-text, name)
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("[emote:") {
-        let tail = &rest[i + 7..];
-        let digits = tail.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits > 0 && tail[digits..].starts_with(':') {
-            let after = &tail[digits + 1..];
-            if let Some(close) = after.find(']') {
-                let name = &after[..close];
-                if (1..=80).contains(&name.chars().count()) {
-                    if i > 0 {
-                        out.push((false, rest[..i].to_string(), String::new()));
-                    }
-                    out.push((true, tail[..digits].to_string(), name.to_string()));
-                    rest = &after[close + 1..];
-                    continue;
-                }
-            }
-        }
-        out.push((false, rest[..i + 7].to_string(), String::new()));
-        rest = tail;
-    }
-    if !rest.is_empty() {
-        out.push((false, rest.to_string(), String::new()));
-    }
-    out
+/// A Kick emote's picture (Kick serves one size).
+fn kick_emote_url(id: &str) -> String {
+    format!("https://files.kick.com/emotes/{id}/fullsize")
 }
 
 /// Glyph chip for Kick badge types without bundled art.
@@ -1410,11 +1389,13 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     f.push(Item::Text(name));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
     let col = if striking { token(theme::FAINT) } else if m.deleted && rs.deleted_messages != "show" { token(theme::FAINT) } else { token(theme::TEXT) };
-    for (is_emote, a, name) in split_kick(&m.text) {
-        if is_emote {
-            plain_emote(&mut f, format!("https://files.kick.com/emotes/{a}/fullsize"), &name, "Kick", rs);
-        } else {
-            run_text(&mut f, &a, col, striking);
+    // Kick's own emotes, plus 7TV's (the channel's Kick-linked set and global) with the same popup and zero-width
+    // stacking as on Twitch; links and mentions in the text in between
+    let size = SizeOpt::parse(&rs.emote_size);
+    for p in build_kick_parts(&m.text, env.emotes.as_deref()) {
+        match &p {
+            MsgPart::Text(t) => run_text(&mut f, t, col, striking),
+            _ => message_items(&mut f, std::slice::from_ref(&p), size, env.emotes.as_deref(), col, striking, rs.readable_colors, None),
         }
     }
     let mut spec = frame(f.finish(), actions, ctx, row.ord);

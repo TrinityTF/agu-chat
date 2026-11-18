@@ -91,10 +91,12 @@ pub fn parse_twitch_gif_tag(tag: &str) -> Vec<GifRange> {
     out
 }
 
-/// "twitch" is positional (IRC ranges); the rest are name-matched provider emotes.
+/// "twitch" is positional (IRC ranges) and "kick" is Kick's own `[emote:<id>:<name>]` markup; the rest are
+/// name-matched provider emotes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmoteSource {
     Twitch,
+    Kick,
     Provider(EmoteProvider),
 }
 
@@ -257,7 +259,7 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
             Mid::Link { href, text } => out.push(MsgPart::Link { href, text }),
             Mid::Mention { login, name, color, user_id } => out.push(MsgPart::Mention { login, name, color, user_id }),
             Mid::Emote { source, id, name, zero_width } => {
-                if source != EmoteSource::Twitch && zero_width {
+                if matches!(source, EmoteSource::Provider(_)) && zero_width {
                     // A zero-width emote overlays the PRECEDING emote or emoji; walk back past exactly one
                     // connecting whitespace-only text token and drop it.
                     let mut prev = out.len() as isize - 1;
@@ -278,6 +280,97 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
                 }
                 out.push(MsgPart::Emote { source, id, name, overlays: Vec::new() });
             }
+        }
+    }
+    out
+}
+
+/// Kick's emote markup split out of a message: (is emote, emote id or the text, emote name), in order.
+pub fn split_kick(text: &str) -> Vec<(bool, String, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("[emote:") {
+        let tail = &rest[i + 7..];
+        let digits = tail.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && tail[digits..].starts_with(':') {
+            let after = &tail[digits + 1..];
+            if let Some(close) = after.find(']') {
+                let name = &after[..close];
+                if (1..=80).contains(&name.chars().count()) {
+                    if i > 0 {
+                        out.push((false, rest[..i].to_string(), String::new()));
+                    }
+                    out.push((true, tail[..digits].to_string(), name.to_string()));
+                    rest = &after[close + 1..];
+                    continue;
+                }
+            }
+        }
+        out.push((false, rest[..i + 7].to_string(), String::new()));
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        out.push((false, rest.to_string(), String::new()));
+    }
+    out
+}
+
+/// A Kick message as parts. Kick's own `[emote:<id>:<name>]` markup becomes a Kick emote, and in the text around it
+/// every word that names an emote of `emotes` (the channel's Kick-linked 7TV set and 7TV global) becomes that emote,
+/// like the 7TV extension does on kick.com; a zero-width one stacks on the emote before it, as on Twitch. The rest
+/// stays text, one part per run between emotes (the row draws links and mentions in it).
+///
+/// Kick's own emotes come from markup and 7TV's from plain words, so a Kick emote always wins over a 7TV emote that
+/// shares its name.
+pub fn build_kick_parts(text: &str, emotes: Option<&EmoteSets>) -> Vec<MsgPart> {
+    // the markup splitter leaves a broken "[emote:" as its own text piece: join neighbouring text back together
+    let mut segs: Vec<(bool, String, String)> = Vec::new();
+    for seg in split_kick(text) {
+        match segs.last_mut() {
+            Some((false, prev, _)) if !seg.0 => prev.push_str(&seg.1),
+            _ => segs.push(seg),
+        }
+    }
+    let mut out: Vec<MsgPart> = Vec::new();
+    let push_text = |out: &mut Vec<MsgPart>, t: &str| {
+        if t.is_empty() {
+            return;
+        }
+        match out.last_mut() {
+            Some(MsgPart::Text(prev)) => prev.push_str(t),
+            _ => out.push(MsgPart::Text(t.to_string())),
+        }
+    };
+    for (is_emote, a, name) in segs {
+        if is_emote {
+            out.push(MsgPart::Emote { source: EmoteSource::Kick, id: a, name, overlays: Vec::new() });
+            continue;
+        }
+        let Some(sets) = emotes.filter(|e| !e.all.is_empty()) else {
+            push_text(&mut out, &a);
+            continue;
+        };
+        for w in split_keep_ws(&a) {
+            let Some(e) = sets.all.get(w) else {
+                push_text(&mut out, w);
+                continue;
+            };
+            let source = EmoteSource::Provider(e.provider);
+            if e.zero_width {
+                // on the emote right before it, across one run of whitespace (which is dropped), like build_parts
+                let ws_between = matches!(out.last(), Some(MsgPart::Text(t)) if t.chars().all(|c| c.is_whitespace()));
+                let target = if ws_between { out.len().checked_sub(2) } else { out.len().checked_sub(1) };
+                if let Some(i) = target.filter(|i| matches!(out[*i], MsgPart::Emote { .. })) {
+                    if ws_between {
+                        out.pop();
+                    }
+                    if let MsgPart::Emote { overlays, .. } = &mut out[i] {
+                        overlays.push(Overlay { source, id: e.id.clone(), name: e.name.clone() });
+                    }
+                    continue;
+                }
+            }
+            out.push(MsgPart::Emote { source, id: e.id.clone(), name: e.name.clone(), overlays: Vec::new() });
         }
     }
     out
@@ -344,6 +437,46 @@ mod tests {
             sets.all.insert(name.to_string(), e);
         }
         sets
+    }
+
+    #[test]
+    fn kick_messages_match_7tv_words_and_keep_kick_emotes() {
+        let sets = seven(&[("lo", "LO", false), ("zw", "notL", true), ("k7", "KEKW", false)]);
+        let s7 = EmoteSource::Provider(EmoteProvider::SevenTv);
+        let p = build_kick_parts("LO chat [emote:37226:KEKW] KEKW", Some(&sets));
+        assert_eq!(
+            p,
+            vec![
+                MsgPart::Emote { source: s7, id: "lo".into(), name: "LO".into(), overlays: vec![] },
+                MsgPart::Text(" chat ".into()),
+                // Kick's own markup is Kick's emote even where 7TV has one of that name
+                MsgPart::Emote { source: EmoteSource::Kick, id: "37226".into(), name: "KEKW".into(), overlays: vec![] },
+                MsgPart::Text(" ".into()),
+                // the plain word is 7TV's
+                MsgPart::Emote { source: s7, id: "k7".into(), name: "KEKW".into(), overlays: vec![] },
+            ]
+        );
+        // case matters, and a word inside other text is not an emote
+        assert_eq!(build_kick_parts("lo LOL xLO", Some(&sets)), vec![MsgPart::Text("lo LOL xLO".into())]);
+        // without 7TV (off, or not loaded) the text stays text
+        assert_eq!(build_kick_parts("LO", None), vec![MsgPart::Text("LO".into())]);
+        assert_eq!(build_kick_parts("LO", Some(&EmoteSets::default())), vec![MsgPart::Text("LO".into())]);
+        // a broken markup is plain text, one run
+        assert_eq!(build_kick_parts("[emote:x:y] LO", None), vec![MsgPart::Text("[emote:x:y] LO".into())]);
+        assert_eq!(build_kick_parts("", Some(&sets)), vec![]);
+    }
+
+    #[test]
+    fn kick_zero_width_7tv_emotes_stack_on_the_emote_before() {
+        let sets = seven(&[("lo", "LO", false), ("zw", "notL", true)]);
+        let s7 = EmoteSource::Provider(EmoteProvider::SevenTv);
+        let ov = vec![Overlay { source: s7, id: "zw".into(), name: "notL".into() }];
+        // on a 7TV emote, and on a Kick emote
+        assert_eq!(build_kick_parts("LO notL", Some(&sets)), vec![MsgPart::Emote { source: s7, id: "lo".into(), name: "LO".into(), overlays: ov.clone() }]);
+        assert_eq!(build_kick_parts("[emote:1:Kappa] notL hi", Some(&sets)), vec![MsgPart::Emote { source: EmoteSource::Kick, id: "1".into(), name: "Kappa".into(), overlays: ov.clone() }, MsgPart::Text(" hi".into())]);
+        // after a word, or alone, it is drawn as an emote of its own
+        assert_eq!(build_kick_parts("hi notL", Some(&sets)), vec![MsgPart::Text("hi ".into()), MsgPart::Emote { source: s7, id: "zw".into(), name: "notL".into(), overlays: vec![] }]);
+        assert_eq!(build_kick_parts("notL", Some(&sets)), vec![MsgPart::Emote { source: s7, id: "zw".into(), name: "notL".into(), overlays: vec![] }]);
     }
 
     #[test]

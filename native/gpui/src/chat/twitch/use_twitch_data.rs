@@ -14,7 +14,7 @@ use agu_chat_core::protocol::{AguBridge, SourceRef};
 use serde_json::Value;
 
 use super::badges::{build_badge_map, BadgeMap};
-use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, flush_cache, ProviderScopedMap, SevenTvIds, TwitchEmotesResp};
+use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, fetch_seven_tv_on, flush_cache, ProviderScopedMap, SevenTvIds, SevenTvPlatform, TwitchEmotesResp};
 use crate::chat::mod_caps::{relay_api, ModCaps};
 
 #[derive(Clone, Default)]
@@ -68,9 +68,17 @@ pub async fn load_provider_sets(client: reqwest::Client, channel_id: String) -> 
     ProviderSets { seven, bttv, ffz, seven_ids }
 }
 
+/// A Kick channel's emotes beyond Kick's own: the 7TV set linked to the broadcaster's Kick account (`kick_user_id`, the
+/// user id, not the channel id) plus 7TV global, what kick.com shows with the 7TV extension. Kick has no BTTV or FFZ.
+pub async fn load_kick_provider_sets(client: reqwest::Client, kick_user_id: String) -> ProviderSets {
+    let (seven, seven_ids) = fetch_seven_tv_on(&client, SevenTvPlatform::Kick, &kick_user_id, false).await;
+    flush_cache();
+    ProviderSets { seven, seven_ids, ..Default::default() }
+}
+
 /// Only the channel's 7TV set again, past the cache (it changed live, or changes may have been missed).
-pub async fn reload_seven_tv(client: reqwest::Client, channel_id: String) -> (ProviderScopedMap, Option<SevenTvIds>) {
-    let r = fetch_seven_tv(&client, &channel_id, true).await;
+pub async fn reload_seven_tv(client: reqwest::Client, platform: SevenTvPlatform, channel_id: String) -> (ProviderScopedMap, Option<SevenTvIds>) {
+    let r = fetch_seven_tv_on(&client, platform, &channel_id, true).await;
     flush_cache();
     r
 }

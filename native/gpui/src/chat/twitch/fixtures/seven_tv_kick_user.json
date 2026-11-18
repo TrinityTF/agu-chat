@@ -1,0 +1,49 @@
+{
+ "id": "676",
+ "platform": "KICK",
+ "username": "xqc",
+ "emote_set_id": "01FE9DRF000009TR6M9N941CYW",
+ "emote_set": {
+  "id": "01FE9DRF000009TR6M9N941CYW",
+  "name": "xQc's Emotes",
+  "emotes": [
+   {
+    "id": "01G3WEGZN0000ET2J0MQP5YJ0G",
+    "name": "GAMBA",
+    "flags": 0,
+    "data": {
+     "id": "01G3WEGZN0000ET2J0MQP5YJ0G",
+     "name": "GAMBA",
+     "flags": 0,
+     "animated": true
+    }
+   },
+   {
+    "id": "01JP0FG0NN10YJPYVTZN5K67WY",
+    "name": "LO",
+    "flags": 0,
+    "data": {
+     "id": "01JP0FG0NN10YJPYVTZN5K67WY",
+     "name": "LO",
+     "flags": 0,
+     "animated": false
+    }
+   },
+   {
+    "id": "01FG70GMPR00021TQRJX35KWP1",
+    "name": "notL",
+    "flags": 1,
+    "data": {
+     "id": "01FG70GMPR00021TQRJX35KWP1",
+     "name": "notL",
+     "flags": 256,
+     "animated": true
+    }
+   }
+  ]
+ },
+ "user": {
+  "id": "01FE9DRF000009TR6M9N941CYW",
+  "username": "xqc"
+ }
+}

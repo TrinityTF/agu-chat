@@ -230,27 +230,68 @@ pub struct SevenTvIds {
     pub set_id: String,
 }
 
-pub fn seven_tv_channel_key(channel_id: &str) -> String {
-    format!("emotes:7tv:channel:{channel_id}")
+/// Where a channel's 7TV emote set is linked from: 7TV keeps one set per linked Twitch or Kick account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SevenTvPlatform {
+    Twitch,
+    Kick,
 }
 
-/// The ids in a `/v3/users/twitch/<id>` answer.
+impl SevenTvPlatform {
+    /// The platform segment of 7TV's `/v3/users/<platform>/<id>`.
+    fn path(self) -> &'static str {
+        match self {
+            SevenTvPlatform::Twitch => "twitch",
+            SevenTvPlatform::Kick => "kick",
+        }
+    }
+}
+
+/// Cache key of a channel's 7TV answer. Twitch and Kick ids are both plain numbers, so Kick's carry a prefix
+/// (a Twitch key keeps the shape it always had, so existing caches stay valid).
+pub fn seven_tv_channel_key_on(platform: SevenTvPlatform, channel_id: &str) -> String {
+    match platform {
+        SevenTvPlatform::Twitch => format!("emotes:7tv:channel:{channel_id}"),
+        SevenTvPlatform::Kick => format!("emotes:7tv:channel:kick:{channel_id}"),
+    }
+}
+
+pub fn seven_tv_channel_key(channel_id: &str) -> String {
+    seven_tv_channel_key_on(SevenTvPlatform::Twitch, channel_id)
+}
+
+/// 7TV's lookup of the account linked to a Twitch user id or a Kick user id (the broadcaster's, not the channel's).
+pub fn seven_tv_user_url(platform: SevenTvPlatform, channel_id: &str) -> String {
+    format!("https://7tv.io/v3/users/{}/{channel_id}", platform.path())
+}
+
+/// The ids in a `/v3/users/<platform>/<id>` answer.
 fn seven_tv_ids(c: &Value) -> Option<SevenTvIds> {
     let user_id = c.pointer("/user/id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let set_id = c.pointer("/emote_set/id").or_else(|| c.get("emote_set_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
     (!user_id.is_empty() || !set_id.is_empty()).then_some(SevenTvIds { user_id, set_id })
 }
 
-/// 7TV global + channel emotes and the channel's 7TV ids. `fresh` reloads the channel past its cache (a live
+/// 7TV global + a Twitch channel's emotes and its 7TV ids. `fresh` reloads the channel past its cache (a live
 /// update said it changed).
 pub async fn fetch_seven_tv(client: &reqwest::Client, channel_id: &str, fresh: bool) -> (ProviderScopedMap, Option<SevenTvIds>) {
-    let (ck, cu) = (seven_tv_channel_key(channel_id), format!("https://7tv.io/v3/users/twitch/{channel_id}"));
+    fetch_seven_tv_on(client, SevenTvPlatform::Twitch, channel_id, fresh).await
+}
+
+/// 7TV global + the emotes of the 7TV set linked to a Twitch or Kick account, and its 7TV ids.
+pub async fn fetch_seven_tv_on(client: &reqwest::Client, platform: SevenTvPlatform, channel_id: &str, fresh: bool) -> (ProviderScopedMap, Option<SevenTvIds>) {
+    let (ck, cu) = (seven_tv_channel_key_on(platform, channel_id), seven_tv_user_url(platform, channel_id));
     let (g, c) = tokio::join!(
         fetch_json_cached(client, "emotes:7tv:global:global", EMOTE_GLOBAL_TTL_MS, "https://7tv.io/v3/emote-sets/global"),
         fetch_json(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu, fresh),
     );
-    let ids = c.as_ref().and_then(seven_tv_ids);
-    (ProviderScopedMap { global: g.map(|g| seven_tv_map(g.get("emotes"))).unwrap_or_default(), channel: c.map(|c| seven_tv_map(c.pointer("/emote_set/emotes"))).unwrap_or_default() }, ids)
+    let (channel, ids) = c.as_ref().map(seven_tv_channel).unwrap_or_default();
+    (ProviderScopedMap { global: g.map(|g| seven_tv_map(g.get("emotes"))).unwrap_or_default(), channel }, ids)
+}
+
+/// A `/v3/users/<platform>/<id>` answer -> the linked account's channel emotes and its 7TV ids.
+pub fn seven_tv_channel(c: &Value) -> (EmoteMap, Option<SevenTvIds>) {
+    (seven_tv_map(c.pointer("/emote_set/emotes")), seven_tv_ids(c))
 }
 
 // ---- BTTV -------------------------------------------------------------------------------------
@@ -465,6 +506,28 @@ pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kick_channels_look_up_their_kick_linked_7tv_set() {
+        assert_eq!(seven_tv_user_url(SevenTvPlatform::Kick, "676"), "https://7tv.io/v3/users/kick/676");
+        assert_eq!(seven_tv_user_url(SevenTvPlatform::Twitch, "71092938"), "https://7tv.io/v3/users/twitch/71092938");
+        // Kick and Twitch ids are both numbers: their cache entries must not collide; Twitch keeps its old key
+        assert_eq!(seven_tv_channel_key_on(SevenTvPlatform::Kick, "676"), "emotes:7tv:channel:kick:676");
+        assert_eq!(seven_tv_channel_key_on(SevenTvPlatform::Twitch, "676"), "emotes:7tv:channel:676");
+        assert_eq!(seven_tv_channel_key("676"), seven_tv_channel_key_on(SevenTvPlatform::Twitch, "676"));
+
+        // a real answer for a Kick channel (2026-11-18, trimmed to three emotes)
+        let c: Value = serde_json::from_str(include_str!("fixtures/seven_tv_kick_user.json")).unwrap();
+        let (map, ids) = seven_tv_channel(&c);
+        assert_eq!(ids, Some(SevenTvIds { user_id: "01FE9DRF000009TR6M9N941CYW".into(), set_id: "01FE9DRF000009TR6M9N941CYW".into() }));
+        let lo = &map["LO"];
+        assert_eq!(lo.provider, EmoteProvider::SevenTv);
+        assert!(!lo.zero_width);
+        assert_eq!(provider_emote_url(lo, SizeOpt::Medium), format!("https://cdn.7tv.app/emote/{}/2x.webp", lo.id));
+        assert!(map["notL"].zero_width);
+        assert_eq!(map.len(), 3);
+        assert_eq!(seven_tv_channel(&json!({})), (EmoteMap::new(), None));
+    }
 
     #[test]
     fn seven_tv_flags_and_urls() {

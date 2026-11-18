@@ -37,10 +37,10 @@ use super::search::{is_empty_query, match_row, parse_search};
 use super::services::Services;
 use super::store::{source_key, ChatStore};
 use super::twitch::cosmetics::{ChatterStyle, StyleLookup};
-use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, seven_tv_channel_key, EmoteSets, ProviderScopedMap, SevenTvIds};
+use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
 use super::twitch::events::notice_visible;
 use super::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, EMOTE_SET_UPDATE, USER_UPDATE};
-use super::twitch::use_twitch_data::{load_badges, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
+use super::twitch::use_twitch_data::{load_badges, load_kick_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
 use super::types::*;
 use crate::layout::tree::{is_whisper, is_whisper_key};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
@@ -174,8 +174,12 @@ pub struct ChatPane {
     pub(super) twitch: HashMap<String, TwitchData>,
     pub(super) envs: HashMap<String, Rc<TwitchEnv>>,
     pub(super) co_caps: HashMap<String, CoCaps>,
+    /// per Kick source: the 7TV emotes of the broadcaster's Kick-linked 7TV account (and 7TV global)
+    kick_seven: HashMap<String, Arc<ProviderSets>>,
+    /// per Kick source: `kick_seven` with the settings applied, what its rows render against
+    pub(super) kick_emotes: HashMap<String, Arc<EmoteSets>>,
     requested: HashSet<String>,
-    /// the 7TV EventAPI subscriptions this pane holds, per Twitch source
+    /// the 7TV EventAPI subscriptions this pane holds, per Twitch or Kick source
     seven_subs: HashMap<String, SevenTvIds>,
     seven_seq: u64,
 
@@ -424,6 +428,8 @@ impl ChatPane {
             twitch: HashMap::new(),
             envs: HashMap::new(),
             co_caps: HashMap::new(),
+            kick_seven: HashMap::new(),
+            kick_emotes: HashMap::new(),
             requested: HashSet::new(),
             seven_subs: HashMap::new(),
             seven_seq: 0,
@@ -746,6 +752,9 @@ impl ChatPane {
                     }
                 }
                 Platform::Rumble | Platform::Kick => {
+                    if source.platform == Platform::Kick {
+                        self.load_kick_seven(&sk, cx);
+                    }
                     let key = format!("cocaps:{sk}:{}{}", self.accounts.get(&Platform::Rumble).map(|a| a.connected as u8).unwrap_or(0), self.accounts.get(&Platform::Kick).map(|a| a.connected as u8).unwrap_or(0));
                     if self.requested.insert(key) {
                         let (bridge, s2, sk2) = (self.bridge.clone(), source.clone(), sk.clone());
@@ -764,6 +773,54 @@ impl ChatPane {
                 _ => {}
             }
         }
+    }
+
+    /// The Kick broadcaster's user id (what 7TV links a Kick account by), from the source's status frame.
+    fn kick_user_id(&self, sk: &str) -> Option<String> {
+        let v = self.store.source(sk)?.status.as_ref()?.get("userId")?;
+        let id = match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => return None,
+        };
+        (!id.is_empty()).then_some(id)
+    }
+
+    /// The account a source's 7TV channel set is linked from: a Twitch channel id, or a Kick broadcaster's user id.
+    fn seven_owner(&self, sk: &str) -> Option<(SevenTvPlatform, String)> {
+        let st = self.store.source(sk)?;
+        match st.source.platform {
+            Platform::Twitch => st.channel_id.clone().map(|id| (SevenTvPlatform::Twitch, id)),
+            Platform::Kick => self.kick_user_id(sk).map(|id| (SevenTvPlatform::Kick, id)),
+            _ => None,
+        }
+    }
+
+    /// A source's loaded 7TV / BTTV / FFZ sets, whichever platform it is on.
+    fn seven_sets_mut(&mut self, sk: &str) -> Option<&mut Arc<ProviderSets>> {
+        if self.kick_seven.contains_key(sk) {
+            return self.kick_seven.get_mut(sk);
+        }
+        self.twitch.get_mut(sk).and_then(|d| d.provider_sets.as_mut())
+    }
+
+    /// A Kick source's 7TV emotes, once its broadcaster's user id is known.
+    fn load_kick_seven(&mut self, sk: &str, cx: &mut Context<Self>) {
+        let Some(uid) = self.kick_user_id(sk) else { return };
+        if !self.requested.insert(format!("kick7tv:{sk}:{uid}")) {
+            return;
+        }
+        let sk2 = sk.to_string();
+        let task = self.svc.net.run(load_kick_provider_sets(self.svc.net.client.clone(), uid));
+        cx.spawn(async move |this, cx| {
+            if let Some(sets) = task.await {
+                let _ = this.update(cx, |p, cx| {
+                    p.kick_seven.insert(sk2, Arc::new(sets));
+                    p.data_changed(cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// The acting account's 7TV personal set, loaded once per account.
@@ -916,17 +973,31 @@ impl ChatPane {
             );
         }
         self.envs = envs;
+        let mut kick_emotes = HashMap::new();
+        if rs.seven_tv {
+            for (sk, ps) in &self.kick_seven {
+                if self.store.source(sk).is_some() {
+                    kick_emotes.insert(sk.clone(), Arc::new(merge_emote_sets(&ps.seven, &empty, &empty)));
+                }
+            }
+        }
+        self.kick_emotes = kick_emotes;
         self.sync_seven_subs();
     }
 
     // ---- live 7TV emote sets (EventAPI) ----------------------------------------------------------------
 
-    /// Hold an EventAPI subscription for each Twitch source whose 7TV ids are known (7TV on), and nothing else.
+    /// Hold an EventAPI subscription for each Twitch or Kick source whose 7TV ids are known (7TV on), and nothing else.
     fn sync_seven_subs(&mut self) {
         let mut want: HashMap<String, SevenTvIds> = HashMap::new();
         if self.settings.seven_tv {
-            for st in self.store.sources.iter().filter(|s| s.source.platform == Platform::Twitch) {
-                if let Some(ids) = self.twitch.get(&st.sk).and_then(|d| d.provider_sets.as_ref()).and_then(|p| p.seven_ids.clone()) {
+            for st in &self.store.sources {
+                let sets = match st.source.platform {
+                    Platform::Twitch => self.twitch.get(&st.sk).and_then(|d| d.provider_sets.as_ref()),
+                    Platform::Kick => self.kick_seven.get(&st.sk),
+                    _ => None,
+                };
+                if let Some(ids) = sets.and_then(|p| p.seven_ids.clone()) {
                     want.insert(st.sk.clone(), ids);
                 }
             }
@@ -957,7 +1028,7 @@ impl ChatPane {
                     return;
                 }
                 for sk in &sks {
-                    if let Some(ps) = self.twitch.get_mut(sk).and_then(|d| d.provider_sets.as_mut()) {
+                    if let Some(ps) = self.seven_sets_mut(sk) {
                         apply_changes(&mut Arc::make_mut(ps).seven.channel, changes);
                     }
                     self.forget_seven_cache(sk);
@@ -986,7 +1057,7 @@ impl ChatPane {
                     cx.spawn(async move |this, cx| {
                         let Some(Some(map)) = task.await else { return };
                         let _ = this.update(cx, |p, cx| {
-                            if let Some(ps) = p.twitch.get_mut(&sk).and_then(|d| d.provider_sets.as_mut()) {
+                            if let Some(ps) = p.seven_sets_mut(&sk) {
                                 let ps = Arc::make_mut(ps);
                                 ps.seven.channel = map;
                                 ps.seven_ids = Some(ids);
@@ -1002,12 +1073,12 @@ impl ChatPane {
             SevenEvent::Resynced => {
                 // the socket was down for a while: whatever changed meanwhile comes with a fresh load
                 for sk in self.seven_subs.keys().cloned().collect::<Vec<_>>() {
-                    let Some(cid) = self.store.source(&sk).and_then(|s| s.channel_id.clone()) else { continue };
-                    let task = self.svc.net.run(reload_seven_tv(self.svc.net.client.clone(), cid));
+                    let Some((platform, cid)) = self.seven_owner(&sk) else { continue };
+                    let task = self.svc.net.run(reload_seven_tv(self.svc.net.client.clone(), platform, cid));
                     cx.spawn(async move |this, cx| {
                         let Some((seven, Some(ids))) = task.await else { return };
                         let _ = this.update(cx, |p, cx| {
-                            if let Some(ps) = p.twitch.get_mut(&sk).and_then(|d| d.provider_sets.as_mut()) {
+                            if let Some(ps) = p.seven_sets_mut(&sk) {
                                 let ps = Arc::make_mut(ps);
                                 ps.seven.channel = seven.channel;
                                 if !seven.global.is_empty() {
@@ -1026,8 +1097,8 @@ impl ChatPane {
 
     /// The channel's cached 7TV answer is stale now: a restart must not bring the old set back.
     fn forget_seven_cache(&self, sk: &str) {
-        if let Some(cid) = self.store.source(sk).and_then(|s| s.channel_id.clone()) {
-            forget_cache(&seven_tv_channel_key(&cid));
+        if let Some((platform, cid)) = self.seven_owner(sk) {
+            forget_cache(&seven_tv_channel_key_on(platform, &cid));
             let _ = self.svc.net.rt.spawn(async { flush_cache() });
         }
     }
@@ -2128,12 +2199,12 @@ impl ChatPane {
             }
             RowBody::Rumble(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble), viewer_id: String::new() };
+                let env = CoEnv { source: st.source.clone(), emotes: None, caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble), viewer_id: String::new() };
                 Some(rumble_row(row, m, &ctx, &env, rule.as_ref()))
             }
             RowBody::Kick(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new() };
+                let env = CoEnv { source: st.source.clone(), emotes: self.kick_emotes.get(&row.sk).cloned(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new() };
                 let key = super::twitch::cosmetics::kick_key(&m.user.id);
                 let lookup = if rs.seven_tv_cosmetics && !m.user.anonymous { self.svc.cosmetics.style_of(&key, &self.svc.net, cx) } else { StyleLookup::Known(None) };
                 let style: Option<ChatterStyle> = match lookup {
@@ -2149,6 +2220,7 @@ impl ChatPane {
                 let connected = yt.map(|a| a.connected).unwrap_or(false);
                 let env = CoEnv {
                     source: st.source.clone(),
+                    emotes: None,
                     caps: CoCaps { connected, can_moderate: connected, can_delete: connected },
                     can_send: false,
                     rumble_badges: Default::default(),
