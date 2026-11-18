@@ -74,6 +74,12 @@ lenient! {
         pub user: ChatUser,
         pub text: String,
         pub emotes: Option<String>,
+        /// the sender's IRC badges, for the attached message's chat line
+        pub badges: String,
+        pub badge_info: String,
+        /// the attached message was deleted (or its sender timed out / banned), and why
+        pub deleted: bool,
+        pub deleted_note: Option<String>,
         /// set on the app's own notice of a 7TV emote change (not a Twitch notice)
         pub seventv: Option<SevenTvNote>,
     }

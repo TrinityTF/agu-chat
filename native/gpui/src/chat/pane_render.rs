@@ -426,20 +426,16 @@ impl ChatPane {
                     ),
                 );
             }
-            return div()
-                .id(eid("notice-", key))
+            let body = div()
                 .w_full()
-                .flex_none()
                 .flex()
                 .gap(px(NOTICE_ICON_GAP))
-                .border_l_3()
-                .border_color(n.bar.unwrap_or_else(|| gpui::rgb(NOTICE_SUB_BAR).into()))
-                .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.035 })
                 .px(px(8.))
                 .py(px(4.))
                 .child(div().flex_none().w(px(size)).mt(px(2.)).text_color(c(theme::TEXT)).child(icon(ic, size)))
-                .child(lines)
-                .into_any_element();
+                .child(lines);
+            let bar = n.bar.unwrap_or_else(|| gpui::rgb(NOTICE_SUB_BAR).into());
+            return self.notice_frame(key, n, bar, gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.035 }.into(), body, cx);
         }
         let (bar, bg) = if let Some(b) = n.bar {
             // the app's own notices (7TV emote changes): their bar, a faint lift
@@ -449,9 +445,18 @@ impl ChatPane {
         } else {
             (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12))
         };
-        let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_3().border_color(bar).bg(bg).px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
+        let mut body = div().w_full().px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
         if let Some(t) = &n.text {
-            d = d.child(self.flow(t, Rc::new(vec![]), cx));
+            body = body.child(self.flow(t, Rc::new(vec![]), cx));
+        }
+        self.notice_frame(key, n, bar, bg, body, cx)
+    }
+
+    /// A notice's bar and tint around its sentence, and the attached message's chat line under it.
+    fn notice_frame(&mut self, key: &str, n: &NoticeSpec, bar: gpui::Hsla, bg: gpui::Hsla, body: gpui::Div, cx: &mut Context<Self>) -> AnyElement {
+        let mut d = div().id(eid("notice-", key)).w_full().flex_none().border_l_3().border_color(bar).bg(bg).child(body);
+        if let Some(line) = &n.line {
+            d = d.child(self.frame_el(key, line, true, cx));
         }
         d.into_any_element()
     }

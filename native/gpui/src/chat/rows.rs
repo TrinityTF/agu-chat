@@ -246,6 +246,9 @@ pub struct NoticeSpec {
     pub bar: Option<Hsla>,
     /// a Reply button under it, putting @name in the message box
     pub reply: Option<CardUser>,
+    /// a Twitch sub / streak / announcement's attached message, drawn as the sender's chat line under the
+    /// sentence: badges, a name that opens the card, mod buttons and the hover tools
+    pub line: Option<FrameSpec>,
 }
 
 #[derive(Clone)]
@@ -297,6 +300,9 @@ impl BuiltRow {
                 if let Some(t) = &n.text {
                     v.push(t.clone());
                 }
+                if let Some(l) = &n.line {
+                    v.push(l.content.clone());
+                }
                 v
             }
             BuiltRow::Automod(a) => vec![a.header.clone(), a.msg.content.clone()],
@@ -316,6 +322,7 @@ impl BuiltRow {
         match self {
             BuiltRow::Frame(f) => f.link.as_ref(),
             BuiltRow::Event(e) => e.inner.as_ref().and_then(|f| f.link.as_ref()),
+            BuiltRow::Notice(n) => n.line.as_ref().and_then(|f| f.link.as_ref()),
             _ => None,
         }
     }
@@ -943,7 +950,28 @@ fn event_frame(who: &EventWho, verb: &str, reward: Option<String>, amount: Optio
 // ---- notices ----------------------------------------------------------------------------------------
 
 /// `seen` is the notice's user's last chat line here (badges for a redeem's mod buttons).
-pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv, seen: Option<&ChatMsg>) -> BuiltRow {
+/// The chat line a Twitch notice's attached message is drawn (and moderated) as: the sender's badges from the
+/// notice (or their last line here), never a redeem / cheer frame of its own.
+pub fn notice_chat_msg(n: &Notice, seen: Option<&ChatMsg>) -> ChatMsg {
+    let color = Some(n.user.color.clone()).filter(|c| !c.is_empty()).or_else(|| seen.map(|m| m.user.color.clone())).unwrap_or_default();
+    let (badges, badge_info) = if n.badges.is_empty() { seen.map(|m| (m.badges.clone(), m.badge_info.clone())).unwrap_or_default() } else { (n.badges.clone(), n.badge_info.clone()) };
+    ChatMsg {
+        id: n.id.clone(),
+        ts: n.ts,
+        user: ChatUser { color, name: if n.user.name.is_empty() { n.user.login.clone() } else { n.user.name.clone() }, ..n.user.clone() },
+        badges,
+        badge_info,
+        text: n.text.clone(),
+        emotes: n.emotes.clone().unwrap_or_default(),
+        deleted: n.deleted,
+        deleted_note: n.deleted_note.clone(),
+        ..Default::default()
+    }
+}
+
+/// `line`: the attached message already built as a chat line (`notice_chat_msg`); without it the message is
+/// drawn as plain text under the sentence.
+pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv, seen: Option<&ChatMsg>, line: Option<FrameSpec>) -> BuiltRow {
     let rs = ctx.rs;
     let base = rs.font_size;
     let size = SizeOpt::parse(&rs.emote_size);
@@ -990,7 +1018,7 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv, seen: Op
         }
         _ => sys.push(Item::Text(TextItem::new(n.system.clone(), base, token(if raid { theme::ORANGE_200 } else { theme::TEXT })))),
     }
-    let text = if n.text.is_empty() {
+    let text = if n.text.is_empty() || line.is_some() {
         None
     } else {
         let parts = build_parts(&n.text, n.emotes.as_deref().unwrap_or(""), env.emotes.as_deref(), None, "");
@@ -998,7 +1026,7 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv, seen: Op
         message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::MUTED), false, rs.readable_colors, None);
         Some(f.finish())
     };
-    BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card, bar: None, reply: None })
+    BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card, bar: None, reply: None, line })
 }
 
 /// The app's notice of a live 7TV change, one compact line: "A_g_u__ added the 7TV emote [image] PotatWind".
@@ -1031,7 +1059,7 @@ fn seventv_notice(s: &SevenTvNote, base: f32, size: SizeOpt) -> BuiltRow {
         f.text(" to ", muted);
     }
     bold(&mut f, &s.name);
-    BuiltRow::Notice(NoticeSpec { system: f.finish(), text: None, raid: false, icon: None, head: None, card: None, bar: Some(token_a(theme::SLATE_500, 0.9)), reply: None })
+    BuiltRow::Notice(NoticeSpec { system: f.finish(), text: None, raid: false, icon: None, head: None, card: None, bar: Some(token_a(theme::SLATE_500, 0.9)), reply: None, line: None })
 }
 
 /// A sub / gift notice's sentence without the name it starts with, and the byte range to bold in it (7TV bolds
@@ -1552,6 +1580,7 @@ fn super_chat_row(row: &Row, m: &YouTubeMsg, p: &YouTubePaid, rs: &Settings) -> 
         card: Some((row.sk.clone(), user.clone())),
         bar: colour,
         reply: Some(user),
+        line: None,
     })
 }
 

@@ -2273,7 +2273,9 @@ impl ChatPane {
                     + n.text.as_ref().map(|t| t.height_at(w, window, cx)).unwrap_or(0.0)
                     + if n.reply.is_some() { super::pane_render::NOTICE_BUTTON_H + super::pane_render::NOTICE_BUTTON_GAP } else { 0.0 };
                 let h = 8.0 + lines.max(n.icon.map(|(_, s)| s + 2.0).unwrap_or(0.0));
-                ItemMetrics { h, mt: 0.0, mb: 0.0 }
+                // the attached message's chat line, inside the 3px bar under the sentence
+                let line = n.line.as_ref().map(|f| frame_h(f, width - 3.0, window, cx)).unwrap_or(0.0);
+                ItemMetrics { h: h + line, mt: 0.0, mb: 0.0 }
             }
             BuiltRow::Feed(f) => ItemMetrics { h: 2.0 + fl(f.base * 0.9 * LINE_HEIGHT), mt: 0.0, mb: 0.0 },
             BuiltRow::Automod(a) => {
@@ -2340,7 +2342,32 @@ impl ChatPane {
             }
             RowBody::Notice(n) => {
                 let seen = self.last_line_of(&row.sk, &n.user.id);
-                Some(notice_row(row, n, &ctx, self.envs.get(&row.sk)?, seen.as_ref()))
+                let env = self.envs.get(&row.sk)?.clone();
+                // A sub / streak / announcement with a message: the message is the sender's chat line (badges, a
+                // name that opens the card, mod buttons, hover tools), not grey text.
+                let is_redeem = (n.msg_id == "redeem" || n.msg_id == "powerup") && n.reward.is_some();
+                let line = match st {
+                    Some(st) if !n.text.is_empty() && n.seventv.is_none() && !is_redeem && !n.user.id.is_empty() => {
+                        let msg = notice_chat_msg(n, seen.as_ref());
+                        let lookup = if rs.seven_tv_cosmetics { self.svc.cosmetics.style_of(&msg.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                        let style: Option<ChatterStyle> = match lookup {
+                            StyleLookup::Known(s) => s,
+                            StyleLookup::Unknown => None,
+                        };
+                        let defs = env.seven_defs.clone();
+                        let susp = st.suspicious.get(&msg.user.id).map(|s| s.status.clone());
+                        match twitch_message_row(&TwitchInput { row, msg: &msg, ctx: &ctx, env: &env, known: &st.known, susp: susp.as_deref(), rule: rule.as_ref(), style: style.as_ref(), defs: defs.as_deref(), held: false }) {
+                            BuiltRow::Frame(mut f) => {
+                                // inside the notice's own tint
+                                f.alt = false;
+                                Some(f)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                Some(notice_row(row, n, &ctx, &env, seen.as_ref(), line))
             }
             RowBody::ModFeed(f) => Some(feed_row(f, &ctx)),
             RowBody::Automod(h) => {

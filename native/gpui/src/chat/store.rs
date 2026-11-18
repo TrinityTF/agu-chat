@@ -151,6 +151,7 @@ impl ChatStore {
     pub fn mark_deleted(&mut self, sk: &str, id: &str) {
         self.map_rows(|r| match &r.body {
             RowBody::Msg(m) if r.sk == sk && m.id == id && !m.deleted => Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, deleted_note: Some("Deleted".into()), ..m.clone() }))),
+            RowBody::Notice(n) if r.sk == sk && n.id == id && !n.text.is_empty() && !n.deleted => Some(with_body(r, RowBody::Notice(Notice { deleted: true, deleted_note: Some("Deleted".into()), ..n.clone() }))),
             _ => None,
         });
     }
@@ -379,6 +380,9 @@ impl ChatStore {
                     RowBody::Msg(m) if r.sk == sk && !m.deleted && (user_id.is_none() || user_id.as_deref() == Some(m.user.id.as_str()) || (!login.is_empty() && m.user.login == login)) => {
                         Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, deleted_note: Some(note.clone()), ..m.clone() })))
                     }
+                    RowBody::Notice(n) if r.sk == sk && !n.text.is_empty() && !n.deleted && (user_id.is_none() || user_id.as_deref() == Some(n.user.id.as_str()) || (!login.is_empty() && n.user.login == login)) => {
+                        Some(with_body(r, RowBody::Notice(Notice { deleted: true, deleted_note: Some(note.clone()), ..n.clone() })))
+                    }
                     _ => None,
                 });
             }
@@ -386,6 +390,8 @@ impl ChatStore {
                 let id = val_str(f, "id");
                 return self.map_rows(|r| match &r.body {
                     RowBody::Msg(m) if r.sk == sk && m.id == id && !m.deleted => Some(with_body(r, RowBody::Msg(ChatMsg { deleted: true, deleted_note: Some("Deleted".into()), ..m.clone() }))),
+                    // a sub / streak notice's attached message is a chat message of its own
+                    RowBody::Notice(n) if r.sk == sk && n.id == id && !n.text.is_empty() && !n.deleted => Some(with_body(r, RowBody::Notice(Notice { deleted: true, deleted_note: Some("Deleted".into()), ..n.clone() }))),
                     _ => None,
                 });
             }

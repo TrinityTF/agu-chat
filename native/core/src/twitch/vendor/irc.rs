@@ -199,6 +199,9 @@ pub fn build_notice(m: &IrcLine) -> Option<Value> {
         // The attached user text carries its own emote positions on USERNOTICE lines exactly like PRIVMSG's
         // `emotes` tag. "" when the message has none.
         "emotes": m.tag("emotes"),
+        // The sender's badges, so the attached message draws (and is moderated) like their chat line.
+        "badges": m.tag("badges"),
+        "badgeInfo": m.tag("badge-info"),
         // Shared chat wraps every notice as msg-id "sharedchatnotice" and puts the real kind (sub, raid, ...)
         // here; the chat page sorts on whichever is set so its show/hide toggles work on both.
         "sourceMsgId": m.tag("source-msg-id"),
@@ -259,5 +262,8 @@ mod tests {
         assert_eq!(n["system"], "Bob subscribed");
         assert_eq!(n["text"], "hey");
         assert!(build_notice(&parse_irc_line(":tmi.twitch.tv USERNOTICE #chan")).is_none());
+        let m = parse_irc_line("@msg-id=viewermilestone;badges=subscriber/12,premium/1;badge-info=subscriber/14;system-msg=Bob_watched;display-name=Bob :tmi.twitch.tv USERNOTICE #chan :Yo");
+        let n = build_notice(&m).unwrap();
+        assert_eq!((n["badges"].as_str(), n["badgeInfo"].as_str(), n["text"].as_str()), (Some("subscriber/12,premium/1"), Some("subscriber/14"), Some("Yo")));
     }
 }
