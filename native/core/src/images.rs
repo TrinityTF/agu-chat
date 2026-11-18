@@ -4,11 +4,21 @@
 //! Frames are shrunk at decode time to the largest box the image is drawn in (physical pixels), so an emote
 //! fetched at 2x/4x costs what it is shown at, not what the CDN served. Layout keeps using the natural size.
 //!
-//! A failed fetch is tried again: a network blip / timeout / 429 / 5xx a few times with backoff right away, and
-//! any failure again once its cooldown is over and the image is asked for (a short one for a blip, a long one for
-//! a 404 or an undecodable file), so one bad moment never leaves an emote blank for the whole session.
+//! The encoded bytes are kept on disk (`disk`), so an image is downloaded once, not once per start. Downloads are
+//! streamed and only fail when the server stops sending (`fetch`), and they are queued newest first, per host
+//! (`sched`), so on a slow CDN the rows on screen load before the ones that scrolled away.
+//!
+//! A failed fetch is tried again: a network blip / stall / 429 / 5xx a few times with backoff right away (asking
+//! for the rest of a cut download when the server allows it), and any failure again once its cooldown is over and
+//! the image is asked for (a short one for a blip, a long one for a 404 or an undecodable file), so one bad moment
+//! never leaves an emote blank for the whole session.
+pub mod disk;
+pub mod fetch;
+pub mod sched;
+
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -83,8 +93,8 @@ pub const RETRY_DELAYS_MS: [u64; 3] = [1_000, 3_000, 10_000];
 pub const RETRY_TRANSIENT_MS: u64 = 60_000;
 /// ... and a permanent one (a 404 does not come back soon, but an emote can be re-uploaded).
 pub const RETRY_PERMANENT_MS: u64 = 15 * 60_000;
-/// One request (connect + headers + body) gives up after this, so a stuck CDN connection never holds a fetch slot.
-pub const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+/// Disk reads at once (each is one small file).
+const DISK_READS: usize = 8;
 
 /// What an HTTP error status means for a retry.
 pub fn classify_status(status: u16) -> Fail {
@@ -128,7 +138,20 @@ impl<T> Entry<T> {
     }
 }
 
-type Msg = (String, Result<Decoded, (String, Fail)>);
+/// How one load ended.
+pub enum Outcome {
+    Done(Result<Decoded, (String, Fail)>),
+    /// Dropped from the download queue: nobody asked for it in a while. Asked for again, it is loaded again.
+    Dropped,
+}
+
+impl From<Result<Decoded, (String, Fail)>> for Outcome {
+    fn from(r: Result<Decoded, (String, Fail)>) -> Self {
+        Outcome::Done(r)
+    }
+}
+
+type Msg = (String, Outcome);
 
 pub struct ImageCache<T> {
     map: HashMap<String, Entry<T>>,
@@ -139,7 +162,10 @@ pub struct ImageCache<T> {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     wake: Wake,
-    sem: Arc<tokio::sync::Semaphore>,
+    sched: Arc<sched::Sched>,
+    /// The encoded bytes on disk (None: not set up, e.g. in tests).
+    disk: Option<Arc<disk::DiskCache>>,
+    disk_sem: Arc<tokio::sync::Semaphore>,
     /// Bytes the frontend reported for its uploaded images.
     pub decoded_bytes: u64,
     /// What the same frames would take at source resolution (stats only).
@@ -334,25 +360,87 @@ pub fn decode(bytes: &[u8], want: Want, one_frame: bool) -> Result<Decoded, Stri
     Ok(Decoded { w, h, fw, fh, frames, source_bytes, cut })
 }
 
-/// One GET + decode of `url` (or a bundled asset), the failure classified for the retry logic.
-async fn fetch_once(client: &reqwest::Client, url: &str, want: Want, one_frame: bool) -> Result<Decoded, (String, Fail)> {
-    if let Some(bytes) = crate::kick::badges::asset_bytes(url) {
-        return decode_off_thread(bytes, want, one_frame).await;
+/// Decodes on the blocking pool and hands the bytes back (to be written to disk when they decoded).
+async fn decode_keep(bytes: Vec<u8>, want: Want, one_frame: bool) -> (Result<Decoded, (String, Fail)>, Option<Vec<u8>>) {
+    match tokio::task::spawn_blocking(move || (decode(&bytes, want, one_frame), bytes)).await {
+        // undecodable bytes do not get better by asking again soon
+        Ok((r, b)) => (r.map_err(|e| (e, Fail::Permanent)), Some(b)),
+        Err(e) => (Err((e.to_string(), Fail::Permanent)), None),
     }
-    let net = |e: reqwest::Error| {
-        let kind = e.status().map(|s| classify_status(s.as_u16())).unwrap_or(Fail::Transient);
-        (e.to_string(), kind)
-    };
-    let resp = client.get(url).timeout(FETCH_TIMEOUT).send().await.and_then(|r| r.error_for_status()).map_err(net)?;
-    let bytes = resp.bytes().await.map_err(net)?;
-    decode_off_thread(bytes, want, one_frame).await
 }
 
-/// Undecodable bytes do not get better by asking again soon.
-async fn decode_off_thread<B: AsRef<[u8]> + Send + 'static>(bytes: B, want: Want, one_frame: bool) -> Result<Decoded, (String, Fail)> {
-    match tokio::task::spawn_blocking(move || decode(bytes.as_ref(), want, one_frame)).await {
-        Ok(r) => r.map_err(|e| (e, Fail::Permanent)),
-        Err(e) => Err((e.to_string(), Fail::Permanent)),
+/// Everything one load needs, moved into its task.
+struct Job {
+    url: String,
+    want: Want,
+    one_frame: bool,
+    client: reqwest::Client,
+    sched: Arc<sched::Sched>,
+    disk: Option<Arc<disk::DiskCache>>,
+    disk_sem: Arc<tokio::sync::Semaphore>,
+}
+
+impl Job {
+    /// The disk cache, for a URL worth keeping.
+    fn disk(&self) -> Option<Arc<disk::DiskCache>> {
+        self.disk.clone().filter(|_| disk::cacheable(&self.url))
+    }
+
+    /// The bytes from disk, if they are there.
+    async fn from_disk(&self) -> Option<Vec<u8>> {
+        let d = self.disk()?;
+        let _p = self.disk_sem.acquire().await.ok()?;
+        let u = self.url.clone();
+        tokio::task::spawn_blocking(move || d.read(&u)).await.ok().flatten()
+    }
+
+    /// Bundled asset, else disk, else the network (newest first, retrying a transient failure a few times with
+    /// backoff; the slot is given back while waiting). Decoded off the UI thread; the bytes go to disk when they
+    /// came from the network and decoded.
+    async fn run(self) -> Outcome {
+        let (url, want, one_frame) = (self.url.as_str(), self.want, self.one_frame);
+        if let Some(bytes) = crate::kick::badges::asset_bytes(url) {
+            return decode_keep(bytes.to_vec(), want, one_frame).await.0.into();
+        }
+        if let Some(bytes) = self.from_disk().await {
+            match decode_keep(bytes, want, one_frame).await.0 {
+                Ok(d) => return Outcome::Done(Ok(d)),
+                Err((e, _)) => {
+                    crate::logf!("image on disk did not decode, fetching again {url}: {e}");
+                    if let Some(d) = self.disk() {
+                        d.remove(url);
+                    }
+                }
+            }
+        }
+        let mut attempt = 0;
+        let mut partial = fetch::Partial::default();
+        loop {
+            let res = {
+                let Some(_slot) = self.sched.acquire(url).await else { return Outcome::Dropped };
+                fetch::fetch_bytes(&self.client, url, fetch::LIMITS, &mut partial).await
+            };
+            match res {
+                Ok(bytes) => {
+                    let (r, bytes) = decode_keep(bytes, want, one_frame).await;
+                    if let (Ok(_), Some(d), Some(b)) = (&r, self.disk(), bytes) {
+                        let u = url.to_string();
+                        tokio::task::spawn_blocking(move || d.write(&u, &b));
+                    }
+                    return Outcome::Done(r);
+                }
+                Err((e, Fail::Transient)) => match retry_delay_ms(attempt, rand::random::<f32>()) {
+                    Some(ms) => {
+                        let kept = if partial.resumable() { format!(", resuming at {} bytes", partial.bytes.len()) } else { String::new() };
+                        crate::logf!("image retry {} in {ms} ms {url}: {e}{kept}", attempt + 1);
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                    }
+                    None => return Outcome::Done(Err((e, Fail::Transient))),
+                },
+                Err(other) => return Outcome::Done(Err(other)),
+            }
+        }
     }
 }
 
@@ -367,7 +455,9 @@ impl<T> ImageCache<T> {
             tx,
             rx,
             wake,
-            sem: Arc::new(tokio::sync::Semaphore::new(12)),
+            sched: sched::Sched::new(sched::Queue::default()),
+            disk: None,
+            disk_sem: Arc::new(tokio::sync::Semaphore::new(DISK_READS)),
             decoded_bytes: 0,
             source_bytes: 0,
             sizes: HashMap::new(),
@@ -390,31 +480,35 @@ impl<T> ImageCache<T> {
         self.freeze || self.anim_off
     }
 
-    /// Fetch + decode `url` for the box `want` on the runtime, retrying a transient failure a few times with backoff
-    /// (the fetch slot is given back while waiting). The encoded bytes are dropped right after the decode.
+    /// Keeps the encoded bytes under `dir` from now on (`<data dir>/image-cache`); the folder is trimmed to its cap
+    /// in the background right away.
+    pub fn set_disk_dir(&mut self, dir: PathBuf) {
+        let d = Arc::new(disk::DiskCache::new(dir, disk::CAP_BYTES));
+        let p = d.clone();
+        self.rt.spawn_blocking(move || {
+            let (bytes, deleted) = p.prune();
+            crate::logf!("image disk cache: {} MB, {deleted} files pruned", bytes / 1024 / 1024);
+        });
+        self.disk = Some(d);
+    }
+
+    /// Load + decode `url` for the box `want` on the runtime (see `Job::run`).
     fn spawn_fetch(&self, url: &str, want: Want) {
-        let one_frame = self.frozen();
-        let (tx, client, wake, sem, u) = (self.tx.clone(), self.client.clone(), self.wake.clone(), self.sem.clone(), url.to_string());
+        let job = Job {
+            url: url.to_string(),
+            want,
+            one_frame: self.frozen(),
+            client: self.client.clone(),
+            sched: self.sched.clone(),
+            disk: self.disk.clone(),
+            disk_sem: self.disk_sem.clone(),
+        };
+        let (tx, wake, sched) = (self.tx.clone(), self.wake.clone(), self.sched.clone());
         self.rt.spawn(async move {
-            let mut attempt = 0;
-            let res = loop {
-                let res = {
-                    let _permit = sem.acquire().await;
-                    fetch_once(&client, &u, want, one_frame).await
-                };
-                match res {
-                    Err((e, Fail::Transient)) => match retry_delay_ms(attempt, rand::random::<f32>()) {
-                        Some(ms) => {
-                            crate::logf!("image retry {} in {ms} ms {u}: {e}", attempt + 1);
-                            attempt += 1;
-                            tokio::time::sleep(Duration::from_millis(ms)).await;
-                        }
-                        None => break Err((e, Fail::Transient)),
-                    },
-                    other => break other,
-                }
-            };
-            let _ = tx.send((u, res));
+            let u = job.url.clone();
+            let out = job.run().await;
+            sched.forget(&u);
+            let _ = tx.send((u, out));
             wake();
         });
     }
@@ -427,6 +521,10 @@ impl<T> ImageCache<T> {
         let mut fetch = false;
         if let Some(e) = self.map.get_mut(url) {
             e.used_ms = now;
+            // still drawn: keeps its queued download at the front
+            if matches!(e.state, State::Loading) || e.upgrading {
+                self.sched.touch(url);
+            }
             match &e.state {
                 State::Ready(img) => {
                     if !e.upgrading && now >= e.retry_at {
@@ -468,7 +566,21 @@ impl<T> ImageCache<T> {
     /// handle and how many bytes it holds. Returns true if more are waiting.
     pub fn pump(&mut self, mut upload: impl FnMut(&str, &Decoded) -> (T, u64)) -> bool {
         let t0 = Instant::now();
-        while let Ok((url, res)) = self.rx.try_recv() {
+        while let Ok((url, out)) = self.rx.try_recv() {
+            let res = match out {
+                Outcome::Done(r) => r,
+                Outcome::Dropped => {
+                    // nobody asked for it in a while: forget the request, the next ask starts a new one
+                    match self.map.get_mut(&url) {
+                        Some(e) if matches!(e.state, State::Ready(_)) => e.upgrading = false,
+                        Some(e) if matches!(e.state, State::Loading) => {
+                            self.map.remove(&url);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+            };
             match res {
                 Ok(d) => {
                     let (gpu, bytes) = upload(&url, &d);
@@ -597,14 +709,14 @@ mod tests {
         c.start = Instant::now() - Duration::from_secs(120);
         // three images of 60 MB each (reported by the frontend), asked for 100 s, 50 s and just now
         for (i, name) in ["old", "mid", "new"].iter().enumerate() {
-            c.tx.send((name.to_string(), Ok(decoded(1)))).unwrap();
+            c.tx.send((name.to_string(), Ok(decoded(1)).into())).unwrap();
             c.pump(|_, _| (i as u32, 60 * 1024 * 1024));
         }
         c.map.get_mut("old").unwrap().used_ms = 20_000;
         c.map.get_mut("mid").unwrap().used_ms = 70_000;
         c.map.get_mut("new").unwrap().used_ms = c.now_ms();
         // a fourth one tips it over 160 MB (4 x 60 = 240 MB): the oldest go until 3/4 of the budget is left
-        c.tx.send(("extra".to_string(), Ok(decoded(1)))).unwrap();
+        c.tx.send(("extra".to_string(), Ok(decoded(1)).into())).unwrap();
         c.pump(|_, _| (9, 60 * 1024 * 1024));
         assert!(c.decoded_bytes <= budget(), "{}", c.decoded_bytes);
         assert!(c.peek("old").is_none() && c.peek("mid").is_none(), "least recently used go first");
@@ -643,7 +755,7 @@ mod tests {
     fn a_transient_failure_is_fetched_again_after_its_cooldown() {
         let (_rt, mut c) = cache();
         assert!(matches!(c.get("u", (28, 28)), State::Loading));
-        c.tx.send(("u".into(), Err(("connection reset".into(), Fail::Transient)))).unwrap();
+        c.tx.send(("u".into(), Err(("connection reset".into(), Fail::Transient)).into())).unwrap();
         c.pump(|_, _| (0, 0));
         assert!(is_failed(&c, "u") && c.failed == 1);
         // asked for every frame meanwhile: no new fetch
@@ -653,7 +765,7 @@ mod tests {
         assert!(matches!(c.get("u", (28, 28)), State::Loading), "a blip never leaves an image blank for good");
         assert_eq!(c.failed, 0);
         // and this time it loads
-        c.tx.send(("u".into(), Ok(decoded(1)))).unwrap();
+        c.tx.send(("u".into(), Ok(decoded(1)).into())).unwrap();
         c.pump(|_, _| (1, 16));
         assert!(matches!(c.get("u", (2, 2)), State::Ready(_)));
     }
@@ -662,7 +774,7 @@ mod tests {
     fn a_permanent_failure_waits_much_longer() {
         let (_rt, mut c) = cache();
         c.get("gone", (28, 28));
-        c.tx.send(("gone".into(), Err(("HTTP status client error (404 Not Found)".into(), Fail::Permanent)))).unwrap();
+        c.tx.send(("gone".into(), Err(("HTTP status client error (404 Not Found)".into(), Fail::Permanent)).into())).unwrap();
         c.pump(|_, _| (0, 0));
         advance(&mut c, RETRY_TRANSIENT_MS * 2);
         assert!(matches!(c.get("gone", (28, 28)), State::Failed), "a 404 is not asked for again a minute later");
@@ -675,12 +787,12 @@ mod tests {
         let (_rt, mut c) = cache();
         let small = Decoded { w: 64, h: 64, fw: 16, fh: 16, frames: vec![(vec![0u8; 16 * 16 * 4], 50)], source_bytes: 0, cut: false };
         c.get("e", (16, 16));
-        c.tx.send(("e".into(), Ok(small))).unwrap();
+        c.tx.send(("e".into(), Ok(small).into())).unwrap();
         c.pump(|_, _| (1, 1024));
         // drawn bigger (the popup): a bigger decode starts, the small one is still drawn
         assert!(matches!(c.get("e", (64, 64)), State::Ready(_)));
         assert!(c.map["e"].upgrading);
-        c.tx.send(("e".into(), Err(("timed out".into(), Fail::Transient)))).unwrap();
+        c.tx.send(("e".into(), Err(("timed out".into(), Fail::Transient)).into())).unwrap();
         c.pump(|_, _| (0, 0));
         assert!(matches!(c.get("e", (64, 64)), State::Ready(_)));
         assert!(!c.map["e"].upgrading, "no new fetch right after a failed one");
@@ -706,6 +818,79 @@ mod tests {
         assert_eq!(decode(&png, (0, 0), false).unwrap().fw, 112);
         assert_eq!(decode(&png, (500, 500), false).unwrap().fw, 112);
         assert_eq!(stored_size(112, 56, (28, 28)), (28, 14));
+    }
+
+    #[test]
+    fn a_request_dropped_from_the_queue_is_loaded_again_when_asked_for() {
+        let (_rt, mut c) = cache();
+        assert!(matches!(c.get("u", (28, 28)), State::Loading));
+        c.tx.send(("u".into(), Outcome::Dropped)).unwrap();
+        c.pump(|_, _| (0, 0));
+        assert!(c.peek("u").is_none(), "forgotten, not failed");
+        assert_eq!(c.failed, 0);
+        assert!(matches!(c.get("u", (28, 28)), State::Loading));
+        // a dropped bigger decode keeps the small image and may start again on the next ask
+        c.tx.send(("e".into(), Ok(Decoded { w: 64, h: 64, fw: 16, fh: 16, frames: vec![(vec![0u8; 16 * 16 * 4], 50)], source_bytes: 0, cut: false }).into())).unwrap();
+        c.pump(|_, _| (1, 1024));
+        c.get("e", (64, 64));
+        assert!(c.map["e"].upgrading);
+        c.tx.send(("e".into(), Outcome::Dropped)).unwrap();
+        c.pump(|_, _| (0, 0));
+        assert!(matches!(c.peek("e"), Some(State::Ready(_))) && !c.map["e"].upgrading);
+        c.get("e", (64, 64));
+        assert!(c.map["e"].upgrading);
+    }
+
+    /// Pumps until `url` is no longer loading (or 10 s pass).
+    fn wait_ready(c: &mut ImageCache<u32>, url: &str) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(10) {
+            c.pump(|_, d| (1, d.frames.len() as u64 * 16));
+            match c.get(url, (28, 28)) {
+                State::Ready(_) => return true,
+                State::Failed => return false,
+                State::Loading => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn a_downloaded_image_is_kept_on_disk_and_read_from_there_next_time() {
+        use std::sync::atomic::Ordering;
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 200, 0, 255])).write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let (url, hits) = rt.block_on(fetch::tests::serve_with(fetch::tests::Mode::Trickle { pieces: 3, gap_ms: 10 }, Arc::new(png.clone())));
+        let dir = std::env::temp_dir().join(format!("agu-img-cache-test-{:08x}", rand::random::<u32>()));
+
+        let mut first = ImageCache::<u32>::new(rt.handle().clone(), reqwest::Client::new(), Arc::new(|| {}));
+        first.set_disk_dir(dir.clone());
+        assert!(wait_ready(&mut first, &url), "loads from the network");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let disk = disk::DiskCache::new(dir.clone(), disk::CAP_BYTES);
+        let t0 = Instant::now();
+        while disk.read(&url).is_none() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(disk.read(&url).as_deref(), Some(&png[..]), "the encoded bytes are on disk");
+
+        // the next start: from disk, no request; the cropped copy reads the same file
+        let mut next = ImageCache::<u32>::new(rt.handle().clone(), reqwest::Client::new(), Arc::new(|| {}));
+        next.set_disk_dir(dir.clone());
+        assert!(wait_ready(&mut next, &url));
+        assert!(wait_ready(&mut next, &format!("{url}#square")));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no second download");
+
+        // bytes on disk that do not decode are dropped and fetched again
+        disk.remove(&url);
+        assert!(disk.write(&url, b"not an image"));
+        let mut third = ImageCache::<u32>::new(rt.handle().clone(), reqwest::Client::new(), Arc::new(|| {}));
+        third.set_disk_dir(dir.clone());
+        assert!(wait_ready(&mut third, &url));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

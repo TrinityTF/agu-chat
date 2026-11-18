@@ -58,9 +58,14 @@ fn upload(url: &str, d: &Decoded) -> (Arc<RenderImage>, u64) {
 impl Images {
     /// Wake: called on background threads whenever a fetch finished; the returned receiver is drained by the
     /// UI task that calls `pump`.
-    pub fn new(net: &Net, wake: agu_chat_core::Wake) -> Rc<Images> {
+    /// `data_dir` (empty: none) holds the downloaded bytes in `image-cache/`, so the next start reads them from disk.
+    pub fn new(net: &Net, wake: agu_chat_core::Wake, data_dir: &std::path::Path) -> Rc<Images> {
+        let mut cache = ImageCache::new(net.rt.handle().clone(), net.client.clone(), wake);
+        if !data_dir.as_os_str().is_empty() {
+            cache.set_disk_dir(data_dir.join("image-cache"));
+        }
         Rc::new(Images {
-            cache: RefCell::new(ImageCache::new(net.rt.handle().clone(), net.client.clone(), wake)),
+            cache: RefCell::new(cache),
             animate: Cell::new(true),
             due: Cell::new(None),
             inboxes: RefCell::new(Vec::new()),
