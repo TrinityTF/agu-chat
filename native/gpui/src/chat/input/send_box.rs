@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use agu_chat_core::chat_rules::{ChatGate, GateLevel};
 use agu_chat_core::protocol::{Platform, SourceRef};
 use gpui::{
     div, point, prelude::*, px, relative, AnyElement, ClickEvent, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -66,6 +67,40 @@ pub struct SendSource {
     pub pending: bool,
     pub caps: ModCaps,
     pub inventory: Arc<Inventory>,
+    /// the channel's chat modes as they apply to this account (subscribers-only, slow mode, ...)
+    pub gate: Option<ChatGate>,
+}
+
+impl SendSource {
+    /// A chat mode keeps this account from posting here (it is not a target of "All chats", and the box locks).
+    pub fn locked(&self) -> bool {
+        self.gate.as_ref().is_some_and(|g| g.level == GateLevel::Blocked)
+    }
+}
+
+/// The Twitch account in a channel as far as the app can tell: the broadcaster and mods (mod rights), VIPs and
+/// staff (the badges on its own latest line there) are exempt; those badges also show a subscription. Twitch says
+/// nothing about follows here, so followers-only never locks the box (Twitch refuses the message if it applies).
+pub fn twitch_viewer(broadcaster: bool, is_mod: bool, own_badges: Option<&str>) -> agu_chat_core::chat_rules::ChatViewer {
+    let names = own_badges.map(crate::chat::mod_caps::badge_names).unwrap_or_default();
+    let has = |b: &str| names.contains(b);
+    agu_chat_core::chat_rules::ChatViewer {
+        exempt: broadcaster || is_mod || ["broadcaster", "moderator", "vip", "staff", "admin", "global_mod"].iter().any(|b| has(b)),
+        subscribed: (has("subscriber") || has("founder")).then_some(true),
+        ..Default::default()
+    }
+}
+
+/// The notices above the box: the target's gate, or each target's (named by platform) when sending to several.
+pub fn gate_notices(targets: &[&SendSource]) -> Vec<ChatGate> {
+    let several = targets.len() > 1;
+    targets
+        .iter()
+        .filter_map(|s| {
+            let g = s.gate.clone()?;
+            Some(if several { ChatGate { text: format!("{}: {}", icons::platform_label(s.source.platform), g.text), ..g } } else { g })
+        })
+        .collect()
 }
 
 impl PartialEq for SendSource {
@@ -78,6 +113,7 @@ impl PartialEq for SendSource {
             && self.pending == o.pending
             && self.caps == o.caps
             && Arc::ptr_eq(&self.inventory, &o.inventory)
+            && self.gate == o.gate
     }
 }
 
@@ -236,7 +272,7 @@ impl SendBox {
             if eff != self.target && self.reply.is_none() {
                 self.target = eff;
             }
-            let (ph, disabled) = (self.placeholder(), self.sendable().is_empty());
+            let (ph, disabled) = (self.placeholder(), self.sendable().is_empty() || self.locked().is_some());
             self.input.update(cx, |i, cx| {
                 i.set_placeholder(&ph, cx);
                 i.set_disabled(disabled, cx);
@@ -249,9 +285,32 @@ impl SendBox {
         self.sources.iter().filter(|s| SENDABLE.contains(&s.source.platform) && s.can_send).collect()
     }
 
-    /// What "All chats" reaches: a whisper goes to one person, never along with a broadcast.
+    /// What "All chats" reaches: a whisper goes to one person, never along with a broadcast; a chat whose mode keeps
+    /// this account out is skipped.
     fn broadcast(&self) -> Vec<&SendSource> {
-        self.sendable().into_iter().filter(|s| !is_whisper(&s.source)).collect()
+        self.sendable().into_iter().filter(|s| !is_whisper(&s.source) && !s.locked()).collect()
+    }
+
+    /// The chosen target's chat mode keeps this account out: the box is locked with this reason.
+    fn locked(&self) -> Option<ChatGate> {
+        if self.effective() == ALL {
+            return None;
+        }
+        self.single().filter(|s| s.locked()).and_then(|s| s.gate.clone())
+    }
+
+    /// What goes in the strip above the box: the target's mode hint or lock, or, sending to all chats, every chat's
+    /// (the locked ones are the ones skipped).
+    fn notices(&self) -> Vec<ChatGate> {
+        if self.effective() == ALL {
+            let all: Vec<&SendSource> = self.sendable().into_iter().filter(|s| !is_whisper(&s.source)).collect();
+            return gate_notices(&all);
+        }
+        // a locked target says so in the box itself
+        if self.locked().is_some() {
+            return Vec::new();
+        }
+        gate_notices(&self.targets())
     }
 
     /// A reply pins the target: its id only means something in the chat it came from.
@@ -265,7 +324,8 @@ impl SendBox {
         if self.target == ALL && self.broadcast().len() > 1 {
             return ALL.into();
         }
-        sendable.iter().find(|s| s.sk == self.target).or(sendable.first()).map(|s| s.sk.clone()).unwrap_or_default()
+        // by default a chat this account can post in, before one whose mode keeps it out
+        sendable.iter().find(|s| s.sk == self.target).or(sendable.iter().find(|s| !s.locked())).or(sendable.first()).map(|s| s.sk.clone()).unwrap_or_default()
     }
 
     fn targets(&self) -> Vec<&SendSource> {
@@ -315,6 +375,9 @@ impl SendBox {
                 .iter()
                 .find_map(|s| s.read_only_reason.clone().filter(|r| !r.is_empty()))
                 .unwrap_or_else(|| if self.sources.iter().any(|s| s.pending) { "Connecting...".into() } else { "Chat is read-only".into() });
+        }
+        if let Some(g) = self.locked() {
+            return g.text;
         }
         if let Some(r) = &self.reply {
             return format!("Reply to @{}", r.user);
@@ -536,6 +599,10 @@ impl SendBox {
         let t = raw.trim().to_string();
         let targets: Vec<SendSource> = self.targets().into_iter().cloned().collect();
         if t.is_empty() || self.sending || targets.is_empty() {
+            return;
+        }
+        if let Some(g) = self.locked() {
+            self.toast(g.text, true, cx);
             return;
         }
         let body: String = t.chars().take(500).collect();
@@ -895,6 +962,7 @@ impl SendBox {
                     .child(icons::source_icon(&s.source, 14., true))
                     .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(if is_whisper(&s.source) { short_name(&s.source) } else { s.source.channel.clone() })))
                     .when(!can, |d| d.child(div().text_size(px(10.)).text_color(c(theme::FAINT)).child(if s.logged_out { "not logged in" } else if off { "offline" } else { "read-only" })))
+                    .when(can && s.locked(), |d| d.child(div().flex_none().text_color(c(theme::FAINT)).child(icon(icons::LOCK, 12.0))))
                     .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
                         if can {
                             this.target = sk.clone();
@@ -936,6 +1004,7 @@ impl Render for SendBox {
         self.aids(window, cx);
         self.sync_emote_images(cx);
         let disabled = self.sendable().is_empty();
+        let locked = self.locked();
         let eff = self.effective();
         let single_source = self.single().map(|s| s.source.clone());
         let show_target = self.sources.iter().filter(|s| SENDABLE.contains(&s.source.platform)).count() > 1 || self.sendable().len() > 1;
@@ -996,6 +1065,25 @@ impl Render for SendBox {
             );
         }
 
+        for g in self.notices() {
+            let lock = g.level != GateLevel::Info;
+            root = root.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .border_b_1()
+                    .border_color(c(theme::LINE))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .text_color(c(if lock { theme::MUTED } else { theme::FAINT }))
+                    .when(lock, |d| d.child(div().flex_none().child(icon(icons::LOCK, 12.0))))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(SharedString::from(g.text))),
+            );
+        }
+
         let entity = cx.entity();
         let pick_auto = {
             let e = entity.clone();
@@ -1021,7 +1109,7 @@ impl Render for SendBox {
         if self.mentions.state.is_none() {
             self.mention_at = None;
         }
-        if !disabled {
+        if !disabled && locked.is_none() {
             if let Some(a) = &self.auto {
                 if self.auto_at != Some((a.start, a.idx)) {
                     self.auto_at = Some((a.start, a.idx));
@@ -1103,6 +1191,10 @@ impl Render for SendBox {
             );
             row = row.child(t);
         }
+        if locked.is_some() {
+            // the box's placeholder says why
+            row = row.child(div().flex_none().pb(px(8.)).text_color(c(theme::MUTED)).child(icon(icons::LOCK, 14.0)));
+        }
         row = row.child(
             div()
                 .flex_1()
@@ -1111,7 +1203,7 @@ impl Render for SendBox {
                 .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| this.on_capture_key(ev, w, cx)))
                 .child(self.input.clone()),
         );
-        let can_send = !(disabled || self.sending || !has_text);
+        let can_send = !(disabled || locked.is_some() || self.sending || !has_text);
         row = row.child(
             div()
                 .id("send-btn")
@@ -1137,6 +1229,66 @@ impl Render for SendBox {
         );
         let _ = (MouseButton::Left, HashMap::<u8, u8>::new());
         root.child(row)
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use agu_chat_core::chat_rules::{chat_gate, ChatModes, ChatViewer};
+
+    fn src(platform: Platform, gate: Option<ChatGate>) -> SendSource {
+        SendSource {
+            sk: format!("{platform:?}"),
+            source: SourceRef { platform, channel: "xqc".into() },
+            can_send: true,
+            read_only_reason: None,
+            live: Some(true),
+            logged_out: false,
+            pending: false,
+            caps: ModCaps::default(),
+            inventory: Arc::new(Inventory::default()),
+            gate,
+        }
+    }
+
+    fn gate(level: GateLevel, text: &str) -> Option<ChatGate> {
+        Some(ChatGate { level, text: text.into() })
+    }
+
+    #[test]
+    fn twitch_viewers_from_mod_rights_and_own_badges() {
+        assert!(twitch_viewer(true, false, None).exempt);
+        assert!(twitch_viewer(false, true, None).exempt);
+        assert!(twitch_viewer(false, false, Some("vip/1,subscriber/12")).exempt);
+        let sub = twitch_viewer(false, false, Some("subscriber/12,premium/1"));
+        assert_eq!((sub.exempt, sub.subscribed, sub.follows), (false, Some(true), None));
+        assert_eq!(twitch_viewer(false, false, Some("founder/0")).subscribed, Some(true));
+        // never chatted here: nothing known, so nothing locks
+        let v = twitch_viewer(false, false, None);
+        assert_eq!(v, ChatViewer::default());
+        let subs = ChatModes { subs_only: true, ..Default::default() };
+        assert_eq!(chat_gate(&subs, &v, 0).map(|g| g.level), Some(GateLevel::Restricted));
+        assert_eq!(chat_gate(&subs, &sub, 0).map(|g| g.level), Some(GateLevel::Info));
+    }
+
+    #[test]
+    fn a_locked_chat_is_one_the_box_cannot_post_to() {
+        assert!(src(Platform::Kick, gate(GateLevel::Blocked, "Followers-only chat: follow for 1 h first")).locked());
+        assert!(!src(Platform::Kick, gate(GateLevel::Restricted, "Subscribers-only chat")).locked());
+        assert!(!src(Platform::Kick, gate(GateLevel::Info, "Slow mode 5s")).locked());
+        assert!(!src(Platform::Kick, None).locked());
+    }
+
+    #[test]
+    fn notices_name_the_platform_only_for_several_targets() {
+        let kick = src(Platform::Kick, gate(GateLevel::Blocked, "Followers-only chat: follow for 1 h first"));
+        let twitch = src(Platform::Twitch, gate(GateLevel::Info, "Slow mode 5s"));
+        let yt = src(Platform::Youtube, None);
+        let one = gate_notices(&[&twitch]);
+        assert_eq!(one, vec![ChatGate { level: GateLevel::Info, text: "Slow mode 5s".into() }]);
+        let all: Vec<String> = gate_notices(&[&twitch, &kick, &yt]).into_iter().map(|g| g.text).collect();
+        assert_eq!(all, vec!["Twitch: Slow mode 5s".to_string(), "Kick: Followers-only chat: follow for 1 h first".to_string()]);
     }
 }
 

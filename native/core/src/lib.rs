@@ -2,6 +2,7 @@
 //! `protocol` is the contract the UI codes against; `Backend` implements it.
 pub mod autostart;
 pub mod backend;
+pub mod chat_rules;
 pub mod highlight_rules;
 pub mod images;
 pub mod kick;

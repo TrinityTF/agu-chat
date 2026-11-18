@@ -445,6 +445,8 @@ pub struct PollResult {
     pub timeout_ms: u64,
     /// the "Live chat" view (every message) when this answer is still on "Top chat": the next poll should use it
     pub live_chat: Option<String>,
+    /// the action panel's restriction text, when the answer has one ("Members-only mode. ...")
+    pub panel: Option<String>,
 }
 
 /// One poll. Returns the next continuation, or None when the chat has ended.
@@ -470,6 +472,7 @@ pub fn poll_from_json(j: &Value) -> Option<PollResult> {
         continuation: next.as_ref().map(|n| js_string(&n["continuation"])).unwrap_or_default(),
         timeout_ms: next.as_ref().map(timeout_of).unwrap_or(0),
         live_chat: live_chat_switch(cc),
+        panel: crate::youtube::chat_rules::panel_text(cc),
     })
 }
 

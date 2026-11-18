@@ -32,7 +32,7 @@ icons! {
     CHANNEL_POINTS => "channel-points",
     TWITCH => "platform-twitch", KICK => "platform-kick", YOUTUBE => "platform-youtube", RUMBLE => "platform-rumble",
     PLATFORM_X => "platform-x",
-    MAIL => "mail",
+    MAIL => "mail", LOCK => "lock",
 }
 
 /// An icon element: a square of `size` px (`className="h-3.5 w-3.5"` = `icon(X, 14.0)`).

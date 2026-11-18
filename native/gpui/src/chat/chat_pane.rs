@@ -37,10 +37,10 @@ use super::search::{is_empty_query, match_row, parse_search};
 use super::services::Services;
 use super::store::{source_key, ChatStore};
 use super::twitch::cosmetics::{ChatterStyle, StyleLookup};
-use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
+use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, set_retry_delay, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
 use super::twitch::events::notice_visible;
 use super::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, EMOTE_SET_UPDATE, USER_UPDATE};
-use super::twitch::use_twitch_data::{load_badges, load_kick_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
+use super::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_kick_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
 use super::types::*;
 use crate::layout::tree::{is_whisper, is_whisper_key};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
@@ -798,11 +798,13 @@ impl ChatPane {
                         cx.spawn(async move |this, cx| {
                             if let Some((map, cid)) = load_badges(&bridge, &s2, &sk2).await {
                                 let _ = this.update(cx, |p, cx| {
-                                    if let Some(cid) = cid {
-                                        p.store.set_channel_id(&sk2, &cid);
-                                    }
+                                    let new_cid = cid.is_some_and(|cid| p.store.set_channel_id(&sk2, &cid));
                                     p.twitch.entry(sk2.clone()).or_default().badge_map = Arc::new(map);
                                     p.data_changed(cx);
+                                    if new_cid {
+                                        // the emote sets are keyed by it: start them now, not with the next frame
+                                        p.start_loads(cx);
+                                    }
                                 });
                             }
                         })
@@ -844,17 +846,7 @@ impl ChatPane {
                     }
                     if let Some(cid) = channel_id {
                         if self.requested.insert(format!("emotes:{sk}:{cid}")) {
-                            let sk2 = sk.clone();
-                            let task = self.svc.net.run(load_provider_sets(self.svc.net.client.clone(), cid));
-                            cx.spawn(async move |this, cx| {
-                                if let Some(sets) = task.await {
-                                    let _ = this.update(cx, |p, cx| {
-                                        p.twitch.entry(sk2).or_default().provider_sets = Some(Arc::new(sets));
-                                        p.data_changed(cx);
-                                    });
-                                }
-                            })
-                            .detach();
+                            self.load_emote_sets(sk.clone(), cid, 0, cx);
                         }
                     }
                 }
@@ -926,6 +918,51 @@ impl ChatPane {
                     p.data_changed(cx);
                 });
             }
+        })
+        .detach();
+    }
+
+    /// A Twitch channel's 7TV / BTTV / FFZ sets. The first try shows what is cached at once (however old) while the
+    /// network refreshes it; a refresh that did not get everything (a provider down or slow at startup) is tried
+    /// again with growing waits. Each arrival rebuilds the rows already in the list, so lines that came in before
+    /// the sets get their emotes too.
+    fn load_emote_sets(&mut self, sk: String, cid: String, attempt: u32, cx: &mut Context<Self>) {
+        let client = self.svc.net.client.clone();
+        let cached = (attempt == 0).then(|| self.svc.net.run(load_cached_provider_sets(client.clone(), cid.clone())));
+        let task = self.svc.net.run(load_provider_sets(client, cid.clone()));
+        cx.spawn(async move |this, cx| {
+            let same_channel = |p: &ChatPane| p.store.source(&sk).and_then(|s| s.channel_id.as_deref()) == Some(cid.as_str());
+            if let Some(cached) = cached {
+                if let Some(Some(sets)) = cached.await {
+                    let _ = this.update(cx, |p, cx| {
+                        if same_channel(p) && p.twitch.get(&sk).map_or(true, |d| d.provider_sets.is_none()) {
+                            p.twitch.entry(sk.clone()).or_default().provider_sets = Some(Arc::new(sets));
+                            p.data_changed(cx);
+                        }
+                    });
+                }
+            }
+            let Some((sets, complete)) = task.await else { return };
+            let applied = this
+                .update(cx, |p, cx| {
+                    if !same_channel(p) {
+                        return false;
+                    }
+                    p.twitch.entry(sk.clone()).or_default().provider_sets = Some(Arc::new(sets));
+                    p.data_changed(cx);
+                    true
+                })
+                .unwrap_or(false);
+            if complete || !applied {
+                return;
+            }
+            let Some(wait) = set_retry_delay(attempt) else { return };
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |p, cx| {
+                if same_channel(p) {
+                    p.load_emote_sets(sk.clone(), cid.clone(), attempt + 1, cx);
+                }
+            });
         })
         .detach();
     }
@@ -1028,9 +1065,32 @@ impl ChatPane {
                 pending: conn.map(|c| c.state == "connecting").unwrap_or(true),
                 caps: self.twitch.get(&st.sk).map(|d| d.caps.clone()).unwrap_or_default(),
                 inventory: inv,
+                gate: self.chat_gate(st),
             });
         }
         out
+    }
+
+    /// The source's chat modes as they apply to the logged-in account. Kick says who the account is in the channel;
+    /// on Twitch it is pieced together from the mod rights and the badges on the account's own latest line there;
+    /// YouTube says nothing about the viewer.
+    fn chat_gate(&self, st: &super::store::SourceState) -> Option<agu_chat_core::chat_rules::ChatGate> {
+        let conn = st.conn.as_ref()?;
+        let modes = conn.chat_modes.as_ref()?;
+        // who the account is only matters for the modes that keep people out
+        let gated = modes.subs_only || modes.members_only || modes.followers_min.is_some() || modes.account_age_min.is_some();
+        let viewer = match st.source.platform {
+            Platform::Twitch if gated => {
+                let caps = self.twitch.get(&st.sk).map(|d| d.caps.clone()).unwrap_or_default();
+                let me_login = self.me_login_lower();
+                let broadcaster = caps.is_broadcaster.unwrap_or(!me_login.is_empty() && st.source.channel.to_lowercase().trim_start_matches('#') == me_login);
+                let own = self.last_line_of(&st.sk, &self.me_id());
+                super::input::send_box::twitch_viewer(broadcaster, caps.is_mod == Some(true), own.as_ref().map(|m| m.badges.as_str()))
+            }
+            _ => conn.chat_viewer.clone().unwrap_or_default(),
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        agu_chat_core::chat_rules::chat_gate(modes, &viewer, now)
     }
 
     fn data_changed(&mut self, cx: &mut Context<Self>) {
@@ -1326,59 +1386,26 @@ impl ChatPane {
 
     fn apply_rows(&mut self, new: Vec<RowRef>) {
         self.settle = 3;
-        let n_old = self.shown.len();
-        let n_new = new.len();
-        let reset = |this: &mut Self, new: Vec<RowRef>| {
-            this.shown = new.into_iter().map(|row| ShownRow { row, built: RefCell::new(None) }).collect();
-            this.list_state.reset(this.shown.len());
-        };
-        if n_old == 0 || n_new == 0 {
-            reset(self, new);
+        if self.shown.is_empty() {
+            self.shown = new.into_iter().map(|row| ShownRow { row, built: RefCell::new(None) }).collect();
+            self.list_state.reset(self.shown.len());
             return;
         }
-        let off = self.shown.iter().position(|o| o.row.key == new[0].key);
-        let Some(off) = off else {
-            reset(self, new);
-            return;
-        };
-        let overlap = (n_old - off).min(n_new);
-        for i in 0..overlap {
-            if self.shown[off + i].row.key != new[i].key {
-                reset(self, new);
-                return;
+        // Match old and new rows by key, whatever changed: trimmed at the top, appended, an out-of-order row put in
+        // the middle (a split's other chat, a late line), a row removed. A scrolled-up view keeps its row through all
+        // of it (before, anything but trim/append reset the list, which snapped a paused busy chat back down).
+        let new_ix: HashMap<&str, usize> = new.iter().enumerate().map(|(i, r)| (r.key.as_str(), i)).collect();
+        let map: Vec<Option<(usize, bool)>> = self.shown.iter().map(|o| new_ix.get(o.row.key.as_str()).map(|&j| (j, Arc::ptr_eq(&o.row, &new[j])))).collect();
+        drop(new_ix);
+        let mut old: Vec<Option<ShownRow>> = std::mem::take(&mut self.shown).into_iter().map(Some).collect();
+        let mut reuse: Vec<Option<ShownRow>> = (0..new.len()).map(|_| None).collect();
+        for (i, m) in map.iter().enumerate() {
+            if let Some((j, true)) = m {
+                reuse[*j] = old[i].take();
             }
         }
-        // the structure matches: trim at the front, replace changed rows, drop/append at the end
-        let old = std::mem::take(&mut self.shown);
-        let mut next: Vec<ShownRow> = Vec::with_capacity(n_new);
-        let mut changed: Vec<usize> = Vec::new();
-        let mut old_iter: Vec<Option<ShownRow>> = old.into_iter().map(Some).collect();
-        for (i, row) in new.into_iter().enumerate() {
-            if i < overlap {
-                let o = old_iter[off + i].take().unwrap();
-                if Arc::ptr_eq(&o.row, &row) {
-                    next.push(o);
-                } else {
-                    changed.push(i);
-                    next.push(ShownRow { row, built: RefCell::new(None) });
-                }
-            } else {
-                next.push(ShownRow { row, built: RefCell::new(None) });
-            }
-        }
-        self.shown = next;
-        if off > 0 {
-            self.list_state.splice(0..off, 0);
-        }
-        for i in changed {
-            self.list_state.splice(i..i + 1, 1);
-        }
-        if n_old - off > overlap {
-            self.list_state.splice(overlap..(n_old - off), 0);
-        }
-        if n_new > overlap {
-            self.list_state.splice(overlap..overlap, n_new - overlap);
-        }
+        self.shown = new.into_iter().zip(reuse).map(|(row, kept)| kept.unwrap_or(ShownRow { row, built: RefCell::new(None) })).collect();
+        self.list_state.remap(self.shown.len(), &map);
     }
 
     /// Every row's built form is stale (settings, env): drop the caches and re-measure, keeping the scroll spot.

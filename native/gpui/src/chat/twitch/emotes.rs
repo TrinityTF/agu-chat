@@ -95,47 +95,118 @@ pub struct EmoteSets {
 pub const EMOTE_CHANNEL_TTL_MS: i64 = 3_600_000;
 pub const EMOTE_GLOBAL_TTL_MS: i64 = 6 * 3_600_000;
 
+/// Entries not refreshed for this long are dropped when the file is loaded (channels not opened in a week); the
+/// file otherwise only grew, to ~10 MB in real use.
+pub const CACHE_PRUNE_MS: i64 = 7 * 24 * 3_600_000;
+
 struct Cache {
     path: Option<PathBuf>,
     map: serde_json::Map<String, Value>,
     dirty: bool,
+    /// the file is still being read (in the background): it must not be written over yet
+    loading: bool,
+    /// forgotten while loading: the file's copy must not come back
+    forgotten: std::collections::HashSet<String>,
 }
 
 fn cache() -> &'static Mutex<Cache> {
     static C: OnceLock<Mutex<Cache>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(Cache { path: None, map: Default::default(), dirty: false }))
+    C.get_or_init(|| Mutex::new(Cache { path: None, map: Default::default(), dirty: false, loading: false, forgotten: Default::default() }))
+}
+
+/// true once the cache file was read (or there is none to read)
+fn ready() -> &'static tokio::sync::watch::Sender<bool> {
+    static R: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
+    R.get_or_init(|| tokio::sync::watch::channel(true).0)
+}
+
+/// Wait until the cache file is loaded (it is read off the UI thread at startup). Readers that skip this just miss.
+pub async fn cache_ready() {
+    let mut rx = ready().subscribe();
+    let _ = rx.wait_for(|v| *v).await;
 }
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// Point the cache at `<data dir>/emotes-cache.json` and load it.
+/// The entries of a cache file worth keeping: well-formed and refreshed within `CACHE_PRUNE_MS`.
+fn parse_cache_file(bytes: &[u8], now: i64) -> serde_json::Map<String, Value> {
+    let mut map = match serde_json::from_slice::<Value>(bytes) {
+        Ok(Value::Object(m)) => m,
+        _ => Default::default(),
+    };
+    map.retain(|_, e| e.get("at").and_then(|a| a.as_i64()).is_some_and(|at| now - at < CACHE_PRUNE_MS));
+    map
+}
+
+/// Point the cache at `<data dir>/emotes-cache.json` and load it on a background thread (the file is megabytes of
+/// JSON; parsing it on the UI thread held up startup). `cache_ready()` resolves when it is in.
 pub fn init_cache(dir: PathBuf) {
     let path = dir.join("emotes-cache.json");
-    let map = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default();
-    let mut c = cache().lock().unwrap();
-    c.path = Some(path);
-    c.map = map;
+    {
+        let mut c = cache().lock().unwrap();
+        c.path = Some(path.clone());
+        c.loading = true;
+    }
+    ready().send_replace(false);
+    let load = move || {
+        let map = std::fs::read(&path).map(|b| parse_cache_file(&b, now_ms())).unwrap_or_default();
+        let mut c = cache().lock().unwrap();
+        let forgotten = std::mem::take(&mut c.forgotten);
+        for (k, v) in map {
+            // anything written meanwhile is newer than the file's copy
+            if !forgotten.contains(&k) {
+                c.map.entry(k).or_insert(v);
+            }
+        }
+        c.loading = false;
+        drop(c);
+        ready().send_replace(true);
+    };
+    if let Err(e) = std::thread::Builder::new().name("agu-emote-cache".into()).spawn(load) {
+        // no thread: nothing gets loaded, but nobody waits forever either
+        eprintln!("[emotes] cache load thread: {e}");
+        cache().lock().unwrap().loading = false;
+        ready().send_replace(true);
+    }
+}
+
+fn entry_data(e: &Value, ttl_ms: Option<i64>) -> Option<&Value> {
+    if e.get("v")?.as_i64()? != 1 {
+        return None;
+    }
+    let at = e.get("at")?.as_i64()?;
+    if ttl_ms.is_some_and(|ttl| now_ms() - at >= ttl) {
+        return None;
+    }
+    e.get("data")
 }
 
 /// readLsCache: the entry's data while it is fresh.
 pub fn read_cache(key: &str, ttl_ms: i64) -> Option<Value> {
     let c = cache().lock().unwrap();
-    let e = c.map.get(key)?;
-    if e.get("v")?.as_i64()? != 1 {
-        return None;
-    }
-    let at = e.get("at")?.as_i64()?;
-    if now_ms() - at >= ttl_ms {
-        return None;
-    }
-    e.get("data").cloned()
+    entry_data(c.map.get(key)?, Some(ttl_ms)).cloned()
+}
+
+/// The entry's data however old it is (shown at once while a refresh runs, or kept when the refresh fails).
+pub fn read_cache_any(key: &str) -> Option<Value> {
+    let c = cache().lock().unwrap();
+    entry_data(c.map.get(key)?, None).cloned()
+}
+
+/// Whether the entry is there and fresh (without copying it).
+pub fn cache_fresh(key: &str, ttl_ms: i64) -> bool {
+    let c = cache().lock().unwrap();
+    c.map.get(key).and_then(|e| entry_data(e, Some(ttl_ms))).is_some()
 }
 
 /// Drop an entry (its data went stale: the next load fetches it again).
 pub fn forget_cache(key: &str) {
     let mut c = cache().lock().unwrap();
+    if c.loading {
+        c.forgotten.insert(key.to_string());
+    }
     if c.map.remove(key).is_some() {
         c.dirty = true;
     }
@@ -147,34 +218,109 @@ pub fn write_cache(key: &str, data: &Value) {
     c.dirty = true;
 }
 
-/// Write the cache file if it changed (called after a batch of fetches).
+/// Write the cache file if it changed (called after a batch of fetches). The map is copied under the lock and
+/// written outside it, through a temp file, so readers never wait on the disk and a crash never leaves half a file.
 pub fn flush_cache() {
-    let mut c = cache().lock().unwrap();
-    if !c.dirty {
-        return;
-    }
-    c.dirty = false;
-    if let (Some(p), Ok(s)) = (c.path.clone(), serde_json::to_vec(&Value::Object(c.map.clone()))) {
-        let _ = std::fs::write(p, s);
+    let (path, map) = {
+        let mut c = cache().lock().unwrap();
+        // still loading: writing now would replace the file with the few entries fetched so far
+        if !c.dirty || c.loading {
+            return;
+        }
+        let Some(path) = c.path.clone() else { return };
+        c.dirty = false;
+        (path, c.map.clone())
+    };
+    if let Ok(bytes) = serde_json::to_vec(&Value::Object(map)) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
+/// How a set's cached entry is used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheMode {
+    /// a fresh entry, else the network (the old entry if that fails)
+    Normal,
+    /// the network (the old entry if that fails): a live update said it changed
+    Fresh,
+    /// only what is cached, however old: shown at once on startup while the network catches up
+    CacheOnly,
+}
+
+#[allow(dead_code)] // the plain forms, for sets that need no startup / retry handling
 async fn fetch_json_cached(client: &reqwest::Client, key: &str, ttl: i64, url: &str) -> Option<Value> {
     fetch_json(client, key, ttl, url, false).await
 }
 
 /// `fresh` skips the cached entry (the answer still replaces it).
+#[allow(dead_code)]
 async fn fetch_json(client: &reqwest::Client, key: &str, ttl: i64, url: &str, fresh: bool) -> Option<Value> {
-    if let Some(v) = (!fresh).then(|| read_cache(key, ttl)).flatten() {
-        return Some(v);
+    fetch_json_mode(client, key, ttl, url, if fresh { CacheMode::Fresh } else { CacheMode::Normal }).await
+}
+
+/// A provider answer through the cache. A 404 (the channel has no account there) is an answer too and is cached
+/// as `null`; any other failure falls back to the old entry and leaves it un-refreshed, so the caller tries again.
+async fn fetch_json_mode(client: &reqwest::Client, key: &str, ttl: i64, url: &str, mode: CacheMode) -> Option<Value> {
+    cache_ready().await;
+    match mode {
+        CacheMode::CacheOnly => return read_cache_any(key),
+        CacheMode::Normal => {
+            if let Some(v) = read_cache(key, ttl) {
+                return Some(v);
+            }
+        }
+        CacheMode::Fresh => {}
     }
-    let r = client.get(url).send().await.ok()?;
-    if !r.status().is_success() {
-        return None;
+    let got = async {
+        let r = client.get(url).send().await.ok()?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            return Some(Value::Null);
+        }
+        if !r.status().is_success() {
+            return None;
+        }
+        r.json::<Value>().await.ok()
     }
-    let data: Value = r.json().await.ok()?;
-    write_cache(key, &data);
-    Some(data)
+    .await;
+    match got {
+        Some(data) => {
+            write_cache(key, &data);
+            Some(data)
+        }
+        None => read_cache_any(key),
+    }
+}
+
+/// The cache entries a Twitch channel's 7TV / BTTV / FFZ sets come from, with how long each stays fresh.
+pub fn twitch_set_keys(channel_id: &str) -> [(String, i64); 6] {
+    [
+        ("emotes:7tv:global:global".to_string(), EMOTE_GLOBAL_TTL_MS),
+        (seven_tv_channel_key(channel_id), EMOTE_CHANNEL_TTL_MS),
+        ("emotes:bttv:global:global".to_string(), EMOTE_GLOBAL_TTL_MS),
+        (bttv_channel_key(channel_id), EMOTE_CHANNEL_TTL_MS),
+        ("emotes:ffz:global:global".to_string(), EMOTE_GLOBAL_TTL_MS),
+        (ffz_channel_key(channel_id), EMOTE_CHANNEL_TTL_MS),
+    ]
+}
+
+/// Every set of the channel is in and fresh (else a fetch failed, and the load is tried again).
+pub fn twitch_sets_fresh(channel_id: &str) -> bool {
+    twitch_set_keys(channel_id).iter().all(|(k, ttl)| cache_fresh(k, *ttl))
+}
+
+/// Whether anything of the channel's sets is cached at all, however old (worth showing before the network answers).
+pub fn twitch_sets_cached(channel_id: &str) -> bool {
+    let c = cache().lock().unwrap();
+    twitch_set_keys(channel_id).iter().any(|(k, _)| c.map.get(k).and_then(|e| entry_data(e, None)).is_some())
+}
+
+/// The wait before trying a set load again that did not get everything (`attempt` = tries so far); None = stop.
+pub fn set_retry_delay(attempt: u32) -> Option<std::time::Duration> {
+    const SECS: [u64; 8] = [3, 8, 20, 45, 90, 180, 300, 600];
+    SECS.get(attempt as usize).map(|s| std::time::Duration::from_secs(*s))
 }
 
 // ---- 7TV --------------------------------------------------------------------------------------
@@ -275,15 +421,25 @@ fn seven_tv_ids(c: &Value) -> Option<SevenTvIds> {
 /// 7TV global + a Twitch channel's emotes and its 7TV ids. `fresh` reloads the channel past its cache (a live
 /// update said it changed).
 pub async fn fetch_seven_tv(client: &reqwest::Client, channel_id: &str, fresh: bool) -> (ProviderScopedMap, Option<SevenTvIds>) {
-    fetch_seven_tv_on(client, SevenTvPlatform::Twitch, channel_id, fresh).await
+    seven_tv_sets(client, channel_id, if fresh { CacheMode::Fresh } else { CacheMode::Normal }).await
 }
 
 /// 7TV global + the emotes of the 7TV set linked to a Twitch or Kick account, and its 7TV ids.
 pub async fn fetch_seven_tv_on(client: &reqwest::Client, platform: SevenTvPlatform, channel_id: &str, fresh: bool) -> (ProviderScopedMap, Option<SevenTvIds>) {
+    seven_tv_sets_on(client, platform, channel_id, if fresh { CacheMode::Fresh } else { CacheMode::Normal }).await
+}
+
+pub async fn seven_tv_sets(client: &reqwest::Client, channel_id: &str, mode: CacheMode) -> (ProviderScopedMap, Option<SevenTvIds>) {
+    seven_tv_sets_on(client, SevenTvPlatform::Twitch, channel_id, mode).await
+}
+
+pub async fn seven_tv_sets_on(client: &reqwest::Client, platform: SevenTvPlatform, channel_id: &str, mode: CacheMode) -> (ProviderScopedMap, Option<SevenTvIds>) {
     let (ck, cu) = (seven_tv_channel_key_on(platform, channel_id), seven_tv_user_url(platform, channel_id));
+    // a live update reloads the channel's set only
+    let global_mode = if mode == CacheMode::Fresh { CacheMode::Normal } else { mode };
     let (g, c) = tokio::join!(
-        fetch_json_cached(client, "emotes:7tv:global:global", EMOTE_GLOBAL_TTL_MS, "https://7tv.io/v3/emote-sets/global"),
-        fetch_json(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu, fresh),
+        fetch_json_mode(client, "emotes:7tv:global:global", EMOTE_GLOBAL_TTL_MS, "https://7tv.io/v3/emote-sets/global", global_mode),
+        fetch_json_mode(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu, mode),
     );
     let (channel, ids) = c.as_ref().map(seven_tv_channel).unwrap_or_default();
     (ProviderScopedMap { global: g.map(|g| seven_tv_map(g.get("emotes"))).unwrap_or_default(), channel }, ids)
@@ -306,11 +462,19 @@ fn bttv_emote(e: &Value) -> Arc<ProviderEmote> {
     Arc::new(ProviderEmote { provider: EmoteProvider::Bttv, id: id.clone(), name: code, zero_width, animated: s(e, "imageType") == "gif", urls: [u(1), u(2), u(3), None] })
 }
 
+fn bttv_channel_key(channel_id: &str) -> String {
+    format!("emotes:bttv:channel:{channel_id}")
+}
+
 pub async fn fetch_bttv(client: &reqwest::Client, channel_id: &str) -> ProviderScopedMap {
-    let (ck, cu) = (format!("emotes:bttv:channel:{channel_id}"), format!("https://api.betterttv.net/3/cached/users/twitch/{channel_id}"));
+    bttv_sets(client, channel_id, CacheMode::Normal).await
+}
+
+pub async fn bttv_sets(client: &reqwest::Client, channel_id: &str, mode: CacheMode) -> ProviderScopedMap {
+    let (ck, cu) = (bttv_channel_key(channel_id), format!("https://api.betterttv.net/3/cached/users/twitch/{channel_id}"));
     let (g, c) = tokio::join!(
-        fetch_json_cached(client, "emotes:bttv:global:global", EMOTE_GLOBAL_TTL_MS, "https://api.betterttv.net/3/cached/emotes/global"),
-        fetch_json_cached(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu),
+        fetch_json_mode(client, "emotes:bttv:global:global", EMOTE_GLOBAL_TTL_MS, "https://api.betterttv.net/3/cached/emotes/global", mode),
+        fetch_json_mode(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu, mode),
     );
     let mut out = ProviderScopedMap::default();
     for e in g.as_ref().and_then(|g| g.as_array()).into_iter().flatten() {
@@ -341,11 +505,19 @@ fn ffz_emote(e: &Value) -> Arc<ProviderEmote> {
     Arc::new(ProviderEmote { provider: EmoteProvider::Ffz, id: s(e, "id"), name: s(e, "name"), zero_width, animated: false, urls })
 }
 
+fn ffz_channel_key(channel_id: &str) -> String {
+    format!("emotes:ffz:channel:{channel_id}")
+}
+
 pub async fn fetch_ffz(client: &reqwest::Client, channel_id: &str) -> ProviderScopedMap {
-    let (ck, cu) = (format!("emotes:ffz:channel:{channel_id}"), format!("https://api.frankerfacez.com/v1/room/id/{channel_id}"));
+    ffz_sets(client, channel_id, CacheMode::Normal).await
+}
+
+pub async fn ffz_sets(client: &reqwest::Client, channel_id: &str, mode: CacheMode) -> ProviderScopedMap {
+    let (ck, cu) = (ffz_channel_key(channel_id), format!("https://api.frankerfacez.com/v1/room/id/{channel_id}"));
     let (g, r) = tokio::join!(
-        fetch_json_cached(client, "emotes:ffz:global:global", EMOTE_GLOBAL_TTL_MS, "https://api.frankerfacez.com/v1/set/global"),
-        fetch_json_cached(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu),
+        fetch_json_mode(client, "emotes:ffz:global:global", EMOTE_GLOBAL_TTL_MS, "https://api.frankerfacez.com/v1/set/global", mode),
+        fetch_json_mode(client, &ck, EMOTE_CHANNEL_TTL_MS, &cu, mode),
     );
     let mut out = ProviderScopedMap::default();
     if let Some(g) = g {
@@ -400,6 +572,7 @@ pub fn merge_emote_sets(seven: &ProviderScopedMap, bttv: &ProviderScopedMap, ffz
 /// The 7TV personal emote set of the ACTING user; best effort, any missing step yields nothing.
 pub async fn fetch_seven_tv_personal(client: &reqwest::Client, twitch_user_id: &str) -> Vec<Arc<ProviderEmote>> {
     async fn go(client: &reqwest::Client, uid: &str) -> Option<Vec<Arc<ProviderEmote>>> {
+        cache_ready().await;
         let id_key = format!("emotes:7tv:personal-id:{uid}");
         let seven_id = match read_cache(&id_key, EMOTE_GLOBAL_TTL_MS) {
             Some(v) => v.as_str().unwrap_or("").to_string(),
@@ -490,6 +663,7 @@ fn picker_json(r: &TwitchEmotesResp) -> Value {
 /// fetchTwitchPickerEmotes: the relay's `/api/chat/twitch-emotes` (cached like the site, 6 h).
 pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol::AguBridge>, source: &agu_chat_core::protocol::SourceRef, channel_id: &str) -> TwitchEmotesResp {
     let key = format!("emotes:twitch:channel:{channel_id}");
+    cache_ready().await;
     if let Some(c) = read_cache(&key, EMOTE_GLOBAL_TTL_MS) {
         return TwitchEmotesResp { channel: picker_list(c.get("channel")), global: picker_list(c.get("global")), other: picker_list(c.get("other")) };
     }
@@ -551,6 +725,77 @@ mod tests {
         assert_eq!(read_cache("test:forget", EMOTE_CHANNEL_TTL_MS), Some(json!(1)));
         forget_cache("test:forget");
         assert_eq!(read_cache("test:forget", EMOTE_CHANNEL_TTL_MS), None);
+    }
+
+    fn put_aged(key: &str, data: Value, age_ms: i64) {
+        cache().lock().unwrap().map.insert(key.to_string(), json!({"v": 1, "at": now_ms() - age_ms, "data": data}));
+    }
+
+    #[test]
+    fn a_stale_entry_is_still_there_for_startup_and_fallback() {
+        put_aged("test:stale", json!([1]), EMOTE_CHANNEL_TTL_MS + 1000);
+        assert_eq!(read_cache("test:stale", EMOTE_CHANNEL_TTL_MS), None);
+        assert!(!cache_fresh("test:stale", EMOTE_CHANNEL_TTL_MS));
+        assert_eq!(read_cache_any("test:stale"), Some(json!([1])));
+        // still fresh under the longer global rule
+        assert!(cache_fresh("test:stale", EMOTE_GLOBAL_TTL_MS));
+    }
+
+    #[test]
+    fn loading_the_file_prunes_old_and_broken_entries() {
+        let now = 10 * CACHE_PRUNE_MS;
+        let file = json!({
+            "keep": {"v": 1, "at": now - EMOTE_CHANNEL_TTL_MS * 5, "data": 1},
+            "old": {"v": 1, "at": now - CACHE_PRUNE_MS - 1, "data": 2},
+            "broken": {"v": 1, "data": 3},
+        });
+        let m = parse_cache_file(&serde_json::to_vec(&file).unwrap(), now);
+        assert_eq!(m.keys().map(|k| k.as_str()).collect::<Vec<_>>(), vec!["keep"]);
+        assert!(parse_cache_file(b"not json", now).is_empty());
+        assert!(parse_cache_file(b"[1,2]", now).is_empty());
+    }
+
+    #[test]
+    fn retries_back_off_and_stop() {
+        let d: Vec<u64> = (0..20).map_while(set_retry_delay).map(|d| d.as_secs()).collect();
+        assert_eq!(d.first(), Some(&3));
+        assert!(d.windows(2).all(|w| w[0] < w[1]));
+        assert!(d.len() >= 6 && d.len() < 20);
+    }
+
+    #[test]
+    fn set_freshness_needs_every_provider() {
+        let cid = "test-fresh-1";
+        assert!(!twitch_sets_cached(cid));
+        for (k, _) in twitch_set_keys(cid) {
+            write_cache(&k, &Value::Null);
+        }
+        assert!(twitch_sets_fresh(cid));
+        // the 7TV channel answer failed to refresh: only its old copy is left
+        put_aged(&seven_tv_channel_key(cid), json!({}), EMOTE_CHANNEL_TTL_MS + 1);
+        assert!(!twitch_sets_fresh(cid));
+        assert!(twitch_sets_cached(cid));
+    }
+
+    #[test]
+    fn startup_shows_cached_sets_however_old_without_the_network() {
+        let cid = "test-startup-1";
+        put_aged(&seven_tv_channel_key(cid), json!({"user": {"id": "U"}, "emote_set": {"id": "S", "emotes": [{"id": "e1", "name": "catJAM"}]}}), 30 * EMOTE_CHANNEL_TTL_MS);
+        put_aged(&bttv_channel_key(cid), json!({"channelEmotes": [{"id": "b1", "code": "OMEGALUL"}], "sharedEmotes": []}), 30 * EMOTE_CHANNEL_TTL_MS);
+        // a CacheOnly load never touches the network
+        let client = reqwest::Client::builder().build().unwrap();
+        let (seven, ids) = futures::executor::block_on(seven_tv_sets(&client, cid, CacheMode::CacheOnly));
+        assert!(seven.channel.contains_key("catJAM"));
+        assert_eq!(ids, Some(SevenTvIds { user_id: "U".into(), set_id: "S".into() }));
+        let bttv = futures::executor::block_on(bttv_sets(&client, cid, CacheMode::CacheOnly));
+        assert!(bttv.channel.contains_key("OMEGALUL"));
+        let ffz = futures::executor::block_on(ffz_sets(&client, cid, CacheMode::CacheOnly));
+        assert!(ffz.channel.is_empty());
+    }
+
+    #[test]
+    fn nothing_waits_on_a_cache_that_was_never_pointed_at_a_file() {
+        futures::executor::block_on(cache_ready());
     }
 
     #[test]

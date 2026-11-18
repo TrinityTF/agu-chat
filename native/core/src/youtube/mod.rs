@@ -12,6 +12,7 @@
 //! Differences from the JS: the poll timer is a `util::Timer`, and `stop()` aborts the source's tasks
 //! (`net::Jobs`) instead of an `AbortController`.
 pub mod auth;
+pub mod chat_rules;
 pub mod moderate;
 pub mod vendor;
 
@@ -168,6 +169,8 @@ async fn route_action(req: RouteReq) -> Result<RouteRes, RouteError> {
 }
 
 struct St {
+    /// what the chat's own mode lines said (members-only, slow mode)
+    chat_modes: crate::chat_rules::ChatModes,
     status: Map<String, Value>,
     phase: String, // connecting | open | offline | unavailable | error
     backlog: Vec<Value>,
@@ -218,6 +221,9 @@ fn conn_frame(st: &St) -> Value {
     if let Some(r) = reason {
         f["readOnlyReason"] = json!(r);
     }
+    if st.chat_modes.any() {
+        f["chatModes"] = json!(st.chat_modes);
+    }
     f
 }
 
@@ -256,6 +262,7 @@ impl YoutubeSource {
                 failures: 0,
                 timer: Timer::new(),
                 polling: false,
+                chat_modes: Default::default(),
                 stopped: false,
                 last_conn_json: String::new(),
                 auth_listener: None,
@@ -329,6 +336,8 @@ impl YoutubeSource {
         let mut st = self.st.lock().unwrap();
         let mut fresh = Vec::new();
         for a in actions {
+            // the mode lines arrive in order, so the last one is the mode now (published with the next conn frame)
+            chat_rules::apply_mode_change(&mut st.chat_modes, a);
             let Some(msg) = to_youtube_chat_msg(a) else { continue };
             let id = js_str_or_empty(Some(&msg["id"]));
             if id.is_empty() || !st.seen.insert(id) {
@@ -403,6 +412,9 @@ impl YoutubeSource {
         if let Some(c) = self.st.lock().unwrap().chat.as_mut() {
             // still on "Top chat": move to "Live chat" (every message); the overlap is de-duplicated
             c.continuation = res.live_chat.clone().unwrap_or_else(|| res.continuation.clone());
+        }
+        if let Some(t) = &res.panel {
+            chat_rules::apply_panel(&mut self.st.lock().unwrap().chat_modes, t);
         }
         let fresh = self.ingest(&res.actions);
         // The very first poll is the history: one chatlog instead of ~75 chat frames.
@@ -485,6 +497,7 @@ impl YoutubeSource {
         if truthy(&cur_video) && cur_video != json!(res.video_id) {
             // A different broadcast: the old chat's rows belong to another video.
             let mut st = self.st.lock().unwrap();
+            st.chat_modes = Default::default();
             st.backlog.clear();
             st.seen.clear();
         }
