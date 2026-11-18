@@ -1,0 +1,279 @@
+{
+ "status": {
+  "error": false,
+  "code": 200,
+  "message": "SUCCESS"
+ },
+ "data": {
+  "messages": [
+   {
+    "id": "cd2a6a70-ab27-4b7f-8885-cd7a9cd92c77",
+    "chat_id": 668,
+    "user_id": 2641596,
+    "content": "message 1",
+    "type": "message",
+    "created_at": "2026-11-18T18:33:54Z",
+    "sender": {
+     "id": 2641596,
+     "slug": "ragger",
+     "username": "Ragger",
+     "identity": {
+      "color": "#BC66FF",
+      "badges": [],
+      "badges_v2": [
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/57_ddc069ae-a702-456d-8f1b-7c737c6abf8a.png",
+        "metadata": {
+         "level": 57
+        },
+        "selected": true,
+        "sort_order": 1
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "f6ff9daf-e528-4966-a123-71be9be754f0",
+    "chat_id": 668,
+    "user_id": 19493792,
+    "content": "message 2",
+    "type": "message",
+    "created_at": "2026-11-18T18:33:54Z",
+    "sender": {
+     "id": 19493792,
+     "slug": "unohaze",
+     "username": "unohaze",
+     "identity": {
+      "color": "#FF9D00",
+      "badges": [],
+      "badges_v2": [
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/45_82077115-61cb-4b5d-b036-31f13b96cfeb.png",
+        "metadata": {
+         "level": 45
+        },
+        "selected": true,
+        "sort_order": 1
+       },
+       {
+        "name": "DEDsafioNutria",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/DEDsafioNutria_01a0cbff-5134-75df-9dd4-8b073e36da21.png",
+        "selected": false,
+        "sort_order": 4
+       },
+       {
+        "name": "WorldofWarcraftForeverBeta",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/WorldofWarcraftForeverBeta_c4ae6085-8ec5-4905-bca5-23c56b9787d8.png",
+        "selected": true,
+        "sort_order": 4
+       },
+       {
+        "name": "Ghost",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/Ghost_b3f35326-9908-409c-9e8c-13e35ca8ace1.png",
+        "selected": true,
+        "sort_order": 4
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "d3711538-bca2-413c-a0f9-bcde8a81aaa1",
+    "chat_id": 668,
+    "user_id": 88619848,
+    "content": "message 3",
+    "type": "message",
+    "created_at": "2026-11-18T18:33:53Z",
+    "sender": {
+     "id": 88619848,
+     "slug": "flop-e",
+     "username": "flop_e",
+     "identity": {
+      "color": "#B9D6F6",
+      "badges": [],
+      "badges_v2": [
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/18_cd2f7f82-87c8-418b-8758-93789e5d1a14.png",
+        "metadata": {
+         "level": 18
+        },
+        "selected": false,
+        "sort_order": 1
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "9adf5feb-7b19-4c75-a43a-c28b2da58e6a",
+    "chat_id": 668,
+    "user_id": 7517097,
+    "content": "message 4",
+    "type": "message",
+    "created_at": "2026-11-18T18:33:53Z",
+    "sender": {
+     "id": 7517097,
+     "slug": "milopaks",
+     "username": "Milopaks",
+     "identity": {
+      "color": "#FF2C56",
+      "badges": [],
+      "badges_v2": [
+       {
+        "name": "GOAT",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/GOAT_019f591b-30ae-7285-8377-293e708a5e30.png",
+        "selected": true,
+        "sort_order": 4
+       },
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/32_019f35ce-472a-79f1-b4cb-a5642144c710.png",
+        "metadata": {
+         "level": 32
+        },
+        "selected": true,
+        "sort_order": 1
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "e48476bf-e49f-4969-9fc3-8952133199dd",
+    "chat_id": 668,
+    "user_id": 61705,
+    "content": "message 5",
+    "type": "message",
+    "created_at": "2026-11-18T18:33:53Z",
+    "sender": {
+     "id": 61705,
+     "slug": "khanspiracy",
+     "username": "khanspiracy",
+     "identity": {
+      "color": "#55FFC7",
+      "badges": [],
+      "badges_v2": [
+       {
+        "name": "kick_founder22",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/kick_founder22_2a2d3875-276e-4d87-ab63-d7578d2e10c0.png",
+        "selected": true,
+        "sort_order": 2
+       },
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/45_82077115-61cb-4b5d-b036-31f13b96cfeb.png",
+        "metadata": {
+         "level": 45
+        },
+        "selected": true,
+        "sort_order": 1
+       },
+       {
+        "name": "WorldofWarcraftForeverBeta",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/WorldofWarcraftForeverBeta_c4ae6085-8ec5-4905-bca5-23c56b9787d8.png",
+        "selected": true,
+        "sort_order": 4
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "f5460b32-659e-4f06-a105-804f5fb6e6f6",
+    "chatroom_id": 668,
+    "content": "message 6",
+    "type": "message",
+    "created_at": "2026-11-18T18:36:46+00:00",
+    "sender": {
+     "id": 7404530,
+     "username": "Fossabot",
+     "slug": "fossabot",
+     "identity": {
+      "color": "#1475E1",
+      "badges": [
+       {
+        "type": "moderator",
+        "text": "Moderator",
+        "sort_order": 12
+       },
+       {
+        "type": "verified",
+        "text": "Verified channel",
+        "sort_order": 14
+       }
+      ],
+      "badges_v2": [
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/1_17be7ee9-9ede-4f58-b6da-a2e1e4b1e56a.png",
+        "metadata": {
+         "level": 1
+        },
+        "selected": false,
+        "sort_order": 1
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "9bebecc4-05ee-48b2-99db-5cf0c7b38d97",
+    "chatroom_id": 668,
+    "content": "message 7",
+    "type": "message",
+    "created_at": "2026-11-18T18:37:11+00:00",
+    "sender": {
+     "id": 114978469,
+     "username": "a93c",
+     "slug": "a93c",
+     "identity": {
+      "color": "#E4D88F",
+      "badges": [
+       {
+        "type": "subscriber",
+        "text": "Subscriber",
+        "count": 3,
+        "sort_order": 9
+       }
+      ],
+      "badges_v2": [
+       {
+        "name": "GoldenK",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/GoldenK_019f591b-0a69-712f-836d-8cc8962acd0c.png",
+        "selected": true,
+        "sort_order": 4
+       },
+       {
+        "name": "level",
+        "badge_type": "global",
+        "image_url": "https://ext.cdn.kick.com/chat/badges/51_e5f3239c-b268-48b9-8ce9-3a270fc07b91.png",
+        "metadata": {
+         "level": 51
+        },
+        "selected": false,
+        "sort_order": 1
+       }
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

@@ -150,7 +150,13 @@ pub type RumbleBadgeDefs = serde_json::Map<String, serde_json::Value>;
 pub type RumbleEmotes = serde_json::Map<String, serde_json::Value>;
 
 lenient! { pub struct KickUser { pub id: String, pub login: String, pub name: String, pub color: String, pub avatar: String, pub verified: bool, pub anonymous: bool } }
-lenient! { pub struct KickBadge { pub r#type: String, pub text: String, pub count: f64, pub url: Option<String> } }
+lenient! {
+    /// One badge of a Kick line, in kick.com's order (core `kick_badges`). `type` is the channel badge's type or the
+    /// global badge's name ("level", "kick_founder22"); `label` is kick.com's tooltip; `hidden` marks a badge
+    /// kick.com's chat does not draw (not selected by the user, or past the first four), which still counts for
+    /// mod rights and highlights.
+    pub struct KickBadge { pub r#type: String, pub text: String, pub count: f64, pub url: Option<String>, pub label: String, pub hidden: bool }
+}
 lenient! { pub struct KickReply { pub id: String, pub text: String, pub name: String } }
 lenient! {
     pub struct KickMsg {

@@ -468,20 +468,10 @@ impl KickSource {
         self.publish_conn();
     }
 
-    /// Put the channel's own artwork on a subscriber badge; everything else keeps its chip.
-    fn dress_badges(&self, mut msg: Value) -> Value {
+    /// Put the channel's own artwork on a subscriber badge (one that has no picture of its own yet).
+    fn dress_badges(&self, msg: Value) -> Value {
         let subs = self.st.lock().unwrap().sub_badges.clone();
-        if subs.is_empty() {
-            return msg;
-        }
-        if let Some(badges) = msg["badges"].as_array_mut() {
-            for b in badges.iter_mut() {
-                if b["type"] == "subscriber" {
-                    b["url"] = json!(sub_badge_for(&subs, &b["count"]));
-                }
-            }
-        }
-        msg
+        dress_sub_badges(msg, &subs)
     }
 
     fn push_backlog(&self, msg: Value) {
@@ -942,6 +932,22 @@ impl Source for KickSource {
     }
 }
 
+/// The pure half of `dress_badges`: a channel subscriber badge without a picture gets the channel's art for its
+/// month count. Global (`badges_v2`) badges bring their own picture and are left alone.
+fn dress_sub_badges(mut msg: Value, subs: &[SubBadge]) -> Value {
+    if subs.is_empty() {
+        return msg;
+    }
+    if let Some(badges) = msg["badges"].as_array_mut() {
+        for b in badges.iter_mut() {
+            if b["type"] == "subscriber" && b["v2"] != json!(true) && !truthy(&b["url"]) {
+                b["url"] = json!(sub_badge_for(subs, &b["count"]));
+            }
+        }
+    }
+    msg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,6 +1000,23 @@ mod tests {
         assert!(plan_action("delete", "9", "x/../y", None, 5).is_err());
         assert!(plan_action("delete", "9", "", None, 5).is_err());
         assert!(plan_action("pin", "9", "m", None, 5).is_err());
+    }
+
+    #[test]
+    fn channel_sub_art_goes_on_the_subscriber_badge_only() {
+        let subs = vec![SubBadge { months: 1, url: "s1".into() }, SubBadge { months: 3, url: "s3".into() }];
+        let ev = json!({"id": "1", "sender": {"id": 5, "identity": {
+            "badges": [{"type": "subscriber", "text": "Subscriber", "count": 4, "sort_order": 9}],
+            "badges_v2": [{"name": "level", "image_url": "https://ext.cdn.kick.com/chat/badges/4_x.png", "metadata": {"level": 4}, "selected": true, "sort_order": 1},
+                          {"name": "subscriber", "image_url": "https://ext.cdn.kick.com/chat/badges/own.png", "selected": true, "sort_order": 3}]}}});
+        let m = dress_sub_badges(to_kick_chat_msg(&ev), &subs);
+        let b = m["badges"].as_array().unwrap();
+        // the global badges keep their own pictures, the channel subscriber badge gets the channel's art
+        assert_eq!(b[0]["url"], "https://ext.cdn.kick.com/chat/badges/4_x.png?width=72,format=webp,quality=50");
+        assert_eq!(b[1]["url"], "https://ext.cdn.kick.com/chat/badges/own.png?width=72,format=webp,quality=50");
+        assert_eq!(b[2]["url"], "s3");
+        // no channel art: nothing changes
+        assert_eq!(dress_sub_badges(to_kick_chat_msg(&ev), &[])["badges"][2].get("url"), None);
     }
 
     #[test]

@@ -1353,9 +1353,13 @@ pub(super) fn kick_badge_url(b: &KickBadge) -> Option<String> {
     agu_chat_core::kick::badges::badge_url(&b.r#type, b.count, b.url.as_deref())
 }
 
-/// Tooltip text of a Kick badge.
+/// Tooltip text of a Kick badge: kick.com's own words, which the backend puts on the badge.
 pub(super) fn kick_badge_label(b: &KickBadge) -> String {
-    agu_chat_core::kick::badges::badge_label(&b.r#type, &b.text, b.count)
+    if b.label.is_empty() {
+        agu_chat_core::kick::badges::badge_label(&b.r#type, &b.text, b.count)
+    } else {
+        b.label.clone()
+    }
 }
 
 pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>, style: Option<&ChatterStyle>, defs: Option<&SevenTvDefs>) -> BuiltRow {
@@ -1378,7 +1382,8 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     }
     frame_prefix(&mut f, ctx, m.ts, Platform::Kick);
     if rs.show_badges {
-        for b in &m.badges {
+        // what kick.com's chat draws: the user's selected badges, at most four, in Kick's order
+        for b in m.badges.iter().filter(|b| !b.hidden) {
             let label = kick_badge_label(b);
             if let Some(u) = kick_badge_url(b) {
                 f.push(co_badge_img(&u, &label, base));
@@ -1624,6 +1629,41 @@ mod tests {
         let (px, _, vm) = emote_box(13.0, SizeOpt::Small);
         assert_eq!(px, 19.0);
         assert_eq!(vm, 0.0);
+    }
+
+    /// A core Kick row's badges as the chat page reads them: kick.com's labels, Kick's own pictures, and the
+    /// hidden ones (unselected, or past four) still there for mod rights.
+    #[test]
+    fn kick_badges_from_a_core_row() {
+        let ev = serde_json::json!({"id": "1", "content": "hi", "sender": {"id": 5, "username": "ytry", "slug": "ytry", "identity": {"color": "#fff",
+            "badges": [{"type": "moderator", "text": "Moderator", "sort_order": 12}],
+            "badges_v2": [
+                {"name": "level", "badge_type": "global", "image_url": "https://ext.cdn.kick.com/chat/badges/47_a.png", "metadata": {"level": 47}, "selected": true, "sort_order": 1},
+                {"name": "kick_founder22", "badge_type": "global", "image_url": "https://ext.cdn.kick.com/chat/badges/kick_founder22_b.png", "selected": true, "sort_order": 2},
+                {"name": "GoldenK", "badge_type": "global", "image_url": "https://ext.cdn.kick.com/chat/badges/GoldenK_c.png", "selected": true, "sort_order": 4},
+                {"name": "GOAT", "badge_type": "global", "image_url": "https://ext.cdn.kick.com/chat/badges/GOAT_d.png", "selected": true, "sort_order": 4},
+                {"name": "Ghost", "badge_type": "global", "image_url": "https://ext.cdn.kick.com/chat/badges/Ghost_e.png", "selected": false, "sort_order": 4}
+            ]}}});
+        let m: KickMsg = serde_json::from_value(agu_chat_core::kick::vendor::kick::to_kick_chat_msg(&ev)).unwrap();
+        let shown: Vec<(String, Option<String>)> = m.badges.iter().filter(|b| !b.hidden).map(|b| (kick_badge_label(b), kick_badge_url(b))).collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("Level 47".to_string(), Some("https://ext.cdn.kick.com/chat/badges/47_a.png?width=72,format=webp,quality=50".to_string())),
+                ("KICK Founder 22".to_string(), Some("https://ext.cdn.kick.com/chat/badges/kick_founder22_b.png?width=72,format=webp,quality=50".to_string())),
+                ("GoldenK".to_string(), Some("https://ext.cdn.kick.com/chat/badges/GoldenK_c.png?width=72,format=webp,quality=50".to_string())),
+                ("GOAT".to_string(), Some("https://ext.cdn.kick.com/chat/badges/GOAT_d.png?width=72,format=webp,quality=50".to_string())),
+            ]
+        );
+        // the moderator badge did not fit in kick.com's four, but mod rights still see it
+        let types: Vec<&str> = m.badges.iter().map(|b| b.r#type.as_str()).collect();
+        assert!(types.contains(&"moderator"));
+        assert!(!super::super::mod_caps::co_reach(Platform::Kick, "somemod", "xqc", "ytry", &types).ban);
+        assert!(super::super::mod_caps::co_reach(Platform::Kick, "xqc", "xqc", "ytry", &types).ban);
+        // a channel badge without a picture of its own uses the bundled art, with kick.com's name
+        let b = KickBadge { r#type: "bot".into(), ..Default::default() };
+        assert_eq!(kick_badge_url(&b).as_deref(), Some("agu-asset:kick-badges/bot.svg"));
+        assert_eq!(kick_badge_label(&b), "Bot");
     }
 
     #[test]

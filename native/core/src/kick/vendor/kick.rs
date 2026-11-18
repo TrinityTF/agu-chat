@@ -122,14 +122,15 @@ pub async fn get_channel_user(slug: &str, user_slug: &str, user_agent: &str) -> 
     net::json(r).await.map(Some).map_err(|e| e.message)
 }
 
-/// Does a badge list (`[{type: "moderator"}, ...]`) mark a moderator or the broadcaster?
+/// Does a badge list (`[{type: "moderator"}, ...]`, or Kick's `badges_v2` shape `[{name: "moderator"}, ...]`) mark a
+/// moderator or the broadcaster? Hidden badges count: a moderator who chose not to show the badge is still one.
 pub fn badges_mark_mod(badges: &Value) -> bool {
-    badges.as_array().map(|a| a.iter().any(|b| matches!(b["type"].as_str(), Some("moderator" | "broadcaster")))).unwrap_or(false)
+    badges.as_array().map(|a| a.iter().any(|b| matches!(b["type"].as_str().or(b["name"].as_str()), Some("moderator" | "broadcaster")))).unwrap_or(false)
 }
 
 /// Is this user a moderator (or the owner) of the channel, per `get_channel_user`'s answer?
 pub fn channel_user_is_mod(u: &Value) -> bool {
-    u["is_moderator"] == json!(true) || u["is_channel_owner"] == json!(true) || u["is_broadcaster"] == json!(true) || badges_mark_mod(&u["badges"])
+    u["is_moderator"] == json!(true) || u["is_channel_owner"] == json!(true) || u["is_broadcaster"] == json!(true) || badges_mark_mod(&u["badges"]) || badges_mark_mod(&u["badges_v2"])
 }
 
 /// The pure half of `getKickChannel`.
@@ -197,7 +198,6 @@ pub async fn fetch_history(channel_id: &str, user_agent: &str) -> Result<Vec<Val
 pub fn to_kick_chat_msg(ev: &Value) -> Value {
     let sender = &ev["sender"];
     let identity = &sender["identity"];
-    let badges: Vec<Value> = identity["badges"].as_array().cloned().unwrap_or_default();
     let ts = ev["created_at"].as_str().and_then(parse_rfc3339_ms);
     // The history endpoint ships `metadata` as a JSON string; the socket ships an object.
     let meta: Value = match &ev["metadata"] {
@@ -231,13 +231,86 @@ pub fn to_kick_chat_msg(ev: &Value) -> Value {
             "verified": truthy(&sender["is_verified"]),
             "anonymous": truthy(&sender["is_anonymous"]),
         },
-        // Kept as Kick sends them -- {type, text, count} -- so a badge Kick adds next month shows as its own name.
-        "badges": badges.iter().take(8).map(|b| json!({"type": js_str_or_empty(Some(&b["type"])), "text": js_str_or_empty(Some(&b["text"])), "count": num_or0(&b["count"])})).collect::<Vec<_>>(),
+        "badges": kick_badges(identity),
         "text": js_str_or_empty(Some(&ev["content"])),
         "reply": reply,
         "action": false,
         "notice": if ev["type"] == "celebration" { json!("celebration") } else { Value::Null },
     })
+}
+
+// ---------------------------------------------------------------------------
+// Badges
+// ---------------------------------------------------------------------------
+
+/// How many badges kick.com's chat shows in front of a name (MAX_BADGE_COUNT in its chat code).
+pub const CHAT_BADGE_MAX: usize = 4;
+/// A message never carries more than this many badges (a guard against a runaway list, not a Kick rule).
+const BADGE_KEEP_MAX: usize = 24;
+
+/// A sender's badges (`sender.identity`) -> the row's badge list, in the order kick.com draws them.
+///
+/// Kick ships two lists. `badges` holds the channel badges ({type, text, count, sort_order}: broadcaster, moderator,
+/// vip, og, founder, subscriber, sub_gifter, verified, bot, ...) and still drew everything until November 2026.
+/// `badges_v2` holds the global ones ({name, badge_type, image_url, metadata: {level}, selected, sort_order}: the
+/// "Level 58" badge, "KICK Founder 22", event badges like "GOAT"). kick.com's chat joins the two (channel first),
+/// drops a v2 badge the user did not select (and a channel badge marked `active: false`), sorts what is left by
+/// `sort_order` (stable, missing last) and shows the first four.
+///
+/// Every badge is kept, in that order, so mod rights and highlights still see a moderator badge that does not fit;
+/// `hidden` marks the ones kick.com's chat does not show. Each row badge is
+/// `{type, text, count, label, url?, level?, sort?, hidden}`: `type` is the v1 type or the v2 name, `label`
+/// kick.com's tooltip, `url` Kick's own picture when it has one.
+pub fn kick_badges(identity: &Value) -> Vec<Value> {
+    // (sort key, shown in chat, badge)
+    let mut list: Vec<(f64, bool, Value)> = Vec::new();
+    let sort_of = |b: &Value| b["sort_order"].as_f64().unwrap_or(f64::INFINITY);
+    for b in identity["badges"].as_array().into_iter().flatten() {
+        let kind = js_str_or_empty(Some(&b["type"]));
+        if kind.is_empty() {
+            continue;
+        }
+        let text = js_str_or_empty(Some(&b["text"]));
+        let count = num_or0(&b["count"]);
+        let label = crate::kick::badges::badge_label(&kind, &text, count.as_f64().unwrap_or(0.0));
+        let mut row = json!({"type": kind, "text": text, "count": count, "label": label, "hidden": false});
+        if let Some(o) = b["sort_order"].as_f64() {
+            row["sort"] = json!(o);
+        }
+        list.push((sort_of(b), b["active"] != json!(false), row));
+    }
+    for b in identity["badges_v2"].as_array().into_iter().flatten() {
+        let name = js_str_or_empty(Some(&b["name"]));
+        if name.is_empty() {
+            continue;
+        }
+        let level = b["metadata"]["level"].as_f64().map(|l| l as i64);
+        let image = js_str_or_empty(Some(&b["image_url"]));
+        let mut row = json!({"type": name, "text": "", "count": 0, "label": crate::kick::badges::badge_v2_label(&name, level), "hidden": false, "v2": true});
+        if !image.is_empty() {
+            row["url"] = json!(crate::kick::badges::cdn_badge_url(&image));
+        }
+        if let Some(l) = level {
+            row["level"] = json!(l);
+        }
+        if let Some(o) = b["sort_order"].as_f64() {
+            row["sort"] = json!(o);
+        }
+        list.push((sort_of(b), b["selected"] != json!(false), row));
+    }
+    // a stable sort, like Array.prototype.sort
+    list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut shown = 0;
+    let mut out = Vec::with_capacity(list.len().min(BADGE_KEEP_MAX));
+    for (_, show, mut row) in list.into_iter().take(BADGE_KEEP_MAX) {
+        let visible = show && shown < CHAT_BADGE_MAX;
+        if visible {
+            shown += 1;
+        }
+        row["hidden"] = json!(!visible);
+        out.push(row);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +469,104 @@ mod tests {
         assert_eq!(b[6]["count"], 14);
         assert_eq!(b[7]["count"], 30);
         assert_eq!(b[7]["text"], "Sub Gifter");
+        assert_eq!(b[6]["label"], "14-Month Subscriber");
+        // without a sort order kick.com keeps the list as sent and shows the first four
+        assert_eq!(b.iter().map(|x| x["hidden"] == json!(true)).collect::<Vec<_>>(), [false, false, false, false, true, true, true, true]);
+        assert!(badges_mark_mod(&m["badges"]));
+    }
+
+    /// One row's badges as (type, label, hidden).
+    fn badge_view(m: &Value) -> Vec<(String, String, bool)> {
+        m["badges"].as_array().unwrap().iter().map(|b| (b["type"].as_str().unwrap().to_string(), b["label"].as_str().unwrap().to_string(), b["hidden"] == json!(true))).collect()
+    }
+
+    /// The badges kick.com's chat draws for a row, in order.
+    fn shown(m: &Value) -> Vec<String> {
+        badge_view(m).into_iter().filter(|(_, _, h)| !h).map(|(t, _, _)| t).collect()
+    }
+
+    /// Real chat of a busy channel (2026-11-18, trimmed, texts replaced): five history messages whose `badges` is
+    /// empty and whose badges are all in `badges_v2`, and two live socket messages with channel badges in `badges`.
+    #[test]
+    fn badges_v2_from_kick_history() {
+        let j: Value = serde_json::from_str(include_str!("fixtures/kick_history_badges_v2.json")).unwrap();
+        let rows: Vec<Value> = j["data"]["messages"].as_array().unwrap().iter().map(to_kick_chat_msg).collect();
+        let by = |name: &str| rows.iter().find(|r| r["user"]["name"] == name).unwrap_or_else(|| panic!("{name}"));
+
+        // the level badge: Kick's own picture (fetched small), "Level 57", its number kept
+        let lvl = &by("Ragger")["badges"][0];
+        assert_eq!(lvl["type"], "level");
+        assert_eq!(lvl["label"], "Level 57");
+        assert_eq!(lvl["level"], 57);
+        assert_eq!(lvl["hidden"], false);
+        assert_eq!(lvl["v2"], true);
+        assert_eq!(lvl["url"], "https://ext.cdn.kick.com/chat/badges/57_ddc069ae-a702-456d-8f1b-7c737c6abf8a.png?width=72,format=webp,quality=50");
+
+        // sorted by sort_order whatever order Kick sent them in
+        assert_eq!(shown(by("Milopaks")), ["level", "GOAT"]);
+        assert_eq!(
+            badge_view(by("khanspiracy")),
+            [
+                ("level".to_string(), "Level 45".to_string(), false),
+                ("kick_founder22".to_string(), "KICK Founder 22".to_string(), false),
+                ("WorldofWarcraftForeverBeta".to_string(), "WorldofWarcraftForeverBeta".to_string(), false)
+            ]
+        );
+        // an unselected badge is kept but hidden, and does not use up one of the four places
+        let uno = badge_view(by("unohaze"));
+        assert_eq!(uno.iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["level", "DEDsafioNutria", "WorldofWarcraftForeverBeta", "Ghost"]);
+        assert_eq!(uno.iter().map(|b| b.2).collect::<Vec<_>>(), [false, true, false, false]);
+        // a level badge the user did not select is not drawn on kick.com either
+        assert!(shown(by("flop_e")).is_empty());
+        assert_eq!(by("flop_e")["badges"][0]["level"], 18);
+
+        // channel badges (old list) and global ones together, in kick.com's order
+        assert_eq!(shown(by("a93c")), ["GoldenK", "subscriber"]);
+        assert_eq!(by("a93c")["badges"][2]["label"], "3-Month Subscriber");
+        let fossa = by("Fossabot");
+        assert_eq!(shown(fossa), ["moderator", "verified"]);
+        assert_eq!(badge_view(fossa)[0], ("level".to_string(), "Level 1".to_string(), true));
+        assert_eq!(badge_view(fossa)[1].1, "Moderator");
+        assert_eq!(badge_view(fossa)[2].1, "Verified");
+        assert!(badges_mark_mod(&fossa["badges"]));
+        assert!(!badges_mark_mod(&by("khanspiracy")["badges"]));
+    }
+
+    #[test]
+    fn only_four_badges_show_and_hidden_ones_still_count_for_mod_rights() {
+        let v2 = |name: &str, sort: i64| json!({"name": name, "badge_type": "global", "image_url": format!("https://ext.cdn.kick.com/chat/badges/{name}.png"), "selected": true, "sort_order": sort});
+        let identity = json!({
+            "badges": [{"type": "moderator", "text": "Moderator", "sort_order": 12}, {"type": "subscriber", "text": "Subscriber", "count": 2, "sort_order": 9}],
+            "badges_v2": [{"name": "level", "badge_type": "global", "image_url": "https://ext.cdn.kick.com/chat/badges/9_x.png", "metadata": {"level": 9}, "selected": true, "sort_order": 1}, v2("kick_founder22", 2), v2("GOAT", 4), v2("Ghost", 4)]
+        });
+        let m = to_kick_chat_msg(&json!({"id": "1", "content": "x", "sender": {"id": 5, "username": "M", "slug": "m", "identity": identity}}));
+        assert_eq!(shown(&m), ["level", "kick_founder22", "GOAT", "Ghost"]);
+        let all = badge_view(&m);
+        assert_eq!(all.iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["level", "kick_founder22", "GOAT", "Ghost", "subscriber", "moderator"]);
+        // the moderator badge does not fit, but the row still says it is a moderator
+        assert!(badges_mark_mod(&m["badges"]));
+        // a channel badge Kick marks inactive is hidden too
+        let off = to_kick_chat_msg(&json!({"id": "2", "sender": {"id": 6, "identity": {"badges": [{"type": "vip", "active": false}, {"type": "og"}]}}}));
+        assert_eq!(shown(&off), ["og"]);
+    }
+
+    #[test]
+    fn the_old_badge_list_alone_still_works() {
+        // a sender with only the old list (all Kick sent before badges_v2)
+        let m = to_kick_chat_msg(&json!({"id": "1", "sender": {"id": 5, "identity": {"badges": [{"type": "subscriber", "text": "Subscriber", "count": 5}, {"type": "", "text": "nameless"}]}}}));
+        assert_eq!(badge_view(&m), [("subscriber".to_string(), "5-Month Subscriber".to_string(), false)]);
+        assert!(m["badges"][0].get("url").is_none());
+        assert_eq!(to_kick_chat_msg(&json!({"id": "1", "sender": {"id": 5}}))["badges"], json!([]));
+        assert_eq!(to_kick_chat_msg(&json!({"id": "1", "sender": {"id": 5, "identity": {"badges": null, "badges_v2": null}}}))["badges"], json!([]));
+    }
+
+    #[test]
+    fn mod_badges_in_either_list_mark_a_moderator() {
+        assert!(badges_mark_mod(&json!([{"type": "moderator"}])));
+        assert!(badges_mark_mod(&json!([{"name": "broadcaster", "badge_type": "channel"}])));
+        assert!(!badges_mark_mod(&json!([{"name": "level"}, {"type": "vip"}])));
+        assert!(channel_user_is_mod(&json!({"badges": [], "badges_v2": [{"name": "moderator", "badge_type": "channel", "selected": false}]})));
+        assert!(!channel_user_is_mod(&json!({"badges": [], "badges_v2": [{"name": "level", "selected": true}]})));
     }
 
     #[test]
