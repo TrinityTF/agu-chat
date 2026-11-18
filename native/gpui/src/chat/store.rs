@@ -66,8 +66,9 @@ impl SourceState {
 }
 
 const ROW_CAP: usize = 1000;
-/// while the user has scrolled up, trimming from the top would move what they are reading
-const ROW_CAP_HELD: usize = 1600;
+/// While the user has scrolled up (or paused), trimming from the top would take away what they are reading, so the
+/// store keeps growing up to this hard cap; past it the oldest rows go and the view stays on the oldest kept row.
+const ROW_CAP_HELD: usize = 4000;
 
 #[derive(Default)]
 pub struct ChatStore {
@@ -798,6 +799,10 @@ mod tests {
             s.apply(&sk, &chat(&i.to_string(), i, "a"));
         }
         assert_eq!(s.rows().len(), 1200);
+        for i in 1300..5000 {
+            s.apply(&sk, &chat(&i.to_string(), i, "a"));
+        }
+        assert_eq!(s.rows().len(), ROW_CAP_HELD);
         s.set_held(false);
         assert_eq!(s.rows().len(), ROW_CAP);
     }
