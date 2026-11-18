@@ -1,6 +1,7 @@
-//! Kick's own badge artwork. Kick draws its global badges as inline SVGs (there is no image URL for them), so
-//! they are bundled here and addressed with `agu-asset:` URLs that the image cache reads from memory instead of
-//! fetching. A channel's own subscriber art (a real URL on the badge) always wins over these.
+//! Kick's own badge artwork and names. Kick draws its channel badges (moderator, VIP, subscriber, ...) as inline
+//! SVGs with no image URL, so they are bundled here (copied from kick.com's current icons) and addressed with
+//! `agu-asset:` URLs that the image cache reads from memory instead of fetching. A badge that comes with its own
+//! picture (a channel's subscriber art, or a global badge from `badges_v2`) always uses that instead.
 
 /// URL prefix of bundled art.
 pub const SCHEME: &str = "agu-asset:";
@@ -13,7 +14,7 @@ macro_rules! art {
 }
 
 art!(
-    "broadcaster", "verified", "staff", "global_moderator", "global_admin", "sidekick", "moderator", "vip", "og", "founder", "subscriber",
+    "broadcaster", "verified", "staff", "global_moderator", "global_admin", "sidekick", "moderator", "vip", "og", "founder", "subscriber", "bot",
     "sub_gifter-1", "sub_gifter-25", "sub_gifter-50", "sub_gifter-100", "sub_gifter-200",
 );
 
@@ -40,16 +41,16 @@ pub fn badge_url(kind: &str, count: f64, own: Option<&str>) -> Option<String> {
     }
     let name = match kind {
         "sub_gifter" => format!("sub_gifter-{}", gifter_tier(count)),
-        "broadcaster" | "verified" | "staff" | "global_moderator" | "global_admin" | "sidekick" | "moderator" | "vip" | "og" | "founder" | "subscriber" => kind.to_string(),
+        "broadcaster" | "verified" | "staff" | "global_moderator" | "global_admin" | "sidekick" | "moderator" | "vip" | "og" | "founder" | "subscriber" | "bot" => kind.to_string(),
         _ => return None,
     };
     Some(format!("{SCHEME}kick-badges/{name}.svg"))
 }
 
-/// Tooltip text for a Kick badge ("Moderator", "Subscriber (6 months)", "Sub gifter (25 gifts)").
+/// Tooltip text for a Kick channel badge (`badges`, keyed by `type`), in kick.com's own words: "Moderator",
+/// "3-Month Subscriber", "Gifted 25 subs".
 pub fn badge_label(kind: &str, text: &str, count: f64) -> String {
     let n = if count.is_finite() && count > 0.0 { count as i64 } else { 0 };
-    let plural = |unit: &str| if n == 1 { unit.to_string() } else { format!("{unit}s") };
     let pretty = match kind {
         "broadcaster" => "Broadcaster",
         "moderator" => "Moderator",
@@ -58,22 +59,48 @@ pub fn badge_label(kind: &str, text: &str, count: f64) -> String {
         "founder" => "Founder",
         "verified" => "Verified",
         "staff" => "Staff",
+        "bot" => "Bot",
         "global_moderator" => "Global moderator",
         "global_admin" => "Global admin",
-        "sidekick" => "Sidekick",
+        "sidekick" => "Sidekick - Community Helper",
         _ => "",
     };
     match kind {
-        "subscriber" if n > 0 => format!("Subscriber ({n} {})", plural("month")),
-        "subscriber" => "Subscriber".to_string(),
-        "sub_gifter" if n > 0 => format!("Sub gifter ({n} {})", plural("gift")),
-        "sub_gifter" => "Sub gifter".to_string(),
+        // kick.com counts a missing month count as one
+        "subscriber" => format!("{}-Month Subscriber", n.max(1)),
+        "sub_gifter" => format!("Gifted {} {}", n.max(1), if n > 1 { "subs" } else { "sub" }),
         _ if !pretty.is_empty() => pretty.to_string(),
         _ if !text.is_empty() && n > 0 => format!("{text} ({n})"),
         _ if !text.is_empty() => text.to_string(),
         _ if n > 0 => format!("{kind} ({n})"),
         _ => kind.to_string(),
     }
+}
+
+/// Tooltip text for a Kick global badge (`badges_v2`, keyed by `name`), as kick.com words it: "Level 58",
+/// "KICK Founder 22". Kick has no name for most of them and shows the raw name ("GOAT", "GoldenK"), so do we.
+pub fn badge_v2_label(name: &str, level: Option<i64>) -> String {
+    match name {
+        "level" => return level.map(|l| format!("Level {l}")).unwrap_or_else(|| "level".to_string()),
+        "kick_founder22" => "KICK Founder 22",
+        "kick_whale" => "KICK Whale",
+        "rs_ags_blade" => "RuneScape Armadyl Godsword",
+        "early_follower" => "Early Follower",
+        "kicks_gifter" => "KICKs Gifter",
+        _ => name,
+    }
+    .to_string()
+}
+
+/// A Kick CDN picture at the size kick.com asks for in chat (it appends the same resize options; the originals
+/// can be megabytes). Anything else is left as it is.
+pub fn cdn_badge_url(url: &str) -> String {
+    let host = url.strip_prefix("https://").and_then(|r| r.split('/').next()).unwrap_or("");
+    if host != "ext.cdn.kick.com" || url.contains("width=") {
+        return url.to_string();
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}width=72,format=webp,quality=50")
 }
 
 #[cfg(test)]
@@ -98,7 +125,7 @@ mod tests {
     fn svg_stays_sharp_when_the_box_grows() {
         let bytes = asset_bytes("agu-asset:kick-badges/moderator.svg").unwrap();
         assert_eq!(crate::images::decode(bytes, (64, 64), false).unwrap().fw, 64);
-        assert_eq!(crate::images::decode(bytes, (0, 0), false).unwrap().fw, 64);
+        assert_eq!(crate::images::decode(bytes, (0, 0), false).unwrap().fw, 80);
         assert_eq!(crate::images::decode(bytes, (20, 20), false).unwrap().fw, 20);
     }
 
@@ -113,9 +140,10 @@ mod tests {
         assert_eq!(badge_url("moderator", 0.0, None).as_deref(), Some("agu-asset:kick-badges/moderator.svg"));
         assert_eq!(badge_url("vip", 0.0, Some("")).as_deref(), Some("agu-asset:kick-badges/vip.svg"));
         assert_eq!(badge_url("subscriber", 6.0, None).as_deref(), Some("agu-asset:kick-badges/subscriber.svg"));
-        assert_eq!(badge_url("bot", 0.0, None), None);
+        assert_eq!(badge_url("bot", 0.0, None).as_deref(), Some("agu-asset:kick-badges/bot.svg"));
         assert_eq!(badge_url("trainee", 0.0, None), None);
-        for k in ["broadcaster", "verified", "staff", "global_moderator", "global_admin", "sidekick", "moderator", "vip", "og", "founder", "subscriber", "sub_gifter"] {
+        assert_eq!(badge_url("GOAT", 0.0, None), None);
+        for k in ["broadcaster", "verified", "staff", "global_moderator", "global_admin", "sidekick", "moderator", "vip", "og", "founder", "subscriber", "sub_gifter", "bot"] {
             assert!(asset_bytes(&badge_url(k, 3.0, None).unwrap()).is_some(), "{k}");
         }
     }
@@ -141,13 +169,36 @@ mod tests {
     }
 
     #[test]
-    fn labels() {
+    fn labels_match_kick_com() {
         assert_eq!(badge_label("moderator", "Moderator", 0.0), "Moderator");
         assert_eq!(badge_label("vip", "", 0.0), "VIP");
-        assert_eq!(badge_label("subscriber", "Subscriber", 1.0), "Subscriber (1 month)");
-        assert_eq!(badge_label("subscriber", "", 6.0), "Subscriber (6 months)");
-        assert_eq!(badge_label("sub_gifter", "Sub Gifter", 25.0), "Sub gifter (25 gifts)");
-        assert_eq!(badge_label("bot", "", 0.0), "bot");
+        assert_eq!(badge_label("verified", "Verified channel", 0.0), "Verified");
+        assert_eq!(badge_label("bot", "", 0.0), "Bot");
+        assert_eq!(badge_label("sidekick", "", 0.0), "Sidekick - Community Helper");
+        assert_eq!(badge_label("subscriber", "Subscriber", 1.0), "1-Month Subscriber");
+        assert_eq!(badge_label("subscriber", "", 6.0), "6-Month Subscriber");
+        assert_eq!(badge_label("subscriber", "", 0.0), "1-Month Subscriber");
+        assert_eq!(badge_label("sub_gifter", "Sub Gifter", 25.0), "Gifted 25 subs");
+        assert_eq!(badge_label("sub_gifter", "Sub Gifter", 1.0), "Gifted 1 sub");
         assert_eq!(badge_label("trainee", "Trainee", 0.0), "Trainee");
+        assert_eq!(badge_label("mystery", "", 0.0), "mystery");
+    }
+
+    #[test]
+    fn global_badge_labels_match_kick_com() {
+        assert_eq!(badge_v2_label("level", Some(58)), "Level 58");
+        assert_eq!(badge_v2_label("kick_founder22", None), "KICK Founder 22");
+        assert_eq!(badge_v2_label("rs_ags_blade", None), "RuneScape Armadyl Godsword");
+        assert_eq!(badge_v2_label("GOAT", None), "GOAT");
+        assert_eq!(badge_v2_label("WorldofWarcraftForeverBeta", None), "WorldofWarcraftForeverBeta");
+    }
+
+    #[test]
+    fn kick_cdn_pictures_are_fetched_small() {
+        assert_eq!(cdn_badge_url("https://ext.cdn.kick.com/chat/badges/GOAT_1.png"), "https://ext.cdn.kick.com/chat/badges/GOAT_1.png?width=72,format=webp,quality=50");
+        assert_eq!(cdn_badge_url("https://ext.cdn.kick.com/b.png?v=2"), "https://ext.cdn.kick.com/b.png?v=2&width=72,format=webp,quality=50");
+        assert_eq!(cdn_badge_url("https://files.kick.com/channel/sub.png"), "https://files.kick.com/channel/sub.png");
+        assert_eq!(cdn_badge_url("https://ext.cdn.kick.com.evil.com/b.png"), "https://ext.cdn.kick.com.evil.com/b.png");
+        assert_eq!(cdn_badge_url(""), "");
     }
 }
