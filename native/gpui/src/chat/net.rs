@@ -18,6 +18,7 @@ impl Net {
         let client = reqwest::Client::builder()
             .user_agent(user_agent.clone())
             .connect_timeout(std::time::Duration::from_secs(10))
+            // image downloads set their own limits per request (core images/fetch.rs: a stall timeout, 120 s at most)
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("http client");

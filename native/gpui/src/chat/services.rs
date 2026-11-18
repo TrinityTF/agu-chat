@@ -53,7 +53,7 @@ pub fn init(cx: &mut App, bridge: Arc<dyn AguBridge>, data_dir: PathBuf) -> Serv
     let (tx, mut rx) = unbounded::<()>();
     let images = ImagesHandle(Images::new(&net, Arc::new(move || {
         let _ = tx.unbounded_send(());
-    })));
+    }), &data_dir));
     let seven_events = SevenEvents::new(net.clone(), cx);
     let svc = Services(Rc::new(ServicesInner {
         net,

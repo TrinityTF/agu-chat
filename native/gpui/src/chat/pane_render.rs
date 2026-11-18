@@ -1374,6 +1374,13 @@ fn fg_base(fg: u32) -> u32 {
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_events(cx);
+        // on a screen with a higher scale the emotes need bigger files: the rows pick their URLs again
+        super::rows::note_scale_factor(window.scale_factor());
+        if super::rows::emote_scale_factor() != self.emote_scale {
+            self.emote_scale = super::rows::emote_scale_factor();
+            self.gen += 1;
+            self.invalidate_all();
+        }
         self.test_aids(window, cx);
         if self.settle > 0 {
             // a list needs a frame or two after its content changed (measure, then stick to the bottom)

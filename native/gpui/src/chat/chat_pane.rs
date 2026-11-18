@@ -170,6 +170,8 @@ pub struct ChatPane {
     pub(super) sb_drag: Option<(f32, f32)>,
     /// bumped whenever what a built row depends on changes
     pub(super) gen: u64,
+    /// The display scale the built rows picked their emote files for (`rows::emote_scale_factor`).
+    pub(super) emote_scale: f32,
     pub(super) highlighter: Highlighter,
     pub(super) ignores: CompiledIgnores,
     ignore_cache: IgnoreCache,
@@ -439,6 +441,7 @@ impl ChatPane {
             list_state: ChatListState::new(),
             sb_drag: None,
             gen: 1,
+            emote_scale: super::rows::emote_scale_factor(),
             twitch: HashMap::new(),
             envs: HashMap::new(),
             co_caps: HashMap::new(),
