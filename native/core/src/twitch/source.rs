@@ -55,6 +55,22 @@ struct RoomState {
     r9k: Option<String>,
 }
 
+impl RoomState {
+    /// ROOMSTATE's tags as the send box reads them (`followers-only` -1 = off, else minutes; `slow` seconds).
+    fn chat_modes(&self) -> crate::chat_rules::ChatModes {
+        let int = |v: &Option<String>| v.as_deref().and_then(|x| x.trim().parse::<i64>().ok());
+        let on = |v: &Option<String>| v.as_deref() == Some("1");
+        crate::chat_rules::ChatModes {
+            followers_min: int(&self.followers).filter(|m| *m >= 0),
+            subs_only: on(&self.subs_only),
+            emote_only: on(&self.emote_only),
+            slow_secs: int(&self.slow).unwrap_or(0).max(0),
+            unique_chat: on(&self.r9k),
+            ..Default::default()
+        }
+    }
+}
+
 struct St {
     channel_id: Option<String>, // from the first ROOMSTATE (room-id): anonymous IRC needs no Helix to know it
     stopped: bool,
@@ -206,6 +222,9 @@ impl TwitchSource {
         if let Some(id) = &s.channel_id {
             f["channelId"] = json!(id);
         }
+        if let Some(r) = &s.room_state {
+            f["chatModes"] = json!(r.chat_modes());
+        }
         if let Some(l) = s.live {
             f["live"] = json!(l);
         }
@@ -316,6 +335,10 @@ impl TwitchSource {
             let named = s.named_feed;
             (prev.map(|p| (p, next)), named)
         };
+        // the send box shows the modes (and who they keep out)
+        if prev.as_ref().map_or(true, |(p, n)| p.chat_modes() != n.chat_modes()) {
+            self.emit_conn();
+        }
         let Some((prev, next)) = prev else { return };
         if named {
             return; // the named feed covers every mode change once channel.moderate is live

@@ -116,6 +116,7 @@ pub fn defs_from_raw(data: &Value) -> SevenTvDefs {
 }
 
 pub async fn fetch_seven_tv_defs(client: &reqwest::Client) -> Option<Value> {
+    super::emotes::cache_ready().await;
     if let Some(c) = read_cache(DEFS_KEY, DEFS_TTL_MS) {
         return Some(c);
     }

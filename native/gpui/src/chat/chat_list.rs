@@ -7,7 +7,6 @@
 //!
 //! Content shorter than the viewport starts at the top, like a scroll container's content does.
 use std::cell::RefCell;
-use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
@@ -53,25 +52,22 @@ impl ChatListState {
         self.0.borrow().items.len()
     }
 
-    /// Items `old` were replaced by `count` new ones (their heights are unknown); an anchor keeps its item.
-    pub fn splice(&self, old: Range<usize>, count: usize) {
+    /// The rows were rebuilt in any shape (rows inserted in the middle, removed, trimmed at the top, appended):
+    /// `map[i]` is old item i's new index and whether its height still holds. A scrolled-up view keeps the row it
+    /// was on, so a busy chat never moves (or un-pauses) what is being read.
+    pub fn remap(&self, new_len: usize, map: &[Option<(usize, bool)>]) {
         let mut s = self.0.borrow_mut();
-        let removed = old.end - old.start;
-        s.items.splice(old.clone(), std::iter::repeat(None).take(count));
-        if let Some((ix, off)) = s.anchor.as_mut() {
-            if old.contains(ix) {
-                *ix = old.start;
-                *off = 0.0;
-            } else if old.end <= *ix {
-                *ix = *ix - removed + count;
+        let mut items: Vec<Option<ItemMetrics>> = vec![None; new_len];
+        for (old, m) in map.iter().enumerate() {
+            if let Some((j, true)) = m {
+                if let (Some(slot), Some(Some(h))) = (items.get_mut(*j), s.items.get(old)) {
+                    *slot = Some(*h);
+                }
             }
         }
-        let n = s.items.len();
-        if let Some((ix, _)) = s.anchor.as_mut() {
-            if n > 0 && *ix >= n {
-                *ix = n - 1;
-            }
-        }
+        s.items = items;
+        let idx: Vec<Option<usize>> = map.iter().map(|m| m.map(|(j, _)| j)).collect();
+        s.anchor = remap_anchor(s.anchor, &idx, new_len);
     }
 
     /// New content entirely: forget everything, follow the bottom.
@@ -223,6 +219,25 @@ impl ChatListState {
         s.anchor = Some(anchor);
         s.dist_to_bottom = (max_top - top).max(0.0);
     }
+}
+
+/// Where a scrolled-up view goes when its rows were rebuilt (`map[i]` = old row i's new index, None = gone).
+/// Following stays following. The row it was on keeps its place; if that row is gone (trimmed off the top, removed),
+/// the view moves to the next row that survived (the oldest kept one after a trim), else the one before it. Only when
+/// nothing of the old view is left does it go back to the bottom.
+pub fn remap_anchor(anchor: Option<(usize, f32)>, map: &[Option<usize>], new_len: usize) -> Option<(usize, f32)> {
+    let (ix, off) = anchor?;
+    if new_len == 0 {
+        return None;
+    }
+    let clamp = |j: usize| j.min(new_len - 1);
+    if let Some(Some(j)) = map.get(ix) {
+        return Some((clamp(*j), off));
+    }
+    if let Some(j) = map.iter().skip(ix + 1).find_map(|m| *m) {
+        return Some((clamp(j), 0.0));
+    }
+    map.iter().take(ix.min(map.len())).rev().find_map(|m| *m).map(|j| (clamp(j), 0.0))
 }
 
 impl Default for ChatListState {
@@ -445,5 +460,114 @@ impl Element for ChatList {
             }
         });
         let _ = pp.bounds;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(h: f32) -> Option<ItemMetrics> {
+        Some(ItemMetrics { h, mt: 0.0, mb: 0.0 })
+    }
+
+    fn list(n: usize) -> ChatListState {
+        let s = ChatListState::new();
+        {
+            let mut i = s.0.borrow_mut();
+            i.items = vec![m(20.0); n];
+            i.vp = (300.0, 200.0);
+            i.dist_to_bottom = f32::MAX;
+        }
+        s
+    }
+
+    fn anchor(s: &ChatListState) -> Option<(usize, f32)> {
+        s.0.borrow().anchor
+    }
+
+    /// old row i -> new index, as `apply_rows` builds it (true: same row, height kept)
+    fn shift(n_old: usize, f: impl Fn(usize) -> Option<usize>) -> Vec<Option<(usize, bool)>> {
+        (0..n_old).map(|i| f(i).map(|j| (j, true))).collect()
+    }
+
+    #[test]
+    fn following_stays_following() {
+        assert_eq!(remap_anchor(None, &[Some(0), Some(1)], 5), None);
+        let s = list(10);
+        s.remap(15, &shift(10, Some));
+        assert!(s.following());
+    }
+
+    #[test]
+    fn appended_rows_do_not_move_a_scrolled_up_view() {
+        let s = list(100);
+        s.0.borrow_mut().anchor = Some((50, 0.0));
+        s.scroll_by(-35.0);
+        let a = anchor(&s).unwrap();
+        assert_eq!(a, (48, 5.0));
+        // a flood of new rows below, many times over
+        for k in 0..50 {
+            let n = 100 + k * 30;
+            s.remap(n + 30, &shift(n, Some));
+        }
+        assert_eq!(anchor(&s), Some(a));
+        assert!(!s.following());
+    }
+
+    #[test]
+    fn a_row_put_in_the_middle_keeps_the_view_on_its_row() {
+        // another chat's late line lands above the row being read: the view keeps that row, offset and all
+        let s = list(100);
+        s.0.borrow_mut().anchor = Some((60, 7.0));
+        s.remap(101, &shift(100, |i| Some(if i < 40 { i } else { i + 1 })));
+        assert_eq!(anchor(&s), Some((61, 7.0)));
+        // below it: nothing moves
+        s.remap(102, &shift(101, |i| Some(if i < 80 { i } else { i + 1 })));
+        assert_eq!(anchor(&s), Some((61, 7.0)));
+        assert!(!s.following());
+    }
+
+    #[test]
+    fn trimming_shifts_the_anchor_and_keeps_heights() {
+        let s = list(100);
+        s.0.borrow_mut().anchor = Some((60, 3.0));
+        s.0.borrow_mut().items[70] = m(55.0);
+        // 10 trimmed at the top, 10 appended
+        s.remap(100, &shift(100, |i| i.checked_sub(10)));
+        assert_eq!(anchor(&s), Some((50, 3.0)));
+        assert_eq!(s.0.borrow().items[60], m(55.0));
+        assert_eq!(s.0.borrow().items[95], None);
+    }
+
+    #[test]
+    fn the_row_being_read_trimmed_away_stays_at_the_oldest_kept_row() {
+        let s = list(100);
+        s.0.borrow_mut().anchor = Some((5, 9.0));
+        s.remap(100, &shift(100, |i| i.checked_sub(20)));
+        assert_eq!(anchor(&s), Some((0, 0.0)));
+        assert!(!s.following());
+    }
+
+    #[test]
+    fn a_removed_row_moves_the_view_to_its_neighbour() {
+        assert_eq!(remap_anchor(Some((3, 4.0)), &[Some(0), Some(1), Some(2), None, Some(3)], 4), Some((3, 0.0)));
+        // the last rows went: the one before
+        assert_eq!(remap_anchor(Some((3, 4.0)), &[Some(0), Some(1), None, None], 2), Some((1, 0.0)));
+        // nothing of the old view is left (a new search): back to the bottom
+        assert_eq!(remap_anchor(Some((1, 4.0)), &[None, None], 3), None);
+        assert_eq!(remap_anchor(Some((1, 4.0)), &[Some(0), Some(1)], 0), None);
+    }
+
+    #[test]
+    fn a_changed_row_keeps_the_offset_but_is_measured_again() {
+        let s = list(10);
+        s.0.borrow_mut().anchor = Some((4, 6.0));
+        let mut map = shift(10, Some);
+        map[4] = Some((4, false));
+        s.remap(10, &map);
+        assert_eq!(anchor(&s), Some((4, 6.0)));
+        assert_eq!(s.0.borrow().items[4], None);
+        assert_eq!(s.0.borrow().items[3], m(20.0));
     }
 }
