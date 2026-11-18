@@ -37,10 +37,10 @@ use super::search::{is_empty_query, match_row, parse_search};
 use super::services::Services;
 use super::store::{source_key, ChatStore};
 use super::twitch::cosmetics::{ChatterStyle, StyleLookup};
-use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, seven_tv_channel_key, EmoteSets, ProviderScopedMap, SevenTvIds};
+use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, set_retry_delay, seven_tv_channel_key, EmoteSets, ProviderScopedMap, SevenTvIds};
 use super::twitch::events::notice_visible;
 use super::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, EMOTE_SET_UPDATE, USER_UPDATE};
-use super::twitch::use_twitch_data::{load_badges, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
+use super::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
 use super::types::*;
 use crate::layout::tree::{is_whisper, is_whisper_key};
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
@@ -685,11 +685,13 @@ impl ChatPane {
                         cx.spawn(async move |this, cx| {
                             if let Some((map, cid)) = load_badges(&bridge, &s2, &sk2).await {
                                 let _ = this.update(cx, |p, cx| {
-                                    if let Some(cid) = cid {
-                                        p.store.set_channel_id(&sk2, &cid);
-                                    }
+                                    let new_cid = cid.is_some_and(|cid| p.store.set_channel_id(&sk2, &cid));
                                     p.twitch.entry(sk2.clone()).or_default().badge_map = Arc::new(map);
                                     p.data_changed(cx);
+                                    if new_cid {
+                                        // the emote sets are keyed by it: start them now, not with the next frame
+                                        p.start_loads(cx);
+                                    }
                                 });
                             }
                         })
@@ -731,17 +733,7 @@ impl ChatPane {
                     }
                     if let Some(cid) = channel_id {
                         if self.requested.insert(format!("emotes:{sk}:{cid}")) {
-                            let sk2 = sk.clone();
-                            let task = self.svc.net.run(load_provider_sets(self.svc.net.client.clone(), cid));
-                            cx.spawn(async move |this, cx| {
-                                if let Some(sets) = task.await {
-                                    let _ = this.update(cx, |p, cx| {
-                                        p.twitch.entry(sk2).or_default().provider_sets = Some(Arc::new(sets));
-                                        p.data_changed(cx);
-                                    });
-                                }
-                            })
-                            .detach();
+                            self.load_emote_sets(sk.clone(), cid, 0, cx);
                         }
                     }
                 }
@@ -764,6 +756,51 @@ impl ChatPane {
                 _ => {}
             }
         }
+    }
+
+    /// A Twitch channel's 7TV / BTTV / FFZ sets. The first try shows what is cached at once (however old) while the
+    /// network refreshes it; a refresh that did not get everything (a provider down or slow at startup) is tried
+    /// again with growing waits. Each arrival rebuilds the rows already in the list, so lines that came in before
+    /// the sets get their emotes too.
+    fn load_emote_sets(&mut self, sk: String, cid: String, attempt: u32, cx: &mut Context<Self>) {
+        let client = self.svc.net.client.clone();
+        let cached = (attempt == 0).then(|| self.svc.net.run(load_cached_provider_sets(client.clone(), cid.clone())));
+        let task = self.svc.net.run(load_provider_sets(client, cid.clone()));
+        cx.spawn(async move |this, cx| {
+            let same_channel = |p: &ChatPane| p.store.source(&sk).and_then(|s| s.channel_id.as_deref()) == Some(cid.as_str());
+            if let Some(cached) = cached {
+                if let Some(Some(sets)) = cached.await {
+                    let _ = this.update(cx, |p, cx| {
+                        if same_channel(p) && p.twitch.get(&sk).map_or(true, |d| d.provider_sets.is_none()) {
+                            p.twitch.entry(sk.clone()).or_default().provider_sets = Some(Arc::new(sets));
+                            p.data_changed(cx);
+                        }
+                    });
+                }
+            }
+            let Some((sets, complete)) = task.await else { return };
+            let applied = this
+                .update(cx, |p, cx| {
+                    if !same_channel(p) {
+                        return false;
+                    }
+                    p.twitch.entry(sk.clone()).or_default().provider_sets = Some(Arc::new(sets));
+                    p.data_changed(cx);
+                    true
+                })
+                .unwrap_or(false);
+            if complete || !applied {
+                return;
+            }
+            let Some(wait) = set_retry_delay(attempt) else { return };
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |p, cx| {
+                if same_channel(p) {
+                    p.load_emote_sets(sk.clone(), cid.clone(), attempt + 1, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The acting account's 7TV personal set, loaded once per account.

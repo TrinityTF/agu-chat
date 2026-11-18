@@ -146,6 +146,7 @@ pub fn apply(parts: Vec<MsgPart>, cm: &Cheermotes, animate: bool, px: f32) -> Ve
 /// has nothing, so the answer is None and Bits messages stay plain text.
 pub async fn load_cheermotes(bridge: &Arc<dyn AguBridge>, source: &SourceRef, sk: &str) -> Option<Cheermotes> {
     let key = format!("cheermotes:{sk}");
+    super::emotes::cache_ready().await;
     if let Some(c) = read_cache(&key, EMOTE_CHANNEL_TTL_MS) {
         let cm = parse_cheermotes(&c);
         if !cm.prefixes.is_empty() {

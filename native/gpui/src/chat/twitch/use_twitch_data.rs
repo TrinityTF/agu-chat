@@ -14,7 +14,7 @@ use agu_chat_core::protocol::{AguBridge, SourceRef};
 use serde_json::Value;
 
 use super::badges::{build_badge_map, BadgeMap};
-use super::emotes::{fetch_bttv, fetch_ffz, fetch_seven_tv, flush_cache, ProviderScopedMap, SevenTvIds, TwitchEmotesResp};
+use super::emotes::{bttv_sets, fetch_seven_tv, ffz_sets, flush_cache, seven_tv_sets, twitch_sets_cached, twitch_sets_fresh, CacheMode, ProviderScopedMap, SevenTvIds, TwitchEmotesResp};
 use crate::chat::mod_caps::{relay_api, ModCaps};
 
 #[derive(Clone, Default)]
@@ -61,11 +61,27 @@ pub async fn load_badges(bridge: &Arc<dyn AguBridge>, source: &SourceRef, sk: &s
     Some((build_badge_map(&data), channel_id))
 }
 
-/// 7TV + BTTV + FFZ, kept raw per provider so the pane can apply settings.sevenTv/bttv/ffz.
-pub async fn load_provider_sets(client: reqwest::Client, channel_id: String) -> ProviderSets {
-    let ((seven, seven_ids), bttv, ffz) = tokio::join!(fetch_seven_tv(&client, &channel_id, false), fetch_bttv(&client, &channel_id), fetch_ffz(&client, &channel_id));
-    flush_cache();
+async fn provider_sets(client: &reqwest::Client, channel_id: &str, mode: CacheMode) -> ProviderSets {
+    let ((seven, seven_ids), bttv, ffz) = tokio::join!(seven_tv_sets(client, channel_id, mode), bttv_sets(client, channel_id, mode), ffz_sets(client, channel_id, mode));
     ProviderSets { seven, bttv, ffz, seven_ids }
+}
+
+/// 7TV + BTTV + FFZ, kept raw per provider so the pane can apply settings.sevenTv/bttv/ffz. The flag is false when
+/// some provider did not answer (what it had before is kept): the pane tries again later.
+pub async fn load_provider_sets(client: reqwest::Client, channel_id: String) -> (ProviderSets, bool) {
+    let sets = provider_sets(&client, &channel_id, CacheMode::Normal).await;
+    flush_cache();
+    (sets, twitch_sets_fresh(&channel_id))
+}
+
+/// The channel's sets as last cached, however old, without the network: what startup shows at once while
+/// `load_provider_sets` refreshes them. None when nothing is cached.
+pub async fn load_cached_provider_sets(client: reqwest::Client, channel_id: String) -> Option<ProviderSets> {
+    super::emotes::cache_ready().await;
+    if !twitch_sets_cached(&channel_id) {
+        return None;
+    }
+    Some(provider_sets(&client, &channel_id, CacheMode::CacheOnly).await)
 }
 
 /// Only the channel's 7TV set again, past the cache (it changed live, or changes may have been missed).
