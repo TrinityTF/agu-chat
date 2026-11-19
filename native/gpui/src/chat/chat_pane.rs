@@ -1897,7 +1897,8 @@ impl ChatPane {
     /// Ctrl+click on a name: the message box starts with "@name " (kept once if it already does), caret at the
     /// end, box focused. The display name, unless it has characters chat would not match (a localized Twitch
     /// name), then the login.
-    pub(super) fn mention_user(&mut self, user: &super::rows::CardUser, window: &mut Window, cx: &mut Context<Self>) {
+    /// `sk` is the chat the person wrote in: the box switches to it.
+    pub(super) fn mention_user(&mut self, sk: Option<&str>, user: &super::rows::CardUser, window: &mut Window, cx: &mut Context<Self>) {
         let who = if !user.name.is_empty() && (user.name.is_ascii() || user.login.is_empty()) { &user.name } else { &user.login };
         if who.is_empty() {
             return;
@@ -1911,6 +1912,9 @@ impl ChatPane {
         let rest = if lower == tag.to_lowercase() || lower.starts_with(&format!("{} ", tag.to_lowercase())) { rest[tag.len()..].trim_start() } else { rest };
         let next = if rest.is_empty() { format!("{tag} ") } else { format!("{tag} {rest}") };
         input.update(cx, |i, cx| i.replace_all(&next, next.len(), cx));
+        if let Some(sk) = sk {
+            sb.update(cx, |sb, cx| sb.target_chat(sk, cx));
+        }
         input.read(cx).focus(window);
     }
 

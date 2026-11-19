@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use agu_chat_core::chat_rules::{ChatGate, GateLevel};
 use agu_chat_core::protocol::{Platform, SourceRef};
-use gpui::{
+use gpui::{deferred, 
     div, point, prelude::*, px, relative, AnyElement, ClickEvent, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
     ScrollHandle, SharedString, WeakEntity, Window,
 };
@@ -251,8 +251,29 @@ impl SendBox {
 
     // ---- props ------------------------------------------------------------------------------------------
 
+    /// Send to this chat from now on (a reply or a Ctrl+clicked name picks the chat that person is in); a chat this
+    /// account can't post in leaves the target as it was.
+    pub fn target_chat(&mut self, sk: &str, cx: &mut Context<Self>) {
+        if !self.sendable().iter().any(|s| s.sk == sk) || self.target == sk {
+            return;
+        }
+        self.target = sk.to_string();
+        self.target_open = false;
+        self.refresh_placeholder(cx);
+        cx.notify();
+    }
+
+    fn refresh_placeholder(&mut self, cx: &mut Context<Self>) {
+        let (ph, disabled) = (self.placeholder(), self.sendable().is_empty() || self.locked().is_some());
+        self.input.update(cx, |i, cx| {
+            i.set_placeholder(&ph, cx);
+            i.set_disabled(disabled, cx);
+        });
+    }
+
     pub fn set_props(&mut self, sources: Vec<SendSource>, focused: bool, reply: Option<ReplyTarget>, window: &mut Window, cx: &mut Context<Self>) {
         let reply_id = reply.as_ref().map(|r| r.id.clone());
+        let new_reply = reply_id.is_some() && reply_id != self.prev_reply_id;
         let changed = sources != self.sources || reply.as_ref().map(|r| (&r.id, &r.user, &r.text)) != self.reply.as_ref().map(|r| (&r.id, &r.user, &r.text));
         // Picking Reply puts the caret in the box.
         if reply_id.is_some() && reply_id != self.prev_reply_id {
@@ -267,16 +288,18 @@ impl SendBox {
         if changed {
             self.sources = sources;
             self.reply = reply;
+            // Replying to someone switches the box to their chat, and it stays there after the reply is sent.
+            if new_reply {
+                if let Some(sk) = self.reply.as_ref().map(|r| r.sk.clone()).filter(|sk| self.sendable().iter().any(|s| &s.sk == sk)) {
+                    self.target = sk;
+                }
+            }
             // Keep the selected target valid as connections come and go.
             let eff = self.effective();
             if eff != self.target && self.reply.is_none() {
                 self.target = eff;
             }
-            let (ph, disabled) = (self.placeholder(), self.sendable().is_empty() || self.locked().is_some());
-            self.input.update(cx, |i, cx| {
-                i.set_placeholder(&ph, cx);
-                i.set_disabled(disabled, cx);
-            });
+            self.refresh_placeholder(cx);
             cx.notify();
         }
     }
@@ -967,6 +990,7 @@ impl SendBox {
                         if can {
                             this.target = sk.clone();
                             this.target_open = false;
+                            this.refresh_placeholder(cx);
                             this.input.read(cx).focus(w);
                             cx.notify();
                         }
@@ -990,6 +1014,7 @@ impl SendBox {
                     .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
                         this.target = ALL.into();
                         this.target_open = false;
+                        this.refresh_placeholder(cx);
                         this.input.read(cx).focus(w);
                         cx.notify();
                     })),
@@ -1115,17 +1140,17 @@ impl Render for SendBox {
                     self.auto_at = Some((a.start, a.idx));
                     self.auto_scroll.scroll_to_item(a.idx);
                 }
-                row = row.child(autocomplete_dropdown(a, &self.auto_scroll, pick_auto));
+                row = row.child(deferred(autocomplete_dropdown(a, &self.auto_scroll, pick_auto)).with_priority(1));
             }
             if let Some(m) = &self.mentions.state {
                 if self.mention_at != Some((m.start, m.idx)) {
                     self.mention_at = Some((m.start, m.idx));
                     self.mention_scroll.scroll_to_item(m.idx);
                 }
-                row = row.child(mention_dropdown(m, &self.mention_scroll, pick_mention));
+                row = row.child(deferred(mention_dropdown(m, &self.mention_scroll, pick_mention)).with_priority(1));
             }
             if self.picker_open {
-                row = row.child(self.picker_el(cx));
+                row = row.child(deferred(self.picker_el(cx)).with_priority(1));
             }
         }
         row = row.child(
@@ -1157,7 +1182,7 @@ impl Render for SendBox {
         if show_target {
             let mut t = div().relative().flex_none().flex();
             if self.target_open && !disabled {
-                t = t.child(self.target_menu(cx));
+                t = t.child(deferred(self.target_menu(cx)).with_priority(1));
             }
             let tip = if eff == ALL { "Sending to all chats".to_string() } else { self.single().map(|s| format!("Sending to {}: {}", icons::platform_label(s.source.platform), s.source.channel)).unwrap_or_else(|| "Send target".into()) };
             let _ = tip;

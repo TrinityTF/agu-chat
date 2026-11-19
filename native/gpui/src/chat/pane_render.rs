@@ -129,9 +129,9 @@ impl ChatPane {
             Act::Tag(t) => {
                 if let Some(a) = actions.get(t as usize).cloned() {
                     // Ctrl+click on a name: @name at the start of the message box instead of the user card.
-                    if let (RowAction::Card { user, .. }, true) = (&a, crate::text_input::primary_held(&w.modifiers())) {
-                        let user = user.clone();
-                        let _ = weak.update(cx, |p, cx| p.mention_user(&user, w, cx));
+                    if let (RowAction::Card { sk, user }, true) = (&a, crate::text_input::primary_held(&w.modifiers())) {
+                        let (sk, user) = (sk.clone(), user.clone());
+                        let _ = weak.update(cx, |p, cx| p.mention_user(Some(&sk), &user, w, cx));
                         return;
                     }
                     let _ = weak.update(cx, |p, cx| p.run_action(a, cx));
@@ -421,6 +421,7 @@ impl ChatPane {
                 lines = lines.child(self.flow(t, Rc::new(vec![]), cx));
             }
             if let Some(user) = n.reply.clone() {
+                let reply_sk = n.card.as_ref().map(|(sk, _)| sk.clone());
                 let in_panel = key.starts_with(super::mentions::PANEL_KEY);
                 lines = lines.child(
                     div().flex().mt(px(NOTICE_BUTTON_GAP)).child(
@@ -441,7 +442,7 @@ impl ChatPane {
                             .child("Reply")
                             .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
                                 cx.stop_propagation();
-                                this.mention_user(&user, w, cx);
+                                this.mention_user(reply_sk.as_deref(), &user, w, cx);
                                 if in_panel {
                                     cx.emit(super::chat_pane::PaneEvent::Reveal);
                                 }
