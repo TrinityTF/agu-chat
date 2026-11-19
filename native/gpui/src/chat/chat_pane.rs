@@ -215,6 +215,11 @@ pub struct ChatPane {
     pub(super) hover_row: Option<String>,
     pub(super) hover_bar: Option<String>,
     pin_tick: Option<gpui::Task<()>>,
+    /// per Twitch source: its hype train and when to ask again (`hype_train.rs`)
+    pub(super) hype: super::hype_train::HypeMap,
+    /// the hype train bars shown expanded, by source key
+    pub(super) hype_open: HashSet<String>,
+    pub(super) hype_tick: Option<gpui::Task<()>>,
     pub(super) reply_target: Option<ReplyTarget>,
     pub(super) send_box: Option<Entity<super::input::send_box::SendBox>>,
     /// the Ban / Warn popover (`modPop`) and the request to open one (built in render, which has the window)
@@ -478,6 +483,9 @@ impl ChatPane {
             hover_row: None,
             hover_bar: None,
             pin_tick: None,
+            hype: HashMap::new(),
+            hype_open: HashSet::new(),
+            hype_tick: None,
             reply_target: None,
             send_box: None,
             mod_pop: None,
@@ -1369,6 +1377,9 @@ impl ChatPane {
             match m {
                 Inbox::Reset(sk) => self.store.reset_source(&sk),
                 Inbox::Frame(sk, f) => {
+                    if super::hype_train::contributes(&f) {
+                        self.hype_poke(&sk);
+                    }
                     self.store.apply(&sk, &f);
                 }
                 Inbox::SubError(sk, msg) => {

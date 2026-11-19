@@ -41,6 +41,7 @@ pub fn default_settings() -> Map<String, Value> {
         "showAutomod": true, // AutoMod's held messages, with Allow / Deny
         "pauseChat": "scroll", // scroll | hover | alt: what holds the chat still, besides scrolling up
         "showPlatformMarks": true,
+        "hypeTrain": true, // the hype train bar at the top of a Twitch chat (public gql.twitch.tv data, no sign-in)
         "linkPreviews": true, // cards for Twitch clip, YouTube, X, Streamable and Instagram links (fetched from those sites)
         "hotkeys": {}, // action id -> ["Ctrl+T", ...]; only the actions the user changed
         // Inline mod-mode buttons, in order. Same defaults as DEFAULT_MOD_BUTTONS in src/renderer/chat/modButtons.ts.

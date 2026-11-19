@@ -195,6 +195,8 @@ pub struct Settings {
     pub show_platform_marks: bool,
     /// a card under a message that links to a Twitch clip, a YouTube video, a post on X, Streamable or Instagram
     pub link_previews: bool,
+    /// the hype train bar at the top of a Twitch chat while the channel has a train going
+    pub hype_train: bool,
     pub hotkeys: HashMap<String, Vec<String>>,
     pub mod_buttons: Vec<ModButton>,
     pub highlight_rules: Vec<HighlightRule>,
@@ -241,6 +243,7 @@ impl Default for Settings {
             pause_chat: "scroll".into(),
             show_platform_marks: true,
             link_previews: true,
+            hype_train: true,
             hotkeys: HashMap::new(),
             mod_buttons: vec![
                 mb("ban", "ban", "ban", 0),
