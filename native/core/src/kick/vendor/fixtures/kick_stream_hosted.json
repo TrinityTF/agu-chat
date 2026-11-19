@@ -1,0 +1,12 @@
+[
+ {
+  "event": "App\\Events\\StreamHostedEvent",
+  "channel": "chatrooms.15250312",
+  "data": {"message":{"id":"d987baa8-b8d0-423d-9d95-23865d8f5e5c","numberOfViewers":118,"optionalMessage":null,"createdAt":"2026-11-19T00:14:16.572277Z"},"user":{"id":61224295,"username":"PapaGambles","isSuperAdmin":false,"verified":{"id":20689,"channel_id":60085490,"created_at":"2026-01-14T14:38:10.000000Z","updated_at":"2026-01-14T14:38:10.000000Z"}}}
+ },
+ {
+  "event": "App\\Events\\StreamHostEvent",
+  "channel": "chatrooms.15250312.v2",
+  "data": {"chatroom_id":15250312,"optional_message":null,"number_viewers":118,"host_username":"PapaGambles"}
+ }
+]

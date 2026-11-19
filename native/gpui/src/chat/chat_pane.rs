@@ -39,7 +39,7 @@ use super::services::Services;
 use super::store::{source_key, ChatStore};
 use super::twitch::cosmetics::{ChatterStyle, StyleLookup};
 use super::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, merge_emote_sets, set_retry_delay, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
-use super::twitch::events::notice_visible;
+use super::twitch::events::{kick_event_visible, notice_visible};
 use super::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, EMOTE_SET_UPDATE, USER_UPDATE};
 use super::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_kick_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets, TwitchData};
 use super::types::*;
@@ -1421,7 +1421,7 @@ impl ChatPane {
                 RowBody::Automod(_) => rs.show_automod,
                 RowBody::Msg(m) => !(m.deleted && rs.deleted_messages == "hide"),
                 RowBody::Rumble(m) => !(m.deleted && rs.deleted_messages == "hide"),
-                RowBody::Kick(m) => !(m.deleted && rs.deleted_messages == "hide"),
+                RowBody::Kick(m) => !(m.deleted && rs.deleted_messages == "hide") && kick_event_visible(m.notice.as_deref()),
                 _ => true,
             })
             .cloned()
@@ -2147,7 +2147,8 @@ impl ChatPane {
                 && match &r.body {
                     RowBody::Msg(m) => m.user.id == user.id,
                     RowBody::Rumble(m) => m.user.id == user.id,
-                    RowBody::Kick(m) => m.user.id == user.id,
+                    // a raid or a KICKs gift without a message is not something they said
+                    RowBody::Kick(m) => m.user.id == user.id && !m.text.is_empty(),
                     RowBody::YouTube(m) => m.user.id == user.id,
                     RowBody::X(m) => m.user.id == user.id,
                     _ => false,
@@ -2338,7 +2339,9 @@ impl ChatPane {
             BuiltRow::Event(e) => {
                 // my-px, a 3px left bar; header `pt-0.5` + a 19.5 px line (+ pb-0.5 when nothing follows)
                 let inner_w = width - 3.0;
-                let header = 2.0 + 19.5 + if e.inner.is_some() { 0.0 } else { 2.0 };
+                // (a picture on the right makes the header as tall as it, with pb-0.5 under it)
+                let line = e.image.as_ref().map(|_| super::rows::event_image_px(base)).unwrap_or(0.0).max(19.5);
+                let header = 2.0 + line + if e.inner.is_some() && e.image.is_none() { 0.0 } else { 2.0 };
                 let inner = e.inner.as_ref().map(|f| frame_h(f, inner_w, window, cx)).unwrap_or(0.0);
                 ItemMetrics { h: header + inner, mt: 1.0, mb: 1.0 }
             }

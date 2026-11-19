@@ -36,7 +36,7 @@ use crate::protocol::{AccountState, Frame, Platform};
 use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, js_string, now_ms, parse_rfc3339_ms, truthy, uuid_v4, Timer};
 use crate::ws::{self, WsEvent, WsHandle};
-use vendor::kick::{badges_mark_mod, channel_user_is_mod, get_channel_user, fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, KickChannel, SubBadge};
+use vendor::kick::{badges_mark_mod, channel_user_is_mod, get_channel_user, fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, to_kick_gift_msg, to_kick_host_msg, KickChannel, SubBadge};
 
 const MAX_BACKLOG: usize = 300;
 // Kick's chat works whether or not the channel is live, so the socket stays up; this only keeps the header's
@@ -51,6 +51,35 @@ const DEAD_AFTER_MS: i64 = 150_000;
 // Only a fallback for a failed descriptor fetch: the descriptor is authoritative (observed 2026-11-03).
 const FALLBACK_DESCRIPTOR: (&str, &str) = ("34bf7a0ff419a2a775b9", "us2");
 const PUSHER_VERSION: &str = "8.4.0";
+// The same raid heard on both host channels within this long shows once (Kick was seen 22 s apart).
+const HOST_DEDUPE_MS: i64 = 120_000;
+
+/// The Pusher channels one Kick chat reads, the ones kick.com's own chat subscribes to (its web client, Nov 2026).
+struct Subs {
+    /// `chatrooms.<chatroomId>.v2`: chat messages, deletes, bans, clears, pins, chatroom settings
+    room: String,
+    /// `channel.<channelId>`: livestream start / stop
+    chan: String,
+    /// `chatrooms.<chatroomId>`: raids (`App\Events\StreamHostedEvent`)
+    hosts: String,
+    /// `channel_<channelId>`: KICKs gifts (`KicksGifted`, `KicksGiftedDeleted`)
+    gifts: String,
+}
+
+impl Subs {
+    fn of(c: &KickChannel) -> Subs {
+        Subs {
+            room: format!("chatrooms.{}.v2", c.chatroom_id),
+            chan: format!("channel.{}", c.channel_id),
+            hosts: format!("chatrooms.{}", c.chatroom_id),
+            gifts: format!("channel_{}", c.channel_id),
+        }
+    }
+
+    fn all(&self) -> [&str; 4] {
+        [&self.room, &self.chan, &self.hosts, &self.gifts]
+    }
+}
 
 static USER_IDS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -340,6 +369,8 @@ struct St {
     last_msg_at: i64,
     pinged_at: i64,
     failures: u32,
+    /// the last raid shown (its raider and viewers) and when, so one heard on both host channels shows once
+    last_host: Option<(String, i64)>,
     stopped: bool,
     last_conn_json: String,
     auth_listener: Option<u64>,
@@ -386,6 +417,10 @@ fn chatlog_frame(st: &St) -> Value {
 
 impl KickSource {
     pub fn new(slug: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<dyn Source> {
+        Self::create(slug, emit, ctx)
+    }
+
+    fn create(slug: String, emit: Emit, ctx: Arc<Ctx>) -> Arc<KickSource> {
         let mut status = Map::new();
         status.insert("userId".into(), json!(""));
         status.insert("slug".into(), json!(slug));
@@ -423,6 +458,7 @@ impl KickSource {
                 last_msg_at: 0,
                 pinged_at: 0,
                 failures: 0,
+                last_host: None,
                 stopped: false,
                 last_conn_json: String::new(),
                 auth_listener: None,
@@ -484,6 +520,21 @@ impl KickSource {
     fn dress_badges(&self, msg: Value) -> Value {
         let subs = self.st.lock().unwrap().sub_badges.clone();
         dress_sub_badges(msg, &subs)
+    }
+
+    /// A KICKs gift or a raid: kept for the snapshot like a chat line, and sent as one.
+    fn push_event(&self, msg: Value) {
+        self.push_backlog(msg.clone());
+        self.emit(json!({"type": "chat", "message": msg}));
+    }
+
+    fn mark_deleted(&self, mid: &str) {
+        for msg in self.st.lock().unwrap().backlog.iter_mut() {
+            if msg["id"] == mid {
+                msg["deleted"] = json!(true);
+            }
+        }
+        self.emit(json!({"type": "delete", "ids": [mid]}));
     }
 
     fn push_backlog(&self, msg: Value) {
@@ -738,8 +789,7 @@ impl KickSource {
     fn open_socket(self: &Arc<Self>, c: &KickChannel, desc: (String, String)) {
         let (app_key, cluster) = desc;
         let url = format!("wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version={PUSHER_VERSION}&flash=false");
-        let room = format!("chatrooms.{}.v2", c.chatroom_id);
-        let chan = format!("channel.{}", c.channel_id);
+        let subs = Arc::new(Subs::of(c));
         let mut st = self.st.lock().unwrap();
         if st.stopped {
             return;
@@ -747,10 +797,9 @@ impl KickSource {
         let id = st.next_ws;
         st.next_ws += 1;
         let me = self.me.clone();
-        let (room2, chan2) = (room.clone(), chan.clone());
         let handle = ws::connect(url, self.ctx.user_agent.clone(), move |ev| {
             if let Some(s) = me.upgrade() {
-                s.on_ws(id, &room2, &chan2, ev);
+                s.on_ws(id, &subs, ev);
             }
         });
         st.ws = Some((id, Arc::new(handle)));
@@ -801,7 +850,7 @@ impl KickSource {
         }
     }
 
-    fn on_ws(self: &Arc<Self>, id: u64, room: &str, chan: &str, ev: WsEvent) {
+    fn on_ws(self: &Arc<Self>, id: u64, subs: &Subs, ev: WsEvent) {
         match ev {
             WsEvent::Open => {}
             WsEvent::Message(raw) => {
@@ -814,7 +863,7 @@ impl KickSource {
                     st.pinged_at = 0;
                 }
                 if let Ok(m) = serde_json::from_str::<Value>(&raw) {
-                    self.handle_pusher(id, &m, room, chan);
+                    self.handle_pusher(id, &m, subs);
                 }
             }
             WsEvent::Close(..) => self.on_ws_closed(id),
@@ -844,11 +893,13 @@ impl KickSource {
         self.schedule_reconnect();
     }
 
-    fn handle_pusher(self: &Arc<Self>, id: u64, m: &Value, room: &str, chan: &str) {
+    fn handle_pusher(self: &Arc<Self>, id: u64, m: &Value, subs: &Subs) {
+        let (room, chan) = (subs.room.as_str(), subs.chan.as_str());
         let Some(ev) = m["event"].as_str().filter(|e| !e.is_empty()) else { return };
         if ev == "pusher:connection_established" {
-            self.ws_send(id, &json!({"event": "pusher:subscribe", "data": {"auth": "", "channel": room}}).to_string());
-            self.ws_send(id, &json!({"event": "pusher:subscribe", "data": {"auth": "", "channel": chan}}).to_string());
+            for c in subs.all() {
+                self.ws_send(id, &json!({"event": "pusher:subscribe", "data": {"auth": "", "channel": c}}).to_string());
+            }
             return;
         }
         if ev == "pusher:ping" {
@@ -890,6 +941,42 @@ impl KickSource {
             self.on_chatroom_updated(&data);
             return;
         }
+        if m["channel"] == subs.gifts.as_str() {
+            match ev {
+                "KicksGifted" => {
+                    if let Some(msg) = to_kick_gift_msg(&data) {
+                        self.push_event(msg);
+                    }
+                }
+                // kick.com drops a gift from its chat when a moderator removes it
+                "KicksGiftedDeleted" => {
+                    let tx = js_str_or_empty(Some(&data["gifted_transaction_id"]));
+                    if !tx.is_empty() {
+                        self.mark_deleted(&format!("kicks-{tx}"));
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Raids: kick.com listens on `chatrooms.<id>` (StreamHostedEvent); the older StreamHostEvent on the v2 room is
+        // read too, and one raid heard on both shows once.
+        if (m["channel"] == subs.hosts.as_str() || m["channel"] == room) && ev.starts_with("App\\Events\\StreamHost") {
+            if let Some(msg) = to_kick_host_msg(&data) {
+                let key = format!("{}:{}", js_str_or_empty(Some(&msg["user"]["name"])).to_lowercase(), js_string(&msg["host"]["viewers"]));
+                let now = now_ms();
+                let fresh = {
+                    let mut st = self.st.lock().unwrap();
+                    let fresh = !st.last_host.as_ref().is_some_and(|(k, at)| *k == key && now - at < HOST_DEDUPE_MS);
+                    st.last_host = Some((key, now));
+                    fresh
+                };
+                if fresh {
+                    self.push_event(msg);
+                }
+            }
+            return;
+        }
         if m["channel"] == chan {
             // Livestream start/stop events: one authoritative read beats trusting a partial payload.
             let l = ev.to_lowercase();
@@ -920,12 +1007,7 @@ impl KickSource {
                 if mid.is_empty() {
                     return;
                 }
-                for msg in self.st.lock().unwrap().backlog.iter_mut() {
-                    if msg["id"] == mid.as_str() {
-                        msg["deleted"] = json!(true);
-                    }
-                }
-                self.emit(json!({"type": "delete", "ids": [mid]}));
+                self.mark_deleted(&mid);
             }
             "App\\Events\\UserBannedEvent" => {
                 let user = if truthy(&data["user"]) { data["user"].clone() } else { json!({}) };
@@ -1101,6 +1183,50 @@ mod tests {
         assert_eq!(b[2]["url"], "s3");
         // no channel art: nothing changes
         assert_eq!(dress_sub_badges(to_kick_chat_msg(&ev), &[])["badges"][2].get("url"), None);
+    }
+
+    fn test_source() -> (Arc<KickSource>, Arc<Mutex<Vec<Value>>>) {
+        let dir = std::env::temp_dir().join(format!("agu-kick-events-{}", uuid_v4()));
+        let log = Arc::new(crate::log::Logger::new(&dir, true));
+        let st = crate::store::Store::open(dir.clone(), log.clone());
+        let ctx = Arc::new(Ctx::new(st.settings.clone(), st.secrets.clone(), log, "t".into(), dir));
+        let got: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let g2 = got.clone();
+        (KickSource::create("foo".into(), Arc::new(move |f| g2.lock().unwrap().push(f)), ctx), got)
+    }
+
+    fn test_subs() -> Subs {
+        Subs { room: "chatrooms.11.v2".into(), chan: "channel.9".into(), hosts: "chatrooms.11".into(), gifts: "channel_9".into() }
+    }
+
+    /// A Pusher frame as the socket delivers it: `data` is a JSON string.
+    fn frame(event: &str, channel: &str, data: &Value) -> Value {
+        json!({"event": event, "channel": channel, "data": data.to_string()})
+    }
+
+    #[test]
+    fn kicks_gifts_and_raids_from_kick_coms_channels_become_chat_rows() {
+        let (s, got) = test_source();
+        let subs = test_subs();
+        assert_eq!(subs.all(), ["chatrooms.11.v2", "channel.9", "chatrooms.11", "channel_9"]);
+        let gifts: Value = serde_json::from_str(include_str!("vendor/fixtures/kick_kicks_gifted.json")).unwrap();
+        s.handle_pusher(1, &frame("KicksGifted", "channel_9", &gifts[0]["data"]), &subs);
+        // the same event name on another channel is not this chat's gift
+        s.handle_pusher(1, &frame("KicksGifted", "channel_10", &gifts[1]["data"]), &subs);
+        let hosts: Value = serde_json::from_str(include_str!("vendor/fixtures/kick_stream_hosted.json")).unwrap();
+        s.handle_pusher(1, &frame("App\\Events\\StreamHostedEvent", "chatrooms.11", &hosts[0]["data"]), &subs);
+        // one raid heard on the v2 room too (the older event) shows once
+        s.handle_pusher(1, &frame("App\\Events\\StreamHostEvent", "chatrooms.11.v2", &hosts[1]["data"]), &subs);
+        s.handle_pusher(1, &frame("KicksGiftedDeleted", "channel_9", &json!({"gifted_transaction_id": "e9336272-c719-4235-91ba-2040b10dffd3"})), &subs);
+        let f = got.lock().unwrap().clone();
+        assert_eq!(f.len(), 3, "{f:?}");
+        assert_eq!((f[0]["type"].as_str(), f[0]["message"]["notice"].as_str(), f[0]["message"]["kicks"]["amount"].as_f64()), (Some("chat"), Some("kicks"), Some(500.0)));
+        assert_eq!((f[1]["type"].as_str(), f[1]["message"]["notice"].as_str(), f[1]["message"]["host"]["viewers"].as_f64()), (Some("chat"), Some("host"), Some(118.0)));
+        assert_eq!(f[2], json!({"type": "delete", "ids": ["kicks-e9336272-c719-4235-91ba-2040b10dffd3"]}));
+        // both are in the snapshot, the removed gift marked so
+        let st = s.st.lock().unwrap();
+        assert_eq!(st.backlog.len(), 2);
+        assert_eq!(st.backlog[0]["deleted"], json!(true));
     }
 
     #[test]

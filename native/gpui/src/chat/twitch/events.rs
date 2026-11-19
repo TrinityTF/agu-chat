@@ -14,6 +14,8 @@ pub struct ChatEventSettings {
     pub combos: bool,
     pub shared_rewards: bool,
     pub group_gifts: bool,
+    /// Kick: KICKs gifts (Kick raids follow `raids`)
+    pub kicks: bool,
 }
 
 pub const DEFAULT_EVENTS: ChatEventSettings = ChatEventSettings {
@@ -29,6 +31,7 @@ pub const DEFAULT_EVENTS: ChatEventSettings = ChatEventSettings {
     combos: false,
     shared_rewards: false,
     group_gifts: false, // like 7TV: every recipient of a gift bomb gets its own line
+    kicks: true,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,4 +120,34 @@ pub fn notice_visible(msg_id: &str, source_msg_id: Option<&str>, gift_id: Option
         }
     }
     true
+}
+
+/// Whether a Kick line shows under the event toggles: a KICKs gift follows `kicks`, a raid `raids`, chat always shows.
+pub fn kick_event_visible(notice: Option<&str>) -> bool {
+    kick_event_on(&DEFAULT_EVENTS, notice)
+}
+
+fn kick_event_on(ev: &ChatEventSettings, notice: Option<&str>) -> bool {
+    match notice {
+        Some("kicks") => ev.kicks,
+        Some("host") => ev.raids,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod kick_tests {
+    use super::*;
+
+    #[test]
+    fn kick_events_follow_their_toggles_and_show_by_default() {
+        assert!(kick_event_visible(Some("kicks")));
+        assert!(kick_event_visible(Some("host")));
+        assert!(kick_event_visible(None));
+        assert!(kick_event_visible(Some("celebration")));
+        let off = ChatEventSettings { kicks: false, raids: false, ..DEFAULT_EVENTS };
+        assert!(!kick_event_on(&off, Some("kicks")));
+        assert!(!kick_event_on(&off, Some("host")));
+        assert!(kick_event_on(&off, None));
+    }
 }
