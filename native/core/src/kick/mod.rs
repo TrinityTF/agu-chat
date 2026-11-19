@@ -627,8 +627,13 @@ impl KickSource {
             };
             let msg = if msg.is_empty() { "Kick unreachable".to_string() } else { msg };
             self.ctx.log(&format!("[kick:{}] connect failed ({failures}): {msg}", self.slug));
-            self.set_status(vec![("error", json!(msg))]);
-            self.set_phase("error", &msg);
+            if crate::net::is_transient_failure(&msg) {
+                // A 5xx, a timeout or a dropped connection: Kick is having a moment, and the reconnect below fixes it.
+                self.set_phase("connecting", &format!("Reconnecting to Kick... ({msg})"));
+            } else {
+                self.set_status(vec![("error", json!(msg))]);
+                self.set_phase("error", &msg);
+            }
             self.schedule_reconnect();
         }
     }

@@ -394,6 +394,8 @@ struct St {
     host_index: usize,
     resolving: bool,
     resolve_failures: u32,
+    /// the last failed lookup was temporary (5xx, 429, network): it is retried soon and reads as "connecting"
+    resolve_transient: bool,
     stopped: bool,
     started: bool,
     resolved_once: bool, // until the first answer (or failure), the source is still "connecting"
@@ -421,12 +423,19 @@ fn conn_frame(st: &St, connected: bool) -> Value {
     let live = truthy(&s["live"]);
     let (state, detail): (&str, String) = if !st.started || !st.resolved_once {
         ("connecting", "Connecting to Rumble...".into())
-    } else if truthy(&s["error"]) && (st.chat_disabled || st.resolve_failures >= 3) {
-        (if st.chat_disabled { "unavailable" } else { "error" }, js_string(&s["error"]))
+    } else if live && st.stream_state == Stream::Open {
+        // the chat itself is connected; a failed status lookup beside it changes nothing the user sees
+        ("open", "Live".into())
+    } else if truthy(&s["error"]) && st.chat_disabled {
+        ("unavailable", js_string(&s["error"]))
+    } else if truthy(&s["error"]) && st.resolve_failures >= 3 {
+        if st.resolve_transient {
+            ("connecting", format!("Reconnecting to Rumble... ({})", js_string(&s["error"])))
+        } else {
+            ("error", js_string(&s["error"]))
+        }
     } else if !live {
         ("offline", "Not live".into())
-    } else if st.stream_state == Stream::Open {
-        ("open", "Live".into())
     } else {
         ("connecting", "Connecting to Rumble chat...".into())
     };
@@ -486,6 +495,7 @@ impl RumbleSource_ {
                 host_index: 0,
                 resolving: false,
                 resolve_failures: 0,
+                resolve_transient: false,
                 stopped: false,
                 started: false,
                 resolved_once: false,
@@ -622,6 +632,7 @@ impl RumbleSource_ {
                     let (failures, _) = {
                         let mut st = self.st.lock().unwrap();
                         st.resolve_failures += 1;
+                        st.resolve_transient = crate::net::is_transient_failure(&msg);
                         st.resolved_once = true;
                         (st.resolve_failures, ())
                     };
@@ -642,6 +653,7 @@ impl RumbleSource_ {
         let (changed, cur_error, cur_url, chat_disabled) = {
             let mut st = self.st.lock().unwrap();
             st.resolve_failures = 0;
+            st.resolve_transient = false;
             st.resolved_once = true;
             let cur = if truthy(&st.status["chatId"]) { Some(js_string(&st.status["chatId"])) } else { None };
             let changed = res.chat_id != cur;
@@ -695,7 +707,14 @@ impl RumbleSource_ {
         }
         // Back off hard on repeated failures so a renamed/deleted channel doesn't become a fetch loop.
         let base = if truthy(&st.status["live"]) { LIVE_RECHECK_MS } else { OFFLINE_POLL_MS };
-        let delay = if st.resolve_failures > 0 { (base * 2u64.pow(st.resolve_failures.min(4))).min(15 * 60_000) } else { base };
+        // A temporary failure (5xx, 429, network) is looked at again soon, unless the chat itself is still running.
+        let delay = if st.resolve_failures == 0 {
+            base
+        } else if st.resolve_transient && st.stream_state != Stream::Open {
+            crate::net::reconnect_delay_ms(st.resolve_failures, rand::random::<f64>())
+        } else {
+            (base * 2u64.pow(st.resolve_failures.min(4))).min(15 * 60_000)
+        };
         let s = self.clone();
         st.resolve_timer.set(Duration::from_millis(delay), async move {
             let s2 = s.clone();

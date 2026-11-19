@@ -4,8 +4,10 @@
 //!   {type:"chatlog", source, status, messages}, {type:"chat", messages:[...]}, {type:"status", status}
 //! plus the uniform {type:"conn"} frame.
 //!
-//! One poll loop per source, paced by YouTube's own timeoutMs; repeated failure backs off exponentially so a
-//! deleted channel or a YouTube outage cannot become a fetch loop. Reading is anonymous; sending and moderation
+//! One poll loop per source, paced by YouTube's own timeoutMs. A temporary failure (5xx, 429, a timeout, a dropped
+//! connection) shows as "connecting" and is retried after 2, 5, 10, then every 30 s (net::reconnect_delay_ms) until a
+//! poll works again; a refusal shows as an error and backs off exponentially so a deleted channel cannot become a
+//! fetch loop. Reading is anonymous; sending and moderation
 //! use the user's own youtube.com session (auth.rs, moderate.rs) through POST /api/youtube/send and
 //! POST /api/youtube/action.
 //!
@@ -44,6 +46,9 @@ const RECHECK_MS: u64 = 12_000;
 const MAX_RECHECK_MS: u64 = 2 * 60_000;
 
 const NOT_LIVE_REASON: &str = "Not live";
+// Temporary poll failures in a row after which the chat's continuation is dropped and the stream looked up again:
+// YouTube can keep refusing a token it has quietly retired.
+const POLL_RETRIES_BEFORE_RESOLVE: u32 = 3;
 
 /// normalized channel -> (video id, channel id) of the broadcast its source reads right now (what sending needs).
 static BROADCASTS: LazyLock<Mutex<HashMap<String, (String, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -180,6 +185,8 @@ struct St {
     offline_streak: u32,
     soft_misses: u32,
     failures: u32,
+    /// the last temporary failure while the source retries it ("connecting" until a poll works again)
+    retry_reason: Option<String>,
     timer: Timer,
     polling: bool,
     stopped: bool,
@@ -205,7 +212,10 @@ fn conn_frame(st: &St) -> Value {
         "offline" => if notice.is_empty() { "Not live".into() } else { notice },
         "unavailable" => if notice.is_empty() { "Chat is unavailable for this stream.".into() } else { notice },
         "error" => if error.is_empty() { "YouTube unreachable".into() } else { error },
-        _ => "Connecting to YouTube...".into(),
+        _ => match &st.retry_reason {
+            Some(r) => format!("Reconnecting to YouTube... ({r})"),
+            None => "Connecting to YouTube...".into(),
+        },
     };
     let mut f = json!({"type": "conn", "state": st.phase, "detail": detail, "live": s["live"]});
     let title = js_str_or_empty(s.get("title"));
@@ -260,6 +270,7 @@ impl YoutubeSource {
                 offline_streak: 0,
                 soft_misses: 0,
                 failures: 0,
+                retry_reason: None,
                 timer: Timer::new(),
                 polling: false,
                 chat_modes: Default::default(),
@@ -535,22 +546,39 @@ impl YoutubeSource {
         let have_chat = self.st.lock().unwrap().chat.is_some();
         let r = if have_chat { self.poll_step(false).await } else { self.resolve_step().await };
         let next = match r {
-            Ok(n) => n,
+            Ok(n) => {
+                let mut st = self.st.lock().unwrap();
+                st.failures = 0;
+                st.retry_reason = None;
+                n
+            }
             Err(e) => {
                 if self.stopped() {
                     self.st.lock().unwrap().polling = false;
                     return;
                 }
+                let transient = crate::net::is_transient_failure(&e);
                 let (failures, msg) = {
                     let mut st = self.st.lock().unwrap();
                     st.failures += 1;
-                    st.chat = None;
+                    // A temporary failure keeps the chat's place and polls it again; a refusal looks the stream up anew.
+                    if !transient || st.failures > POLL_RETRIES_BEFORE_RESOLVE {
+                        st.chat = None;
+                    }
                     (st.failures, if e.is_empty() { "YouTube unreachable".to_string() } else { e })
                 };
-                self.set_status(vec![("error", json!(msg))], Some("error"));
-                self.ctx.log(&format!("[youtube] {} poll failed ({failures}): {msg}", self.channel));
-                // Exponential backoff so a deleted channel, or a YouTube outage, cannot turn into a fetch loop.
-                (OFFLINE_POLL_MS * 2u64.pow(failures.min(4))).min(MAX_BACKOFF_MS)
+                self.ctx.log(&format!("[youtube] {} poll failed ({failures}{}): {msg}", self.channel, if transient { ", retrying" } else { "" }));
+                if transient {
+                    // A 5xx, a timeout or a dropped connection: YouTube is having a moment. Reconnect quietly.
+                    self.st.lock().unwrap().retry_reason = Some(msg);
+                    self.set_status(vec![("error", Value::Null)], Some("connecting"));
+                    crate::net::reconnect_delay_ms(failures, rand::random::<f64>())
+                } else {
+                    self.st.lock().unwrap().retry_reason = None;
+                    self.set_status(vec![("error", json!(msg))], Some("error"));
+                    // Exponential backoff so a deleted channel cannot turn into a fetch loop.
+                    (OFFLINE_POLL_MS * 2u64.pow(failures.min(4))).min(MAX_BACKOFF_MS)
+                }
             }
         };
         self.st.lock().unwrap().polling = false;
@@ -621,5 +649,40 @@ mod tests {
         let (can, why) = send_gate(false, "open");
         assert!(!can);
         assert_eq!(why, Some("Log in to YouTube in Settings to chat"));
+    }
+
+    fn st(phase: &str, live: bool, retry: Option<&str>) -> St {
+        let mut status = Map::new();
+        status.insert("live".into(), json!(live));
+        St {
+            chat_modes: Default::default(),
+            status,
+            phase: phase.into(),
+            backlog: Vec::new(),
+            seen: HashSet::new(),
+            chat: None,
+            meta_at: 0,
+            offline_streak: 0,
+            soft_misses: 0,
+            failures: 0,
+            retry_reason: retry.map(String::from),
+            timer: Timer::new(),
+            polling: false,
+            stopped: false,
+            last_conn_json: String::new(),
+            auth_listener: None,
+        }
+    }
+
+    #[test]
+    fn a_temporary_failure_reads_as_reconnecting_and_keeps_live() {
+        let f = conn_frame(&st("connecting", true, Some("live chat poll returned 503")));
+        assert_eq!(f["state"], "connecting");
+        assert_eq!(f["detail"], "Reconnecting to YouTube... (live chat poll returned 503)");
+        assert_eq!(f["live"], true);
+        let f = conn_frame(&st("connecting", false, None));
+        assert_eq!(f["detail"], "Connecting to YouTube...");
+        let f = conn_frame(&st("open", true, None));
+        assert_eq!((f["state"].as_str(), f["detail"].as_str()), (Some("open"), Some("Live")));
     }
 }

@@ -98,9 +98,10 @@ const DISK_READS: usize = 8;
 
 /// What an HTTP error status means for a retry.
 pub fn classify_status(status: u16) -> Fail {
-    match status {
-        408 | 425 | 429 | 500..=599 => Fail::Transient,
-        _ => Fail::Permanent,
+    if crate::net::is_transient_status(status) {
+        Fail::Transient
+    } else {
+        Fail::Permanent
     }
 }
 

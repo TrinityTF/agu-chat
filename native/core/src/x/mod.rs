@@ -196,6 +196,8 @@ struct St {
     poll_timer: Timer,
     polling: bool,
     soft_misses: u32,
+    /// the last temporary failure (5xx, network) while it is being retried: the source reads as "connecting"
+    retry_reason: Option<String>,
     resolved_once: bool,
     stopped: bool,
     last_conn_json: String,
@@ -222,6 +224,8 @@ fn conn_frame(st: &St, pinned: bool) -> Value {
         ("offline", auth::logged_out_detail().to_string())
     } else if !st.resolved_once {
         ("connecting", "Looking for a live X broadcast...".to_string())
+    } else if let Some(r) = &st.retry_reason {
+        ("connecting", format!("Reconnecting to X... ({r})"))
     } else if !error.is_empty() {
         ("error", error)
     } else if live {
@@ -291,6 +295,7 @@ impl XSource {
                 poll_timer: Timer::new(),
                 polling: false,
                 soft_misses: 0,
+                retry_reason: None,
                 resolved_once: false,
                 stopped: false,
                 last_conn_json: String::new(),
@@ -374,19 +379,30 @@ impl XSource {
                 if self.stopped() {
                     return 0;
                 }
-                {
+                let e = if e.is_empty() { "lookup failed".to_string() } else { e };
+                // A 5xx or a network hiccup is retried soon and reads as "connecting"; a 429 is X asking us to slow
+                // down, so it keeps the slow recheck; anything else is an answer and shows as an error.
+                let transient = crate::net::is_transient_failure(&e);
+                let quick = transient && crate::net::failure_status(&e) != Some(429);
+                let misses = {
                     let mut st = self.st.lock().unwrap();
                     st.soft_misses += 1;
                     st.resolved_once = true;
-                }
-                self.set_status(vec![("live", json!(false)), ("error", json!(if e.is_empty() { "lookup failed".to_string() } else { e })), ("notice", Value::Null)]);
-                return self.recheck_delay();
+                    st.retry_reason = transient.then(|| e.clone());
+                    st.soft_misses
+                };
+                self.set_status(vec![("live", json!(false)), ("error", if transient { Value::Null } else { json!(e) }), ("notice", Value::Null)]);
+                return if quick { crate::net::reconnect_delay_ms(misses, rand::random::<f64>()) } else { self.recheck_delay() };
             }
         };
         if self.stopped() {
             return 0;
         }
-        self.st.lock().unwrap().resolved_once = true;
+        {
+            let mut st = self.st.lock().unwrap();
+            st.resolved_once = true;
+            st.retry_reason = None;
+        }
         let (found, state) = found;
 
         if !found.live || found.broadcast_id.is_empty() {
@@ -553,7 +569,13 @@ impl XSource {
                     delay = if e.status == Some(503) { STREAM_RETRY_MS } else { STREAM_ERROR_RETRY_MS.min(STREAM_RETRY_MS * 2u64.pow(fails.min(20))) };
                     self.ctx.log(&format!("[x:{}] live-chat failed ({fails}): {}", self.norm, e.message));
                     if fails >= STREAM_FAILS_BEFORE_ERROR {
-                        self.set_status(vec![("error", json!(format!("X chat unavailable: {}", e.message)))]);
+                        if e.status.map(crate::net::is_transient_status).unwrap_or(true) {
+                            // still being retried: X is shedding load or the connection dropped
+                            self.st.lock().unwrap().retry_reason = Some(format!("X chat: {}", e.message));
+                            self.set_status(vec![("error", Value::Null)]);
+                        } else {
+                            self.set_status(vec![("error", json!(format!("X chat unavailable: {}", e.message)))]);
+                        }
                     }
                 }
             }
@@ -572,7 +594,8 @@ impl XSource {
                 return;
             }
             c.fails = 0;
-            js_str_or_empty(st.status.get("error")).starts_with("X chat unavailable")
+            let retrying = st.retry_reason.take().is_some();
+            js_str_or_empty(st.status.get("error")).starts_with("X chat unavailable") || retrying
         };
         if clear {
             self.set_status(vec![("error", Value::Null)]);
@@ -744,6 +767,7 @@ impl XSource {
         let task = {
             let mut st = self.st.lock().unwrap();
             let t = st.chat.take().and_then(|c| c.task);
+            st.retry_reason = None;
             st.pending.clear();
             st.pending_timer.clear();
             st.pending_armed = false;
