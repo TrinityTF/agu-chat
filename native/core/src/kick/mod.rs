@@ -51,8 +51,8 @@ const DEAD_AFTER_MS: i64 = 150_000;
 // Only a fallback for a failed descriptor fetch: the descriptor is authoritative (observed 2026-11-03).
 const FALLBACK_DESCRIPTOR: (&str, &str) = ("34bf7a0ff419a2a775b9", "us2");
 const PUSHER_VERSION: &str = "8.4.0";
-// The same raid heard on both host channels within this long shows once.
-const HOST_DEDUPE_MS: i64 = 30_000;
+// The same raid heard on both host channels within this long shows once (Kick was seen 22 s apart).
+const HOST_DEDUPE_MS: i64 = 120_000;
 
 /// The Pusher channels one Kick chat reads, the ones kick.com's own chat subscribes to (its web client, Nov 2026).
 struct Subs {

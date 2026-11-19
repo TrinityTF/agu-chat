@@ -2070,7 +2070,8 @@ impl ChatPane {
                 && match &r.body {
                     RowBody::Msg(m) => m.user.id == user.id,
                     RowBody::Rumble(m) => m.user.id == user.id,
-                    RowBody::Kick(m) => m.user.id == user.id,
+                    // a raid or a KICKs gift without a message is not something they said
+                    RowBody::Kick(m) => m.user.id == user.id && !m.text.is_empty(),
                     RowBody::YouTube(m) => m.user.id == user.id,
                     RowBody::X(m) => m.user.id == user.id,
                     _ => false,
