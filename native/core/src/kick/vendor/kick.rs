@@ -240,6 +240,110 @@ pub fn to_kick_chat_msg(ev: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Events: KICKs gifts and raids
+// ---------------------------------------------------------------------------
+
+/// The KICKs a gift costs, by gift id: kick.com draws a gift as the coin bundle of that amount
+/// (static.kick.com/kicks/gifts/<amount>-kick-bundle.webp, its gift table as of November 2026).
+const KICKS_GIFTS: [(&str, u32); 10] =
+    [("hell_yeah", 1), ("hype", 10), ("skull_emoji", 50), ("full_send", 100), ("rage_quit", 500), ("pack_it_up", 1000), ("yap", 2000), ("stomp", 5000), ("flex", 10_000), ("boooom", 50_000)];
+
+/// The picture kick.com's chat shows beside a KICKs gift: the bundle for the gift's price. A gift it does not know
+/// falls back to its amount when Kick has a bundle for that; otherwise there is no picture.
+pub fn kicks_gift_image(gift_id: &str, amount: f64) -> Option<String> {
+    let known = KICKS_GIFTS.iter().find(|(id, _)| *id == gift_id).map(|(_, a)| *a);
+    let by_amount = KICKS_GIFTS.iter().find(|(_, a)| *a as f64 == amount).map(|(_, a)| *a);
+    known.or(by_amount).map(|a| format!("https://static.kick.com/kicks/gifts/{a}-kick-bundle.webp"))
+}
+
+/// A Kick username as the slug its channel URL uses ("Some_User" is kick.com/some-user).
+fn slug_of(username: &str) -> String {
+    username.to_lowercase().replace('_', "-")
+}
+
+/// A KICKs gift (Pusher `KicksGifted` on `channel_<channelId>`) -> a Kick row with `notice: "kicks"` and the gift
+/// in `kicks`. The sender's message is the row's text (Kick does not send it as a chat message too). The payload
+/// carries no badges: the pane takes them from the sender's last line. None when it names no sender or gift.
+///
+/// `{gift_transaction_id, message?, sender: {id, username, username_color, profile_picture},
+///   gift: {gift_id, name, amount, type, tier, character_limit, pinned_time}, created_at, expires_at?}`
+pub fn to_kick_gift_msg(ev: &Value) -> Option<Value> {
+    let sender = &ev["sender"];
+    let gift = &ev["gift"];
+    let username = js_str_or_empty(Some(&sender["username"]));
+    let tx = js_str_or_empty(Some(&ev["gift_transaction_id"]));
+    if username.is_empty() || !gift.is_object() || tx.is_empty() {
+        return None;
+    }
+    let amount = num_or0(&gift["amount"]).as_f64().unwrap_or(0.0);
+    let gift_id = js_str_or_empty(Some(&gift["gift_id"]));
+    Some(json!({
+        "platform": "kick",
+        "id": format!("kicks-{tx}"),
+        "ts": ev["created_at"].as_str().and_then(parse_rfc3339_ms).unwrap_or_else(now_ms),
+        "user": {
+            "id": str_nullish(&sender["id"]),
+            "login": slug_of(&username),
+            "name": username,
+            "color": js_str_or_empty(Some(&sender["username_color"])),
+            "avatar": js_str_or_empty(Some(&sender["profile_picture"])),
+            "verified": false,
+            "anonymous": false,
+        },
+        "badges": [],
+        "text": js_trim(&js_str_or_empty(Some(&ev["message"]))),
+        "reply": null,
+        "action": false,
+        "notice": "kicks",
+        "kicks": {
+            "id": gift_id,
+            "name": js_str_or_empty(Some(&gift["name"])),
+            "amount": amount,
+            "tier": js_str_or_empty(Some(&gift["tier"])),
+            "image": kicks_gift_image(&gift_id, amount),
+        },
+    }))
+}
+
+/// A raid (Pusher `App\Events\StreamHostedEvent` on `chatrooms.<chatroomId>`, what kick.com's chat listens to:
+/// `{message: {id, numberOfViewers, optionalMessage, createdAt}, user: {id, username, ...}}`; also the older
+/// `App\Events\StreamHostEvent` shape `{host_username, number_viewers, optional_message}`) -> a Kick row with
+/// `notice: "host"` and the viewers in `host`. None when it names nobody.
+pub fn to_kick_host_msg(ev: &Value) -> Option<Value> {
+    let (user, msg) = (&ev["user"], &ev["message"]);
+    let pick = |a: &Value, b: &Value| js_str_or_empty(Some(if truthy(a) { a } else { b }));
+    let username = pick(&user["username"], &ev["host_username"]);
+    if username.is_empty() {
+        return None;
+    }
+    let viewers = num_or0(if truthy(&msg["numberOfViewers"]) { &msg["numberOfViewers"] } else { &ev["number_viewers"] }).as_f64().unwrap_or(0.0);
+    let ts = parse_rfc3339_ms(&pick(&msg["createdAt"], &ev["created_at"])).unwrap_or_else(now_ms);
+    let id = pick(&msg["id"], &Value::Null);
+    let id = if id.is_empty() { format!("{}-{ts}", slug_of(&username)) } else { id };
+    let slug = pick(&user["slug"], &Value::String(slug_of(&username)));
+    Some(json!({
+        "platform": "kick",
+        "id": format!("host-{id}"),
+        "ts": ts,
+        "user": {
+            "id": str_nullish(&user["id"]),
+            "login": slug,
+            "name": username,
+            "color": "",
+            "avatar": "",
+            "verified": truthy(&user["verified"]),
+            "anonymous": false,
+        },
+        "badges": [],
+        "text": "",
+        "reply": null,
+        "action": false,
+        "notice": "host",
+        "host": {"viewers": viewers, "message": js_trim(&pick(&msg["optionalMessage"], &ev["optional_message"]))},
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Badges
 // ---------------------------------------------------------------------------
 
@@ -615,5 +719,59 @@ mod tests {
 
         let g = json!([{"id": 5, "slug": "foo", "emotes": [{"id": 1, "name": "A", "subscribers_only": true}, {"name": ""}]}, {"id": "Global", "emotes": [{"id": 2, "name": "B"}]}]);
         assert_eq!(emotes_from_groups(&g), json!({"A": {"id": "1", "group": "channel", "subsOnly": true}, "B": {"id": "2", "group": "global", "subsOnly": false}}));
+    }
+
+    /// Real KicksGifted payloads (names and one message changed), as kick.com's channel_<id> Pusher channel sent them.
+    #[test]
+    fn kicks_gifts_become_kick_rows_with_the_gift() {
+        let all: Value = serde_json::from_str(include_str!("fixtures/kick_kicks_gifted.json")).unwrap();
+        let rows: Vec<Value> = all.as_array().unwrap().iter().map(|e| to_kick_gift_msg(&e["data"]).unwrap()).collect();
+        let m = &rows[0];
+        assert_eq!(m["id"], "kicks-e9336272-c719-4235-91ba-2040b10dffd3");
+        assert_eq!(m["notice"], "kicks");
+        assert_eq!(m["ts"], json!(parse_rfc3339_ms("2026-11-19T00:01:52.338Z").unwrap()));
+        assert_eq!(m["user"], json!({"id": "140130904", "login": "gifter-one", "name": "Gifter_One", "color": "#AAA9FF", "avatar": "https://kick.com/img/default-profile-pictures/default-avatar-3.webp", "verified": false, "anonymous": false}));
+        assert_eq!(m["text"], "You're so bad at the game... but we here so");
+        assert_eq!(m["kicks"], json!({"id": "rage_quit", "name": "Rage Quit", "amount": 500.0, "tier": "MID", "image": "https://static.kick.com/kicks/gifts/500-kick-bundle.webp"}));
+        assert_eq!(m["badges"], json!([]));
+        // an empty message and a missing one are both no message
+        assert_eq!((rows[1]["text"].as_str(), rows[2]["text"].as_str()), (Some(""), Some("")));
+        assert_eq!(rows[1]["kicks"]["image"], "https://static.kick.com/kicks/gifts/1-kick-bundle.webp");
+        assert_eq!(rows[2]["kicks"]["amount"], json!(10.0));
+        assert_eq!(rows[2]["user"]["login"], "gifter3");
+        // the row parses as an ordinary Kick line wherever it goes next
+        assert!(to_kick_gift_msg(&json!({"gift_transaction_id": "x", "sender": {}, "gift": {"amount": 1}})).is_none());
+        assert!(to_kick_gift_msg(&json!({"gift_transaction_id": "x", "sender": {"username": "a"}})).is_none());
+    }
+
+    #[test]
+    fn gift_pictures_follow_kick_coms_table() {
+        assert_eq!(kicks_gift_image("boooom", 50_000.0).as_deref(), Some("https://static.kick.com/kicks/gifts/50000-kick-bundle.webp"));
+        // an unknown gift falls back to its price when Kick has a bundle for it
+        assert_eq!(kicks_gift_image("new_gift", 2000.0).as_deref(), Some("https://static.kick.com/kicks/gifts/2000-kick-bundle.webp"));
+        assert_eq!(kicks_gift_image("new_gift", 2500.0), None);
+    }
+
+    /// A real raid as Kick sent it (name and viewers changed): StreamHostedEvent on chatrooms.<id>, which kick.com's chat
+    /// reads (`e.user.username`, `e.message.numberOfViewers`), and StreamHostEvent on chatrooms.<id>.v2.
+    #[test]
+    fn raids_become_kick_host_rows() {
+        let all: Value = serde_json::from_str(include_str!("fixtures/kick_stream_hosted.json")).unwrap();
+        let m = to_kick_host_msg(&all[0]["data"]).unwrap();
+        assert_eq!(m["notice"], "host");
+        assert_eq!(m["user"]["name"], "PapaGambles");
+        assert_eq!(m["user"]["login"], "papagambles");
+        assert_eq!(m["host"]["viewers"], json!(118.0));
+        assert_eq!(m["id"], "host-d987baa8-b8d0-423d-9d95-23865d8f5e5c");
+        assert_eq!(m["ts"], json!(parse_rfc3339_ms("2026-11-19T00:14:16.572Z").unwrap()));
+        assert_eq!((m["user"]["id"].as_str(), m["user"]["verified"].as_bool()), (Some("61224295"), Some(true)));
+        assert_eq!((m["text"].as_str(), m["host"]["message"].as_str()), (Some(""), Some("")));
+        // the older StreamHostEvent Kick sends alongside it on the v2 room
+        let v2 = to_kick_host_msg(&all[1]["data"]).unwrap();
+        assert_eq!((v2["user"]["name"].as_str(), v2["user"]["id"].as_str(), v2["host"]["viewers"].as_f64()), (Some("PapaGambles"), Some(""), Some(118.0)));
+        let old = to_kick_host_msg(&json!({"chatroom_id": 1, "optional_message": "hi", "number_viewers": 7, "host_username": "Some_Raider"})).unwrap();
+        assert_eq!((old["user"]["name"].as_str(), old["user"]["login"].as_str(), old["host"]["viewers"].as_f64()), (Some("Some_Raider"), Some("some-raider"), Some(7.0)));
+        assert_eq!(old["host"]["message"], "hi");
+        assert!(to_kick_host_msg(&json!({"message": {"numberOfViewers": 5}})).is_none());
     }
 }

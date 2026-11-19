@@ -1,0 +1,17 @@
+[
+ {
+  "event": "KicksGifted",
+  "channel": "channel_39603356",
+  "data": {"gift_transaction_id":"e9336272-c719-4235-91ba-2040b10dffd3","message":"You're so bad at the game... but we here so","sender":{"id":140130904,"username":"Gifter_One","username_color":"#AAA9FF","profile_picture":"https://kick.com/img/default-profile-pictures/default-avatar-3.webp"},"gift":{"gift_id":"rage_quit","name":"Rage Quit","amount":500,"type":"LEVEL_UP","tier":"MID","character_limit":150,"pinned_time":600000000000},"created_at":"2026-11-19T00:01:52.338812903Z","expires_at":"2026-11-19T00:11:52.338812903Z"}
+ },
+ {
+  "event": "KicksGifted",
+  "channel": "channel_5417122",
+  "data": {"gift_transaction_id":"bc2c079c-7fa4-4b35-b560-e637d381a37e","message":"","sender":{"id":135812092,"username":"GifterTwo36","username_color":"#FF2C56","profile_picture":"https://kick.com/img/default-profile-pictures/default-avatar-2.webp"},"gift":{"gift_id":"hell_yeah","name":"Hell Yeah","amount":1,"type":"BASIC","tier":"BASIC","character_limit":0,"pinned_time":0},"created_at":"2026-11-18T23:57:07.910810215Z"}
+ },
+ {
+  "event": "KicksGifted",
+  "channel": "channel_17883767",
+  "data": {"gift_transaction_id":"2afdddf0-be09-4eb9-9b32-95727dd8f5d8","sender":{"id":137395202,"username":"GIFTER3","username_color":"#BDFF28","profile_picture":"https://kick.com/img/default-profile-pictures/default-avatar-1.webp"},"gift":{"gift_id":"hype","name":"Hype","amount":10,"type":"BASIC","tier":"BASIC","character_limit":0,"pinned_time":0},"created_at":"2026-11-19T00:01:44.853Z"}
+ }
+]

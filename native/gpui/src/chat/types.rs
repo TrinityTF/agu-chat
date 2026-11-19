@@ -165,6 +165,14 @@ lenient! {
 }
 lenient! { pub struct KickReply { pub id: String, pub text: String, pub name: String } }
 lenient! {
+    /// A KICKs gift (core `to_kick_gift_msg`): `image` is the coin bundle kick.com draws beside it.
+    pub struct KickGift { pub id: String, pub name: String, pub amount: f64, pub tier: String, pub image: Option<String> }
+}
+lenient! {
+    /// A raid (core `to_kick_host_msg`): how many viewers came along, and the raider's note when there is one.
+    pub struct KickHost { pub viewers: f64, pub message: String }
+}
+lenient! {
     pub struct KickMsg {
         pub id: String,
         pub ts: i64,
@@ -173,8 +181,11 @@ lenient! {
         pub text: String,
         pub reply: Option<KickReply>,
         pub action: bool,
+        /// "celebration", or one of the events below: "kicks" (a KICKs gift, its message in `text`) and "host" (a raid)
         pub notice: Option<String>,
         pub deleted: bool,
+        pub kicks: Option<KickGift>,
+        pub host: Option<KickHost>,
     }
 }
 

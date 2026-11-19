@@ -16,6 +16,7 @@ use super::chat_text::{as_link, mention_word, text_mentions_login};
 use super::highlights::{parse_hex, rule_row_style};
 use super::inline::*;
 use super::link_card::{first_link, LinkCard};
+use super::pane_render::thousands;
 use super::mod_buttons::describe_mod_button;
 use super::mod_caps::{badge_names, mod_reach, CoCaps, ModCaps, ModViewer};
 use super::twitch::badges::{parse_badge_list, BadgeMap, BADGE_PX, BADGE_VMARGIN};
@@ -230,6 +231,8 @@ pub struct EventSpec {
     pub amount: Option<f64>,
     pub is_bits: bool,
     pub inner: Option<FrameSpec>,
+    /// a picture on the right of the header (a KICKs gift's coin bundle)
+    pub image: Option<String>,
 }
 
 #[derive(Clone)]
@@ -314,7 +317,11 @@ impl BuiltRow {
     /// line breaks). An AutoMod body, a sub's name line and an event's own line were missing here, so their rows
     /// kept the height measured before their emotes loaded.
     pub fn urls(&self) -> Vec<String> {
-        self.contents().iter().flat_map(|c| c.urls()).collect()
+        let mut v: Vec<String> = self.contents().iter().flat_map(|c| c.urls()).collect();
+        if let BuiltRow::Event(EventSpec { image: Some(u), .. }) = self {
+            v.push(u.clone());
+        }
+        v
     }
 
     /// The preview card's link, when the row has one: its preview arriving changes the row's height.
@@ -944,7 +951,7 @@ fn event_frame(who: &EventWho, verb: &str, reward: Option<String>, amount: Optio
         f.push(Item::Text(TextItem::new(r, base, token(theme::TEXT)).weight(FontWeight::SEMIBOLD)));
     }
     let is_bits = is_bits_hint || (tone == "cheer" && amount.is_none());
-    EventSpec { content: f.finish(), actions, amount, is_bits, inner }
+    EventSpec { content: f.finish(), actions, amount, is_bits, inner, image: None }
 }
 
 // ---- notices ----------------------------------------------------------------------------------------
@@ -1401,7 +1408,81 @@ pub(super) fn kick_badge_label(b: &KickBadge) -> String {
     }
 }
 
+/// The side of an event's picture (a KICKs gift's coin bundle), for a font size: a little over two lines.
+pub fn event_image_px(base: f32) -> f32 {
+    (base * 2.4).round()
+}
+
+/// Kick's green, the KICKs coin's colour on kick.com.
+const KICKS_GREEN: u32 = 0x53fc18;
+
+/// "1 viewer", "118 viewers"
+fn viewers_text(n: f64) -> String {
+    format!("{} {}", thousands(n), if n == 1.0 { "viewer" } else { "viewers" })
+}
+
+/// A KICKs gift, in the frame of a Twitch cheer: "<name> sent [K] 500 · Rage Quit" with the gift's coin bundle on the
+/// right, and the sender's message under it as their own chat line (badges, a name that opens the card, the mod
+/// buttons). The message can't be deleted or replied to on its own: on Kick it is part of the gift.
+fn kick_gift_row(row: &Row, m: &KickMsg, g: &KickGift, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>, style: Option<&ChatterStyle>, defs: Option<&SevenTvDefs>) -> BuiltRow {
+    let base = ctx.rs.font_size;
+    let mut f = Flow::new(base);
+    let actions = vec![RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } }];
+    let shown = if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() };
+    f.push(Item::Text(TextItem::new(shown, base, name_color_of(&m.user.color, ctx.rs.readable_colors)).weight(FontWeight::SEMIBOLD).act(Act::Tag(0), true)));
+    f.push(Item::Text(TextItem::new(" sent ".to_string(), base, token(theme::MUTED))));
+    let green = token(KICKS_GREEN);
+    f.push(Item::Icon(IconItem { path: icons::KICKS, size: (base * 0.95).round(), color: green, valign: VAlign::BottomAt(0.12 * base), margin_x: 0.0 }));
+    f.push(Item::Text(TextItem::new(format!(" {}", thousands(g.amount)), base, green).weight(FontWeight::SEMIBOLD)));
+    if !g.name.is_empty() {
+        f.push(Item::Text(TextItem::new(" \u{b7} ".to_string(), base, token(theme::MUTED))));
+        f.push(Item::Text(TextItem::new(g.name.clone(), base, token(theme::TEXT)).weight(FontWeight::SEMIBOLD)));
+    }
+    let inner = if m.text.is_empty() {
+        None
+    } else {
+        // the same line kick_row draws for a chat message (the `kicks` notice keeps it from deleting / replying)
+        let line = KickMsg { kicks: None, ..m.clone() };
+        match kick_row(row, &line, ctx, env, rule, style, defs) {
+            BuiltRow::Frame(mut spec) => {
+                spec.alt = false; // inside the gift's own tint
+                Some(spec)
+            }
+            _ => None,
+        }
+    };
+    BuiltRow::Event(EventSpec { content: f.finish(), actions, amount: None, is_bits: false, inner, image: g.image.clone().filter(|u| !u.is_empty()) })
+}
+
+/// A raid, like Twitch's raid notice (orange bar, orange text): "<name> has raided with 118 viewers." The name opens
+/// the raider's card.
+fn kick_host_row(row: &Row, m: &KickMsg, h: &KickHost, ctx: &RowCtx) -> BuiltRow {
+    let base = ctx.rs.font_size;
+    let orange = token(theme::ORANGE_200);
+    let mut f = Flow::new(base);
+    let shown = if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() };
+    let card = (!m.user.id.is_empty() || !m.user.login.is_empty()).then(|| (row.sk.clone(), CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() }));
+    let name = TextItem::new(shown, base, orange).weight(FontWeight::BOLD);
+    f.push(Item::Text(if card.is_some() { name.act(Act::Tag(0), true) } else { name }));
+    f.push(Item::Text(TextItem::new(" has raided with ".to_string(), base, orange)));
+    f.push(Item::Text(TextItem::new(viewers_text(h.viewers.max(0.0)), base, orange).weight(FontWeight::BOLD)));
+    f.push(Item::Text(TextItem::new(".".to_string(), base, orange)));
+    let text = (!h.message.is_empty()).then(|| {
+        let mut t = Flow::new(base);
+        run_text(&mut t, &h.message, token(theme::MUTED), false);
+        t.finish()
+    });
+    BuiltRow::Notice(NoticeSpec { system: f.finish(), text, raid: true, icon: None, head: None, card, bar: None, reply: None, line: None })
+}
+
 pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>, style: Option<&ChatterStyle>, defs: Option<&SevenTvDefs>) -> BuiltRow {
+    match (m.notice.as_deref(), &m.kicks, &m.host) {
+        (Some("kicks"), Some(g), _) => return kick_gift_row(row, m, g, ctx, env, rule, style, defs),
+        (Some("host"), _, Some(h)) => return kick_host_row(row, m, h, ctx),
+        _ => {}
+    }
+    // a KICKs gift's message: part of the gift, not a chat message Kick can delete or answer
+    let gift_line = m.notice.as_deref() == Some("kicks");
     let rs = ctx.rs;
     let paint = if rs.seven_tv_cosmetics { style.and_then(|s| s.paint_id.as_ref()).and_then(|id| defs.and_then(|d| d.paints.get(id))) } else { None };
     let seven_badge = if rs.seven_tv_cosmetics { style.and_then(|s| s.badge_id.clone()).and_then(|id| defs.and_then(|d| d.badges.get(&id)).map(|b| (id, b.clone()))) } else { None };
@@ -1410,7 +1491,7 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
     let badges: Vec<&str> = m.badges.iter().map(|b| b.r#type.as_str()).collect();
     let can_mod = env.caps.can_moderate && !m.user.id.is_empty() && !m.deleted && super::mod_caps::co_reach(Platform::Kick, &env.viewer_login, &env.source.channel, target, &badges).ban;
-    let can_delete = env.caps.can_delete && !m.deleted;
+    let can_delete = env.caps.can_delete && !m.deleted && !gift_line;
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
     let mut actions = Vec::new();
@@ -1467,7 +1548,7 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     });
     spec.hover = Hover {
         copy: Some(m.text.clone()),
-        reply: (env.can_send && !m.deleted).then(|| ReplyTarget { sk: sk.clone(), platform: Platform::Kick, id: m.id.clone(), user: if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() }, text: m.text.clone() }),
+        reply: (env.can_send && !m.deleted && !gift_line).then(|| ReplyTarget { sk: sk.clone(), platform: Platform::Kick, id: m.id.clone(), user: if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() }, text: m.text.clone() }),
         delete: can_delete.then(|| RowAction::KickMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: None }),
         pin: None,
     };
@@ -1788,6 +1869,93 @@ mod held_tests {
         // nothing to delete: it has no message id
         assert!(m.id.is_empty());
         assert_eq!(n.reward_id.as_deref(), Some("rw"));
+    }
+}
+
+#[cfg(test)]
+mod kick_event_tests {
+    use super::*;
+    use agu_chat_core::kick::vendor::kick::{to_kick_gift_msg, to_kick_host_msg};
+
+    fn text_of(c: &InlineContent) -> String {
+        c.items.iter().filter_map(|i| if let Item::Text(t) = i { Some(t.text.to_string()) } else { None }).collect()
+    }
+
+    fn row_of(m: &KickMsg) -> Row {
+        Row { key: format!("kick:xqc|k:{}", m.id), ts: m.ts, sk: "kick:xqc".into(), platform: Platform::Kick, ord: 1, backlog: false, body: RowBody::Kick(m.clone()) }
+    }
+
+    fn env() -> CoEnv {
+        CoEnv {
+            source: SourceRef { platform: Platform::Kick, channel: "xqc".into() },
+            emotes: None,
+            caps: CoCaps { connected: true, can_moderate: true, can_delete: true },
+            can_send: true,
+            rumble_badges: Default::default(),
+            rumble_emotes: Default::default(),
+            viewer_login: "xqc".into(),
+            viewer_id: String::new(),
+        }
+    }
+
+    fn gift(i: usize) -> KickMsg {
+        let all: Value = serde_json::from_str(include_str!("../../../core/src/kick/vendor/fixtures/kick_kicks_gifted.json")).unwrap();
+        serde_json::from_value(to_kick_gift_msg(&all[i]["data"]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_kicks_gift_with_a_message_is_a_header_over_the_senders_chat_line() {
+        let rs = Settings::default();
+        let buttons = super::super::mod_buttons::default_mod_buttons();
+        let ctx = RowCtx { rs: &rs, show_platform: false, mod_buttons: true, mod_list: &buttons };
+        let mut m = gift(0);
+        m.badges = vec![KickBadge { r#type: "subscriber".into(), text: "Subscriber".into(), count: 3.0, ..Default::default() }];
+        let BuiltRow::Event(e) = kick_row(&row_of(&m), &m, &ctx, &env(), None, None, None) else { panic!("not an event row") };
+        assert_eq!(text_of(&e.content), "Gifter_One sent  500 \u{b7} Rage Quit");
+        assert!(e.content.items.iter().any(|i| matches!(i, Item::Icon(ic) if ic.path == crate::icons::KICKS)));
+        assert_eq!(e.image.as_deref(), Some("https://static.kick.com/kicks/gifts/500-kick-bundle.webp"));
+        assert!(matches!(&e.actions[..], [RowAction::Card { user, .. }] if user.id == "140130904" && user.name == "Gifter_One"));
+        assert_eq!((e.amount, e.is_bits), (None, false));
+        // the message is the sender's own chat line: badges, name (card), timeout / ban, but no delete or reply
+        let line = e.inner.expect("the message line");
+        let t = text_of(&line.content);
+        assert!(t.ends_with("Gifter_One: You're so bad at the game... but we here so"), "{t}");
+        assert!(line.actions.iter().any(|a| matches!(a, RowAction::KickMod { action: "timeout", .. })));
+        assert!(line.actions.iter().any(|a| matches!(a, RowAction::KickMod { action: "ban", .. })));
+        assert!(!line.actions.iter().any(|a| matches!(a, RowAction::KickMod { action: "delete", .. })));
+        assert!(line.actions.iter().any(|a| matches!(a, RowAction::Card { .. })));
+        assert!(line.hover.delete.is_none() && line.hover.reply.is_none());
+        assert_eq!(line.hover.copy.as_deref(), Some("You're so bad at the game... but we here so"));
+        assert!(BuiltRow::Event(EventSpec { content: e.content.clone(), actions: vec![], amount: None, is_bits: false, inner: None, image: e.image.clone() }).urls().contains(&"https://static.kick.com/kicks/gifts/500-kick-bundle.webp".to_string()));
+    }
+
+    #[test]
+    fn a_kicks_gift_without_a_message_is_only_the_header() {
+        let rs = Settings::default();
+        let ctx = RowCtx { rs: &rs, show_platform: false, mod_buttons: false, mod_list: &[] };
+        for i in [1, 2] {
+            let m = gift(i);
+            let BuiltRow::Event(e) = kick_row(&row_of(&m), &m, &ctx, &env(), None, None, None) else { panic!("not an event row") };
+            assert!(e.inner.is_none());
+            assert!(text_of(&e.content).contains(" sent "));
+        }
+    }
+
+    #[test]
+    fn a_raid_is_an_orange_notice_whose_name_opens_the_card() {
+        let rs = Settings::default();
+        let ctx = RowCtx { rs: &rs, show_platform: false, mod_buttons: true, mod_list: &[] };
+        let all: Value = serde_json::from_str(include_str!("../../../core/src/kick/vendor/fixtures/kick_stream_hosted.json")).unwrap();
+        let m: KickMsg = serde_json::from_value(to_kick_host_msg(&all[0]["data"]).unwrap()).unwrap();
+        let BuiltRow::Notice(n) = kick_row(&row_of(&m), &m, &ctx, &env(), None, None, None) else { panic!("not a notice row") };
+        assert_eq!(text_of(&n.system), "PapaGambles has raided with 118 viewers.");
+        assert!(n.raid);
+        assert!(n.head.is_none() && n.icon.is_none() && n.text.is_none());
+        let (sk, user) = n.card.expect("the raider's card");
+        assert_eq!((sk.as_str(), user.name.as_str(), user.login.as_str()), ("kick:xqc", "PapaGambles", "papagambles"));
+        assert!(matches!(&n.system.items[0], Item::Text(t) if matches!(t.act, Some(Act::Tag(0)))));
+        assert_eq!(viewers_text(1.0), "1 viewer");
+        assert_eq!(viewers_text(1234.0), "1,234 viewers");
     }
 }
 

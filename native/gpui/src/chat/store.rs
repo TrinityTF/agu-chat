@@ -511,7 +511,11 @@ impl ChatStore {
         let row = |m: KickMsg| Self::row(sk, Platform::Kick, Self::mk(sk, "k", &m.id), m.ts, RowBody::Kick(m));
         match ty {
             "chatlog" => {
-                let rows: Vec<Row> = arr(f, "messages").iter().map(|m| row(Self::parse(m))).collect();
+                let mut rows: Vec<Row> = Vec::new();
+                for m in arr(f, "messages") {
+                    let m = kick_event_dressed(Self::parse(m), rows.iter(), sk);
+                    rows.push(row(m));
+                }
                 self.replace_backlog(sk, rows);
                 let st = self.source_mut(sk).unwrap();
                 st.status = f.get("status").filter(|s| !s.is_null()).cloned();
@@ -523,11 +527,20 @@ impl ChatStore {
             // The site's Kick hook reads `data.message`, Rumble's reads `data.msg`: accept either.
             "chat" => {
                 let Some(m) = f.get("message").or_else(|| f.get("msg")).filter(|m| !m.is_null()) else { return false };
-                self.add_row(row(Self::parse(m)));
+                let m = kick_event_dressed(Self::parse(m), self.rows.iter().map(|r| &**r), sk);
+                self.add_row(row(m));
                 self.trim();
             }
             "status" => self.source_mut(sk).unwrap().status = f.get("status").filter(|s| !s.is_null()).cloned(),
             "emotes" => self.source_mut(sk).unwrap().kick_emotes = f.get("emotes").cloned().unwrap_or(Value::Null),
+            // a deleted message, or a KICKs gift a moderator removed
+            "delete" => {
+                let ids: HashSet<String> = arr(f, "ids").iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect();
+                return self.map_rows(|r| match &r.body {
+                    RowBody::Kick(m) if r.sk == sk && ids.contains(&m.id) && !m.deleted => Some(with_body(r, RowBody::Kick(KickMsg { deleted: true, ..m.clone() }))),
+                    _ => None,
+                });
+            }
             // Kick's ban event clears that user's history, matching what its own chat does.
             "banned" => {
                 let uid = f.get("userId").map(|u| u.as_str().map(|s| s.to_string()).unwrap_or_else(|| u.to_string())).unwrap_or_default();
@@ -633,6 +646,27 @@ fn with_body(r: &RowRef, body: RowBody) -> RowRef {
     Arc::new(Row { body, ..(**r).clone() })
 }
 
+/// A KICKs gift or a raid carries no badges (Kick's event has none): it wears the sender's from their last line here,
+/// and their colour when it has none, so the gift's chat line, the card and mod rights see who they are.
+fn kick_event_dressed<'a>(mut m: KickMsg, mut prior: impl DoubleEndedIterator<Item = &'a Row>, sk: &str) -> KickMsg {
+    if m.kicks.is_none() && m.host.is_none() || m.user.id.is_empty() {
+        return m;
+    }
+    let seen = prior.by_ref().rev().find_map(|r| match &r.body {
+        RowBody::Kick(l) if r.sk == sk && l.user.id == m.user.id && l.kicks.is_none() && l.host.is_none() => Some(l),
+        _ => None,
+    });
+    if let Some(l) = seen {
+        if m.badges.is_empty() {
+            m.badges = l.badges.clone();
+        }
+        if m.user.color.is_empty() {
+            m.user.color = l.user.color.clone();
+        }
+    }
+    m
+}
+
 /// How far apart a redeem's notice and its chat line may land and still be one redeem.
 const REDEEM_PAIR_MS: i64 = 60_000;
 
@@ -727,6 +761,36 @@ mod tests {
 
     fn chat(id: &str, ts: i64, user: &str) -> Value {
         json!({"type": "chat", "msg": {"id": id, "ts": ts, "user": {"id": format!("u-{user}"), "login": user, "name": user, "color": ""}, "text": "hi", "badges": "", "emotes": ""}})
+    }
+
+    fn kick_store() -> (ChatStore, String) {
+        let mut s = ChatStore::default();
+        let r = SourceRef { platform: Platform::Kick, channel: "xqc".into() };
+        s.sync(&[r.clone()]);
+        (s, source_key(&r))
+    }
+
+    #[test]
+    fn kick_gifts_wear_the_senders_badges_and_a_removed_gift_is_marked() {
+        let (mut s, sk) = kick_store();
+        let line = json!({"id": "c1", "ts": 1, "user": {"id": "7", "login": "bob", "name": "Bob", "color": "#00ff00"}, "badges": [{"type": "subscriber", "text": "Subscriber", "count": 3}], "text": "hi"});
+        let gift = json!({"id": "kicks-t1", "ts": 2, "user": {"id": "7", "login": "bob", "name": "Bob", "color": ""}, "badges": [], "text": "gg", "notice": "kicks", "kicks": {"id": "hype", "name": "Hype", "amount": 10}});
+        // a snapshot: the gift takes the badges of the line before it
+        s.apply(&sk, &json!({"type": "chatlog", "messages": [line, gift]}));
+        let RowBody::Kick(g) = &s.rows()[1].body else { panic!() };
+        assert_eq!((g.badges.len(), g.user.color.as_str(), g.kicks.as_ref().map(|k| k.amount)), (1, "#00ff00", Some(10.0)));
+        // live: the same
+        s.apply(&sk, &json!({"type": "chat", "message": {"id": "kicks-t2", "ts": 3, "user": {"id": "7", "login": "bob", "name": "Bob", "color": "#123456"}, "text": "", "notice": "kicks", "kicks": {"amount": 1}}}));
+        let RowBody::Kick(g2) = &s.rows()[2].body else { panic!() };
+        assert_eq!((g2.badges.len(), g2.user.color.as_str()), (1, "#123456"));
+        // a raider who never chatted here keeps no badges
+        s.apply(&sk, &json!({"type": "chat", "message": {"id": "host-h1", "ts": 4, "user": {"id": "9", "login": "raider", "name": "Raider"}, "notice": "host", "host": {"viewers": 5}}}));
+        let RowBody::Kick(h) = &s.rows()[3].body else { panic!() };
+        assert!(h.badges.is_empty() && h.host.as_ref().map(|h| h.viewers) == Some(5.0));
+        // KicksGiftedDeleted arrives as a delete of the gift's id
+        assert!(s.apply(&sk, &json!({"type": "delete", "ids": ["kicks-t1"]})));
+        let RowBody::Kick(g) = &s.rows()[1].body else { panic!() };
+        assert!(g.deleted);
     }
 
     #[test]

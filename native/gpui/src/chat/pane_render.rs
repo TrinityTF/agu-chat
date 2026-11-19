@@ -39,7 +39,7 @@ fn eid(prefix: &str, key: &str) -> ElementId {
 }
 
 /// `toLocaleString()` for an integer-ish amount.
-fn thousands(n: f64) -> String {
+pub(super) fn thousands(n: f64) -> String {
     let neg = n < 0.0;
     let s = format!("{}", n.abs().round() as i64);
     let mut out = String::new();
@@ -357,7 +357,7 @@ impl ChatPane {
         let base = self.settings.font_size;
         let amount = e.amount;
         let mut head = div().flex().items_center().gap(px(8.)).px(px(8.)).pt(px(2.));
-        if e.inner.is_none() {
+        if e.inner.is_none() || e.image.is_some() {
             head = head.pb(px(2.));
         }
         let left = div().flex_1().min_w_0().child(self.flow(&e.content, Rc::new(e.actions.clone()), cx));
@@ -370,6 +370,10 @@ impl ChatPane {
         }
         if let Some(a) = amount {
             right = right.child(SharedString::from(thousands(a)));
+        }
+        if let Some(u) = &e.image {
+            // a KICKs gift's coin bundle, as kick.com draws it beside the gift
+            right = right.child(ImageBox { url: SharedString::from(u.clone()), side: event_image_px(base), radius: 0.0, fallback: None });
         }
         head = head.child(left).child(right);
         // like 7TV: a coloured bar on the left and a soft tint, no box
@@ -445,7 +449,9 @@ impl ChatPane {
         } else {
             (token_a(theme::PURPLE_500, 0.9), token_a(theme::PURPLE_500, 0.12))
         };
-        let mut body = div().w_full().px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(vec![]), cx));
+        // a Kick raid's raider opens their card from the name in the sentence
+        let acts = if n.head.is_none() { n.card.clone().map(|(sk, user)| vec![RowAction::Card { sk, user }]).unwrap_or_default() } else { vec![] };
+        let mut body = div().w_full().px(px(8.)).py(px(4.)).child(self.flow(&n.system, Rc::new(acts), cx));
         if let Some(t) = &n.text {
             body = body.child(self.flow(t, Rc::new(vec![]), cx));
         }

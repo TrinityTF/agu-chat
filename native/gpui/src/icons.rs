@@ -31,7 +31,7 @@ icons! {
     BITS_10000 => "bits-10000", BITS_5000 => "bits-5000", BITS_1000 => "bits-1000", BITS_100 => "bits-100", BITS_0 => "bits-0",
     CHANNEL_POINTS => "channel-points",
     TWITCH => "platform-twitch", KICK => "platform-kick", YOUTUBE => "platform-youtube", RUMBLE => "platform-rumble",
-    PLATFORM_X => "platform-x",
+    PLATFORM_X => "platform-x", KICKS => "kicks",
     MAIL => "mail", LOCK => "lock",
 }
 
