@@ -1176,7 +1176,7 @@ fn co_frame_style(spec: &mut FrameSpec, rule: Option<&HighlightRule>) {
 
 fn simple_badge_chip(f: &mut Flow, label: &str, fg: Hsla, bg: Hsla, glyph: &str) {
     // `inline-flex h-[1.1em] min-w-[1.1em] ... rounded px-[3px] text-[10px] font-bold`
-    f.push(Item::Pill(PillItem { text: glyph.to_string().into(), size: 10.0, color: fg, weight: FontWeight::BOLD, bg, pad_x: 3.0, margin_r: 4.0, radius: 4.0 }));
+    f.push(Item::Pill(PillItem { text: glyph.to_string().into(), size: 10.0, color: fg, weight: FontWeight::BOLD, bg, pad_x: 3.0, margin_r: 4.0, radius: 4.0, copy: false }));
     let _ = label;
 }
 
@@ -1272,7 +1272,7 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     }
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
     if let Some(r) = rant {
-        f.push(Item::Pill(PillItem { text: money(r.cents).into(), size: 11.0, color: token(theme::WHITE), weight: FontWeight::BOLD, bg: token_a(theme::BLACK, 0.3), pad_x: 4.0, margin_r: 4.0, radius: 4.0 }));
+        f.push(Item::Pill(PillItem { text: money(r.cents).into(), size: 11.0, color: token(theme::WHITE), weight: FontWeight::BOLD, bg: token_a(theme::BLACK, 0.3), pad_x: 4.0, margin_r: 4.0, radius: 4.0, copy: true }));
     }
     let col = if striking { token(theme::FAINT) } else { token(theme::TEXT) };
     // :name: tokens resolved against the chat's own emote list
@@ -1514,10 +1514,10 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
     f.push(Item::Text(TextItem::new(if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() }, base, name_col).weight(FontWeight::SEMIBOLD).act(Act::Tag(0), true)));
     f.push(Item::Text(TextItem::new(": ", base, token(theme::MUTED))));
     if let Some(p) = paid {
-        f.push(Item::Pill(PillItem { text: p.amount.clone().into(), size: 11.0, color: token(theme::WHITE), weight: FontWeight::BOLD, bg: token_a(theme::BLACK, 0.3), pad_x: 4.0, margin_r: 4.0, radius: 4.0 }));
+        f.push(Item::Pill(PillItem { text: p.amount.clone().into(), size: 11.0, color: token(theme::WHITE), weight: FontWeight::BOLD, bg: token_a(theme::BLACK, 0.3), pad_x: 4.0, margin_r: 4.0, radius: 4.0, copy: true }));
     }
     if m.notice.as_deref() == Some("membership") {
-        f.push(Item::Pill(PillItem { text: "member".into(), size: 10.0, color: token(0x5ee9b5), weight: FontWeight::SEMIBOLD, bg: token_a(0x00bc7d, 0.2), pad_x: 4.0, margin_r: 4.0, radius: 4.0 }));
+        f.push(Item::Pill(PillItem { text: "member".into(), size: 10.0, color: token(0x5ee9b5), weight: FontWeight::SEMIBOLD, bg: token_a(0x00bc7d, 0.2), pad_x: 4.0, margin_r: 4.0, radius: 4.0, copy: false }));
     }
     if paid.map(|p| p.sticker).unwrap_or(false) && m.parts.is_empty() {
         f.push(Item::Text(TextItem::new("sent a Super Sticker", base, token(theme::MUTED)).italic(true)));

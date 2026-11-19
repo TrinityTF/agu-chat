@@ -21,6 +21,7 @@ pub mod pane_render;
 pub mod paint_text;
 pub mod rows;
 pub mod search;
+pub mod select;
 pub mod services;
 pub mod store;
 pub mod thread;

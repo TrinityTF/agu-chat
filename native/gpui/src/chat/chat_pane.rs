@@ -24,6 +24,7 @@ use super::chat_list::{ChatListState, ItemMetrics};
 use serde_json::{json, Value};
 
 use super::alerts::AlertWants;
+use super::select::SelScope;
 use super::mentions::Alert;
 use super::PxF;
 use super::highlights::{compile_highlights, match_input_of, Highlighter};
@@ -195,6 +196,8 @@ pub struct ChatPane {
     pub(super) scroll_held: bool,
     pub(super) hover_held: bool,
     pub(super) alt_held: bool,
+    /// a text selection in the list holds it still (`select.rs`)
+    pub(super) sel_held: bool,
     pub(super) pause_mark: u64,
     pending_rows: Option<Vec<RowRef>>,
     pub search_open: bool,
@@ -244,6 +247,13 @@ pub struct ChatPane {
     pub whisper_pending: bool,
     /// the row a jump from the Mentions panel landed on, flashed for a moment
     pub(super) flash: Option<String>,
+    /// text selection in the message list and in the reply thread
+    pub(super) sel_main: Rc<SelScope>,
+    pub(super) sel_thread: Rc<SelScope>,
+    /// while a row is being drawn: the scope its flows are selectable in, the row's index, the next flow's number
+    pub(super) sel_ctx: RefCell<Option<(Rc<SelScope>, u32, u32)>>,
+    /// the right-click menu over a selection: where, and the text it copies
+    pub(super) copy_menu: Option<(Point<Pixels>, String)>,
     pub(super) images_inbox: Rc<RefCell<Vec<String>>>,
     /// link previews that just arrived (their rows get measured again)
     pub(super) previews_inbox: Rc<RefCell<Vec<String>>>,
@@ -453,6 +463,7 @@ impl ChatPane {
             scroll_held: false,
             hover_held: false,
             alt_held: false,
+            sel_held: false,
             pause_mark: 0,
             pending_rows: None,
             search_open: false,
@@ -487,6 +498,10 @@ impl ChatPane {
             mention_keys: HashSet::new(),
             whisper_pending: false,
             flash: None,
+            sel_main: SelScope::new(),
+            sel_thread: SelScope::new(),
+            sel_ctx: RefCell::new(None),
+            copy_menu: None,
             images_inbox,
             previews_inbox,
             styled_users,
@@ -500,7 +515,58 @@ impl ChatPane {
             _tasks: tasks,
         };
         pane.start_loads(cx);
+        pane.wire_selection(cx);
         pane
+    }
+
+    /// What the selection scopes need from the pane: the message list's rows (most are not on screen), the pause
+    /// while something is selected, the scroll while a drag is held past the list's edge, the right-click menu.
+    fn wire_selection(&self, cx: &mut Context<Self>) {
+        let weak = cx.weak_entity();
+        let w = weak.clone();
+        self.sel_main.set_rows(Rc::new(move |row, cx| w.update(cx, |p, cx| p.built(row as usize, cx).map(|b| sel_flows(&b))).ok().flatten()));
+        let w = weak.clone();
+        self.sel_main.set_on_change(Rc::new(move |on, cx| {
+            let _ = w.update(cx, |p, cx| p.set_sel_hold(on, cx));
+        }));
+        let ls = self.list_state.clone();
+        self.sel_main.set_scroll(Rc::new(move |d| ls.scroll_by(d)));
+        for scope in [&self.sel_main, &self.sel_thread] {
+            let w = weak.clone();
+            scope.set_on_context(Rc::new(move |pos, text, _win, cx| {
+                let _ = w.update(cx, |p, cx| {
+                    p.copy_menu = Some((pos, text));
+                    cx.notify();
+                });
+            }));
+        }
+        let w = weak.clone();
+        self.sel_thread.set_rows(Rc::new(move |row, cx| {
+            w.update(cx, |p, cx| p.thread_built_rows(cx).get(row as usize).map(|(_, b)| sel_flows(b))).ok().flatten()
+        }));
+    }
+
+    /// A selection in the message list pauses it like a hover pause does (new lines wait, the pill counts them);
+    /// dropping the selection lets them in.
+    pub(super) fn set_sel_hold(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.sel_held == on {
+            return;
+        }
+        if on && !self.frozen() && !self.scroll_held {
+            self.pause_mark = self.last_ord();
+        }
+        self.sel_held = on;
+        self.update_store_hold();
+        if !self.frozen() {
+            self.refresh(cx);
+        }
+        cx.notify();
+    }
+
+    /// Drop the message list's selection (the chat resumed).
+    fn drop_selection(&mut self) {
+        self.sel_main.clear_quiet();
+        self.sel_held = false;
     }
 
     // ---- settings / accounts ---------------------------------------------------------------------------
@@ -660,6 +726,7 @@ impl ChatPane {
 
     pub fn close_thread(&mut self, cx: &mut Context<Self>) {
         if self.thread.take().is_some() {
+            self.sel_thread.clear_quiet();
             self.thread_built.borrow_mut().clear();
             cx.notify();
         }
@@ -695,12 +762,13 @@ impl ChatPane {
     /// The Mentions panel's rows from this pane's chats, drawn like the list draws them (badges, name that opens
     /// the card, emotes, hover tools), from the row as the store has it now when it is still there. None for a
     /// row that can't be drawn here or is hidden now (deleted, or its author ignored since).
-    pub fn mention_row_els(&mut self, rows: &[RowRef], cx: &mut Context<Self>) -> Vec<Option<AnyElement>> {
+    /// `order[i]` is row i's place in the panel, `scope` the panel's text selection.
+    pub fn mention_row_els(&mut self, rows: &[RowRef], order: &[usize], scope: &Rc<SelScope>, cx: &mut Context<Self>) -> Vec<Option<AnyElement>> {
         let wanted: HashSet<&str> = rows.iter().map(|r| r.key.as_str()).collect();
         let current: HashMap<String, RowRef> = self.store.rows().iter().filter(|r| wanted.contains(r.key.as_str())).map(|r| (r.key.clone(), r.clone())).collect();
         let mut keep: HashSet<String> = HashSet::new();
         let mut out = Vec::with_capacity(rows.len());
-        for snap in rows {
+        for (n, snap) in rows.iter().enumerate() {
             let r = current.get(&snap.key).cloned().unwrap_or_else(|| snap.clone());
             if super::mentions::row_deleted(&r) || apply_ignores(&r, &self.ignores).is_none() || self.store.source(&r.sk).is_none() {
                 out.push(None);
@@ -721,7 +789,8 @@ impl ChatPane {
                     }
                 },
             };
-            out.push(Some(self.panel_row_el(&r.key, &b, cx)));
+            let place = order.get(n).copied().unwrap_or(n);
+            out.push(Some(self.with_sel_row(scope, place, |this| this.panel_row_el(&r.key, &b, cx))));
         }
         self.mention_built.borrow_mut().retain(|k, _| keep.contains(k));
         out
@@ -744,9 +813,10 @@ impl ChatPane {
 
     /// Jump from the Mentions panel: scroll the list to the row and flash it, or say why it can't be shown.
     pub fn jump_to(&mut self, key: &str, cx: &mut Context<Self>) {
-        // a hover / Alt pause would keep the list as it was
+        // a hover / Alt pause (or a selection) would keep the list as it was
         self.hover_held = false;
         self.alt_held = false;
+        self.drop_selection();
         self.refresh(cx);
         let Some(ix) = self.shown.iter().position(|s| s.row.key == key) else {
             let msg = if self.store.rows().iter().any(|r| r.key == key) { "That message is hidden in this chat right now" } else { "That message is no longer in this chat" };
@@ -1367,7 +1437,7 @@ impl ChatPane {
     }
 
     pub(super) fn frozen(&self) -> bool {
-        self.hover_held || self.alt_held
+        self.hover_held || self.alt_held || self.sel_held
     }
 
     fn update_store_hold(&mut self) {
@@ -1392,6 +1462,7 @@ impl ChatPane {
         if self.shown.is_empty() {
             self.shown = new.into_iter().map(|row| ShownRow { row, built: RefCell::new(None) }).collect();
             self.list_state.reset(self.shown.len());
+            self.drop_selection();
             return;
         }
         // Match old and new rows by key, whatever changed: trimmed at the top, appended, an out-of-order row put in
@@ -1409,6 +1480,10 @@ impl ChatPane {
         }
         self.shown = new.into_iter().zip(reuse).map(|(row, kept)| kept.unwrap_or(ShownRow { row, built: RefCell::new(None) })).collect();
         self.list_state.remap(self.shown.len(), &map);
+        // a selection follows its rows (a row that changed keeps its units: the same message)
+        if !self.sel_main.remap_rows(|r| map.get(r as usize).copied().flatten().map(|(j, _)| j as u32)) {
+            self.sel_held = false;
+        }
     }
 
     /// Every row's built form is stale (settings, env): drop the caches and re-measure, keeping the scroll spot.
@@ -1541,7 +1616,8 @@ impl ChatPane {
     /// Called every frame: the user scrolled up (hold) or came back within 40 px of the bottom (resume).
     pub(super) fn track_scroll(&mut self) {
         let following = self.list_state.following();
-        if !following && self.list_state.dist_to_bottom() <= 40.0 {
+        // (not while a selection holds the list: a drag past the bottom edge scrolls it there a step at a time)
+        if !following && !self.sel_held && self.list_state.dist_to_bottom() <= 40.0 {
             self.list_state.follow();
         }
         let held = !self.list_state.following();
@@ -1568,6 +1644,7 @@ impl ChatPane {
         self.scroll_held = false;
         self.hover_held = false;
         self.alt_held = false;
+        self.drop_selection();
         self.update_store_hold();
         self.refresh(cx);
         self.scroll_to_end();
@@ -2425,6 +2502,11 @@ impl ChatPane {
 
 fn b_contents(b: &BuiltRow) -> Vec<Rc<super::inline::InlineContent>> {
     b.contents()
+}
+
+/// A built row's flows numbered as the row draws them (the selection's `FlowKey::sub`).
+pub(super) fn sel_flows(b: &BuiltRow) -> super::select::RowFlows {
+    b.contents().into_iter().enumerate().map(|(i, c)| (i as u32, c)).collect()
 }
 
 #[cfg(test)]

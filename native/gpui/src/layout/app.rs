@@ -160,6 +160,8 @@ pub struct AguApp {
     pub mentions: crate::chat::mentions::Mentions,
     pub mentions_open: bool,
     pub mentions_scroll: gpui::ScrollHandle,
+    /// text selection in the Mentions panel
+    pub mentions_sel: std::rc::Rc<crate::chat::select::SelScope>,
     /// how many entries the open panel showed last frame (a new one scrolls it to the bottom)
     pub mentions_count: usize,
     pub updater: UpdaterState,
@@ -227,6 +229,7 @@ impl AguApp {
             mentions: Default::default(),
             mentions_open: false,
             mentions_scroll: gpui::ScrollHandle::new(),
+            mentions_sel: crate::chat::select::SelScope::new(),
             mentions_count: 0,
             updater,
             bar_dismissed: None,

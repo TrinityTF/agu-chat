@@ -18,6 +18,7 @@ use gpui::{
 
 use super::images::{fit_down, ImagesHandle};
 use super::paint_text::{self, NameReq, PaintImage, PaintSpec};
+use super::select::{FlowKey, SelScope};
 use super::twitch::parts::split_keep_ws;
 use super::PxF;
 use crate::theme;
@@ -157,6 +158,8 @@ pub struct PillItem {
     pub pad_x: f32,
     pub margin_r: f32,
     pub radius: f32,
+    /// copied with selected text (an amount); badge-like chips are not
+    pub copy: bool,
 }
 
 #[derive(Clone)]
@@ -317,6 +320,181 @@ impl InlineContent {
         *self.cache.borrow_mut() = None;
         self.height_memo.set(None);
     }
+
+    // ---- text selection ---------------------------------------------------------------------------------
+    // A position in the flow is a "unit": every character of a text item is one, every other item (an emote,
+    // a badge, a button, a gap) is one. Positions run from 0 to `unit_len()`; a selection is a unit range.
+
+    /// The number of selection units in the flow.
+    pub fn unit_len(&self) -> u32 {
+        self.items.iter().map(item_units).sum()
+    }
+
+    /// The text of units [a, b) as it is copied: words as typed, an emote as its code, badges, icons and
+    /// buttons left out, runs of whitespace as one space.
+    pub fn copy_text(&self, a: u32, b: u32) -> String {
+        copy_items(&self.items, a, b)
+    }
+
+    /// The word around unit `u` (a double-click): the run of non-space characters of its text item, or the one
+    /// emote / badge there.
+    pub fn word_at(&self, u: u32) -> (u32, u32) {
+        word_in_items(&self.items, u)
+    }
+
+    /// The unit nearest a point (relative to the flow's top-left corner), from the layout the flow was last drawn
+    /// with. None when it has none (not drawn yet).
+    pub fn unit_at(&self, x: f32, y: f32) -> Option<u32> {
+        let c = self.cache.borrow();
+        let l = c.as_ref()?;
+        Some(unit_in_layout(l, x, y, self.unit_len()))
+    }
+}
+
+fn item_units(it: &Item) -> u32 {
+    match it {
+        Item::Text(t) => t.text.chars().count() as u32,
+        _ => 1,
+    }
+}
+
+/// Where each item's units start.
+fn unit_prefix(items: &[Item]) -> Vec<u32> {
+    let mut v = Vec::with_capacity(items.len());
+    let mut acc = 0u32;
+    for it in items {
+        v.push(acc);
+        acc += item_units(it);
+    }
+    v
+}
+
+fn copy_items(items: &[Item], a: u32, b: u32) -> String {
+    let mut raw = String::new();
+    let mut at = 0u32;
+    for it in items {
+        let n = item_units(it);
+        let (s, e) = (a.max(at), b.min(at + n));
+        if s < e {
+            match it {
+                Item::Text(t) => raw.extend(t.text.chars().skip((s - at) as usize).take((e - s) as usize)),
+                // an emote (an image that sizes itself; badges are fixed boxes) copies as its code
+                Item::Image(i) if !i.fixed => {
+                    if let Some(t) = &i.tip {
+                        raw.push(' ');
+                        raw.push_str(&t.name);
+                        raw.push(' ');
+                    }
+                }
+                Item::Gap(_) => raw.push(' '),
+                Item::Pill(p) if p.copy => {
+                    raw.push(' ');
+                    raw.push_str(&p.text);
+                    raw.push(' ');
+                }
+                _ => {}
+            }
+        }
+        at += n;
+    }
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn word_in_items(items: &[Item], u: u32) -> (u32, u32) {
+    let mut at = 0u32;
+    let total: u32 = items.iter().map(item_units).sum();
+    // a double-click on the right half of a word's last character lands after it: look one back
+    for probe in [u, u.saturating_sub(1)] {
+        at = 0;
+        for it in items {
+            let n = item_units(it);
+            if probe < at + n {
+                match it {
+                    Item::Text(t) => {
+                        let chars: Vec<char> = t.text.chars().collect();
+                        let i = (probe - at) as usize;
+                        if chars[i].is_whitespace() {
+                            break;
+                        }
+                        let mut s = i;
+                        while s > 0 && !chars[s - 1].is_whitespace() {
+                            s -= 1;
+                        }
+                        let mut e = i + 1;
+                        while e < chars.len() && !chars[e].is_whitespace() {
+                            e += 1;
+                        }
+                        return (at + s as u32, at + e as u32);
+                    }
+                    _ => return (at, at + 1),
+                }
+            }
+            at += n;
+        }
+    }
+    let _ = at;
+    (u.min(total), u.min(total))
+}
+
+fn unit_in_layout(l: &Laid, x: f32, y: f32, total: u32) -> u32 {
+    if l.lines.is_empty() || y < 0.0 {
+        return 0;
+    }
+    if y >= l.height {
+        return total;
+    }
+    let line = l.lines.iter().position(|ln| y < ln.y + ln.height).unwrap_or(l.lines.len() - 1);
+    let on_line: Vec<&Placed> = l.placed.iter().filter(|p| p.line == line).collect();
+    let Some(first) = on_line.first() else { return 0 };
+    if x <= first.x {
+        return first.atom.u.0;
+    }
+    for p in &on_line {
+        if x < p.x + p.atom.w {
+            return match &p.atom.kind {
+                AtomKind::Word { shaped, .. } => {
+                    let bi = shaped.closest_index_for_x(px(x - p.x)).min(shaped.text.len());
+                    let chars = shaped.text.get(..bi).map(|t| t.chars().count()).unwrap_or(0) as u32;
+                    (p.atom.u.0 + chars).min(p.atom.u.1)
+                }
+                _ => {
+                    if x < p.x + p.atom.w / 2.0 {
+                        p.atom.u.0
+                    } else {
+                        p.atom.u.1
+                    }
+                }
+            };
+        }
+    }
+    on_line.last().map(|p| p.atom.u.1).unwrap_or(0)
+}
+
+/// The highlighted strip of each line for a unit range: (line top, height, left, right), relative to the flow.
+fn selection_rects(l: &Laid, a: u32, b: u32) -> Vec<(f32, f32, f32, f32)> {
+    let mut out: Vec<(usize, f32, f32)> = Vec::new();
+    for p in &l.placed {
+        let (u0, u1) = p.atom.u;
+        let (s, e) = (a.max(u0), b.min(u1));
+        if s >= e {
+            continue;
+        }
+        let (xs, xe) = match &p.atom.kind {
+            AtomKind::Word { shaped, .. } => {
+                let byte = |k: u32| shaped.text.char_indices().nth((k - u0) as usize).map(|(i, _)| i).unwrap_or(shaped.text.len());
+                (p.x + shaped.x_for_index(byte(s)).f(), p.x + shaped.x_for_index(byte(e)).f())
+            }
+            _ => (p.x, p.x + p.atom.w),
+        };
+        match out.last_mut() {
+            Some(r) if r.0 == p.line => {
+                r.1 = r.1.min(xs);
+                r.2 = r.2.max(xe);
+            }
+            _ => out.push((p.line, xs, xe)),
+        }
+    }
+    out.into_iter().map(|(li, xs, xe)| (l.lines[li].y, l.lines[li].height, xs, xe)).collect()
 }
 
 // ---- layout -----------------------------------------------------------------------------------
@@ -340,6 +518,8 @@ struct Atom {
     break_before: bool,
     /// for Box/Block: size actually drawn
     dims: (f32, f32),
+    /// the selection units it stands for (`InlineContent::unit_len`)
+    u: (u32, u32),
 }
 
 struct LineInfo {
@@ -417,14 +597,14 @@ fn word_atom(window: &Window, items: &[Item], item: usize, text: &str, char_off:
     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
     let hl = (ratio * t.size - (asc + desc)) / 2.0;
     let (above, below) = blink_above_below(asc, desc, ratio * t.size);
-    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Word { shaped, item, size: t.size, hl, asc }, break_before: false, dims: (0.0, 0.0) }
+    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Word { shaped, item, size: t.size, hl, asc }, break_before: false, dims: (0.0, 0.0), u: (0, 0) }
 }
 
 fn space_atom(window: &Window, t: &TextItem, ratio: f32) -> Atom {
     let shaped = shape(window, t, " ", 0, 1);
     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
     let (above, below) = blink_above_below(asc, desc, ratio * t.size);
-    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Space, break_before: false, dims: (0.0, 0.0) }
+    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Space, break_before: false, dims: (0.0, 0.0), u: (0, 0) }
 }
 
 /// Centre of a box relative to the baseline (negative = above), per vertical-align rule.
@@ -471,29 +651,29 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
             let (w, h) = image_dims(i, imgs, window.scale_factor());
             let mh = if i.wrap { i.max_h } else { h } + 2.0 * i.vmargin;
             let c = box_center(i.valign, mh, bs, ratio, window);
-            Atom { w: w + 2.0 * i.margin_x, above: mh / 2.0 - c, below: mh / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (w, h) }
+            Atom { w: w + 2.0 * i.margin_x, above: mh / 2.0 - c, below: mh / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (w, h), u: (0, 0) }
         }
         Item::Icon(i) => {
             let c = box_center(i.valign, i.size, bs, ratio, window);
-            Atom { w: i.size + 2.0 * i.margin_x, above: i.size / 2.0 - c, below: i.size / 2.0 + c, kind: AtomKind::Box { item }, break_before: false, dims: (i.size, i.size) }
+            Atom { w: i.size + 2.0 * i.margin_x, above: i.size / 2.0 - c, below: i.size / 2.0 + c, kind: AtomKind::Box { item }, break_before: false, dims: (i.size, i.size), u: (0, 0) }
         }
         Item::Pill(p) => {
             let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None, overlays: Vec::new(), overlay_box: (0.0, 0.0) }, &p.text, 0, 1);
             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
-            Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc) }
+            Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc), u: (0, 0) }
         }
         Item::Button(b) => {
             let c = box_center(VAlign::BottomAt(b.down), b.h, bs, ratio, window);
-            Atom { w: b.w + b.margin_r, above: b.h / 2.0 - c, below: b.h / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (b.w, b.h) }
+            Atom { w: b.w + b.margin_r, above: b.h / 2.0 - c, below: b.h / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (b.w, b.h), u: (0, 0) }
         }
-        Item::Gap(w) => Atom { w: *w, above: 0.0, below: 0.0, kind: AtomKind::Box { item }, break_before: false, dims: (*w, 0.0) },
+        Item::Gap(w) => Atom { w: *w, above: 0.0, below: 0.0, kind: AtomKind::Box { item }, break_before: false, dims: (*w, 0.0), u: (0, 0) },
         Item::Gif(g) => {
             // `my-1 block max-h-40 max-w-full rounded object-contain`
             let (w, h) = match imgs.0.get(&g.url, max_w.max(240.0), 160.0, window.scale_factor()) {
                 Some(img) => fit_down(img.w as f32, img.h as f32, max_w, 160.0),
                 None => (0.0, 0.0),
             };
-            Atom { w: max_w, above: h + 4.0, below: 4.0, kind: AtomKind::Block { item }, break_before: true, dims: (w, h) }
+            Atom { w: max_w, above: h + 4.0, below: 4.0, kind: AtomKind::Block { item }, break_before: true, dims: (w, h), u: (0, 0) }
         }
         Item::Text(_) => unreachable!(),
     }
@@ -506,6 +686,7 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
     let (strut_above, strut_below) = blink_above_below(sa, sd, ratio * content.base_size);
 
     // 1. atoms
+    let prefix = unit_prefix(items);
     let mut atoms: Vec<Atom> = Vec::new();
     let mut last_was_space = true; // leading whitespace is dropped
     for (idx, it) in items.iter().enumerate() {
@@ -515,14 +696,18 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
                 let mut first = true;
                 for tok in split_keep_ws(&t.text) {
                     let n = tok.chars().count();
+                    let u = (prefix[idx] + off as u32, prefix[idx] + (off + n) as u32);
                     if tok.chars().all(|c| c.is_whitespace()) {
                         if !last_was_space {
-                            atoms.push(space_atom(window, t, ratio));
+                            let mut a = space_atom(window, t, ratio);
+                            a.u = u;
+                            atoms.push(a);
                             last_was_space = true;
                         }
                     } else {
                         let mut a = word_atom(window, items, idx, tok, off, ratio);
                         a.break_before = first && false;
+                        a.u = u;
                         atoms.push(a);
                         last_was_space = false;
                     }
@@ -531,7 +716,8 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
                 }
             }
             other => {
-                let a = box_atom(window, items, idx, content, imgs, width);
+                let mut a = box_atom(window, items, idx, content, imgs, width);
+                a.u = (prefix[idx], prefix[idx] + 1);
                 // a Gap is not content: it doesn't end a collapsed-space run
                 if !matches!(other, Item::Gap(_)) {
                     last_was_space = false;
@@ -613,8 +799,11 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
                         l.0.push((rest.clone(), 0.0));
                         break;
                     }
-                    let head = word_atom(window, items, item, &text[..cut], 0, ratio);
-                    let tail = word_atom(window, items, item, &text[cut..], 0, ratio);
+                    let mut head = word_atom(window, items, item, &text[..cut], 0, ratio);
+                    let mut tail = word_atom(window, items, item, &text[cut..], 0, ratio);
+                    let mid = rest.u.0 + text[..cut].chars().count() as u32;
+                    head.u = (rest.u.0, mid);
+                    tail.u = (mid, rest.u.1);
                     let l = lines.last_mut().unwrap();
                     l.0.push((head, 0.0));
                     l.1 = acc;
@@ -698,10 +887,12 @@ pub struct InlineFlow {
     /// shared by every flow of a pane: (tooltip showing, an image was hit by the current mouse move)
     hovering_tip: Rc<Cell<(bool, bool)>>,
     fit: bool,
+    /// the list this flow's text can be selected in, and its place there
+    sel: Option<(Rc<SelScope>, FlowKey)>,
 }
 
 pub fn inline_flow(content: Rc<InlineContent>) -> InlineFlow {
-    InlineFlow { content, on_act: None, on_tip: None, hovering_tip: Rc::new(Cell::new((false, false))), fit: false }
+    InlineFlow { content, on_act: None, on_tip: None, hovering_tip: Rc::new(Cell::new((false, false))), fit: false, sel: None }
 }
 
 impl InlineFlow {
@@ -719,6 +910,11 @@ impl InlineFlow {
         self.hovering_tip = state;
         self
     }
+    /// Its text can be selected with the mouse, in `scope` at `key` (`select.rs`).
+    pub fn selectable(mut self, scope: Rc<SelScope>, key: FlowKey) -> Self {
+        self.sel = Some((scope, key));
+        self
+    }
 }
 
 impl IntoElement for InlineFlow {
@@ -730,6 +926,8 @@ impl IntoElement for InlineFlow {
 
 pub struct Prepaint {
     hitboxes: Vec<(usize, Hitbox)>,
+    /// the whole flow, when its text is selectable
+    area: Option<Hitbox>,
 }
 
 fn epoch_of(cx: &App) -> u64 {
@@ -784,6 +982,11 @@ impl Element for InlineFlow {
             *c = Some(layout(&self.content, w, window, &imgs, epoch));
         }
         let laid = c.as_ref().unwrap();
+        // inserted before the parts' own hitboxes, so a press on a name or a button is theirs
+        let area = self.sel.as_ref().map(|(scope, key)| {
+            scope.register(*key, bounds, self.content.clone());
+            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        });
         let mut hitboxes = Vec::new();
         for (pi, p) in laid.placed.iter().enumerate() {
             let item = match &p.atom.kind {
@@ -801,7 +1004,7 @@ impl Element for InlineFlow {
                 hitboxes.push((pi, window.insert_hitbox(r, HitboxBehavior::Normal)));
             }
         }
-        Prepaint { hitboxes }
+        Prepaint { hitboxes, area }
     }
 
     fn paint(&mut self, _id: Option<&GlobalElementId>, _ins: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _rl: &mut (), pp: &mut Prepaint, window: &mut Window, cx: &mut App) {
@@ -813,6 +1016,15 @@ impl Element for InlineFlow {
         let origin = bounds.origin;
         let bs = self.content.base_size;
         let strips = span_strips(&self.content.spans, laid);
+        // the selection's highlight, under the text
+        if let Some((scope, key)) = &self.sel {
+            if let Some((a, b)) = scope.ordered().and_then(|sel| super::select::range_in(sel, *key, self.content.unit_len())) {
+                let col = theme::a(theme::ACCENT, 0.45);
+                for (y, h, x0, x1) in selection_rects(laid, a, b) {
+                    window.paint_quad(gpui::fill(Bounds::new(point(origin.x + px(x0), origin.y + px(y)), size(px((x1 - x0).max(0.0)), px(h))), col));
+                }
+            }
+        }
         for (pi, p) in laid.placed.iter().enumerate() {
             let line = &laid.lines[p.line];
             let x0 = origin.x.f() + p.x;
@@ -928,6 +1140,18 @@ impl Element for InlineFlow {
         let _ = bs;
 
         // interaction
+        // A press on the text starts a selection. Registered before the parts' handlers, so it runs after them
+        // (bubble order): a name, link or button that acts on the press stops it from getting here.
+        if let (Some((scope, key)), Some(area)) = (self.sel.clone(), pp.area.clone()) {
+            let content = self.content.clone();
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left && area.is_hovered(window) {
+                    let unit = content.unit_at((ev.position.x - origin.x).f(), (ev.position.y - origin.y).f()).unwrap_or(0);
+                    scope.flow_down(key, unit, &content, ev, cx);
+                    window.refresh();
+                }
+            });
+        }
         for (pi, hb) in &pp.hitboxes {
             let p = &laid.placed[*pi];
             let item = match &p.atom.kind {
