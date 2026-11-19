@@ -69,6 +69,7 @@ fn main() {
     log_panics();
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         text_input::bind_keys(cx);
+        chat::select::install(cx);
         #[cfg(target_os = "macos")]
         mac_menu::install(cx);
 

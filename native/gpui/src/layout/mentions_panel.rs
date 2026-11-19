@@ -79,6 +79,7 @@ impl AguApp {
             return;
         }
         self.mentions_open = false;
+        self.mentions_sel.clear_quiet();
         for slot in self.panes.values() {
             slot.view.update(cx, |p, _| p.forget_mention_rows());
         }
@@ -189,6 +190,16 @@ impl AguApp {
         if !self.mentions_open {
             return None;
         }
+        // right-click over a selection in the panel: Copy (the app's popup menu)
+        let weak = cx.weak_entity();
+        self.mentions_sel.set_on_context(std::rc::Rc::new(move |pos, text, _w, cx| {
+            let _ = weak.update(cx, |app, cx| {
+                let hint = if cfg!(target_os = "macos") { "\u{2318}C" } else { "Ctrl+C" };
+                let item = crate::layout::ui::MenuItem::new("Copy", move |_app, _w, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))).hint(Some(hint.to_string()));
+                app.menu = Some(crate::layout::ui::MenuState { key: "mentions-copy".into(), pos, align_right: false, entries: vec![crate::layout::ui::MenuEntry::Item(item)], anchor: None });
+                cx.notify();
+            });
+        }));
         let entries: Vec<MentionEntry> = self.mentions.entries().iter().cloned().collect();
         // Every entry arriving while the panel is open is read at once; the newest comes into view.
         if entries.len() > self.mentions_count {
@@ -209,7 +220,8 @@ impl AguApp {
         for (leaf, idx) in by_leaf {
             let Some(view) = self.panes.get(&leaf).map(|s| s.view.clone()) else { continue };
             let rows: Vec<RowRef> = idx.iter().map(|&i| entries[i].row.clone()).collect();
-            let built = view.update(cx, |p: &mut ChatPane, cx| p.mention_row_els(&rows, cx));
+            let scope = self.mentions_sel.clone();
+            let built = view.update(cx, |p: &mut ChatPane, cx| p.mention_row_els(&rows, &idx, &scope, cx));
             for (i, el) in idx.into_iter().zip(built) {
                 els[i] = Some(el);
             }
@@ -338,6 +350,8 @@ impl AguApp {
                 }))
                 .child(header)
                 .child(list)
+                // after the rows: it hit-tests against the flows they drew
+                .child(crate::chat::select::sel_layer(self.mentions_sel.clone()))
                 .children(tips)
                 .into_any_element(),
         )

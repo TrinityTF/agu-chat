@@ -145,7 +145,25 @@ impl ChatPane {
                 cx.notify();
             });
         });
-        inline_flow(content.clone()).on_act(on_act).on_tip(on_tip, self.tip_state.clone())
+        let f = inline_flow(content.clone()).on_act(on_act).on_tip(on_tip, self.tip_state.clone());
+        // inside a list row: selectable there, numbered in the order the row draws its flows
+        let sel = self.sel_ctx.borrow_mut().as_mut().map(|(scope, row, sub)| {
+            let key = super::select::FlowKey { row: *row, sub: *sub };
+            *sub += 1;
+            (scope.clone(), key)
+        });
+        match sel {
+            Some((scope, key)) => f.selectable(scope, key),
+            None => f,
+        }
+    }
+
+    /// Draw a list row with its flows selectable in `scope` as row `row`.
+    pub(super) fn with_sel_row<R>(&mut self, scope: &Rc<super::select::SelScope>, row: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.sel_ctx.replace(Some((scope.clone(), row as u32, 0)));
+        let r = f(self);
+        *self.sel_ctx.borrow_mut() = prev;
+        r
     }
 
     // ---- rows --------------------------------------------------------------------------------------------
@@ -175,7 +193,8 @@ impl ChatPane {
     fn frame_el(&mut self, key: &str, spec: &FrameSpec, nested: bool, cx: &mut Context<Self>) -> AnyElement {
         let base = self.settings.font_size;
         let actions = Rc::new(spec.actions.clone());
-        let hovered = self.hover_row.as_deref() == Some(key) || self.hover_bar.as_deref() == Some(key);
+        // no hover tools while a drag selects across the rows
+        let hovered = (self.hover_row.as_deref() == Some(key) || self.hover_bar.as_deref() == Some(key)) && !self.sel_main.dragging() && !self.sel_thread.dragging();
         let mut d = div().id(eid("row-", key)).relative().w_full().flex_none().py(px(1.));
         if spec.bar.is_some() {
             d = d.border_l_3().pl(px(6.)).pr(px(8.));
@@ -551,7 +570,8 @@ impl ChatPane {
         }
         let key = self.shown[ix].row.key.clone();
         let Some(b) = self.built(ix, cx) else { return div().into_any_element() };
-        let el = self.built_el(&key, &b, cx);
+        let scope = self.sel_main.clone();
+        let el = self.with_sel_row(&scope, ix, |this| this.built_el(&key, &b, cx));
         if self.flash.as_deref() == Some(key.as_str()) {
             // a jump from the Mentions panel landed here: a short tint over the row (no change to its height)
             return div()
@@ -622,8 +642,10 @@ impl ChatPane {
         if !has_root {
             list = list.child(div().px(px(8.)).pb(px(4.)).text_size(px(11.)).line_height(px(15.)).text_color(c(theme::FAINT)).child("The message that started this thread is no longer in chat."));
         }
-        for (key, b) in &built {
-            list = list.child(self.built_el(&format!("thread|{key}"), b, cx));
+        let scope = self.sel_thread.clone();
+        for (i, (key, b)) in built.iter().enumerate() {
+            let el = self.with_sel_row(&scope, i, |this| this.built_el(&format!("thread|{key}"), b, cx));
+            list = list.child(el);
         }
 
         let header = div()
@@ -684,7 +706,9 @@ impl ChatPane {
             .when_some(input, |d, i| {
                 // a reply to the thread's first message, so Twitch keeps it in this thread
                 d.child(div().flex_none().px(px(8.)).py(px(6.)).border_t_1().border_color(c(theme::LINE)).when(sending, |d| d.opacity(0.6)).child(i))
-            });
+            })
+            // after the rows: it hit-tests against the flows they drew
+            .child(super::select::sel_layer(self.sel_thread.clone()));
 
         // the dimmed list behind the sheet: a click there closes it
         Some(
@@ -1339,6 +1363,56 @@ impl ChatPane {
         Some(deferred(anchored().position(at).anchor(corner).snap_to_window_with_margin(gpui::Edges::all(px(4.))).child(menu)).with_priority(4).into_any_element())
     }
 
+    /// Right-click over a text selection: Copy.
+    fn copy_menu_el(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pos, _) = self.copy_menu.as_ref()?;
+        let pos = *pos;
+        let above = pos.y.f() > window.viewport_size().height.f() / 2.0;
+        let shortcut = if cfg!(target_os = "macos") { "⌘C" } else { "Ctrl+C" };
+        let menu = div()
+            .id("copy-menu")
+            .occlude()
+            .min_w(px(140.))
+            .flex()
+            .flex_col()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c(theme::LINE))
+            .bg(c(theme::RAISED))
+            .p(px(4.))
+            .shadow_2xl()
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(c(theme::TEXT))
+            .font_family(theme::FONT)
+            .on_mouse_down_out(cx.listener(|this, _: &gpui::MouseDownEvent, _w, cx| {
+                this.copy_menu = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("copy-menu-copy")
+                    .w_full()
+                    .flex()
+                    .justify_between()
+                    .gap(px(16.))
+                    .rounded(px(4.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .hover(|s| s.bg(c(theme::RAISED_2)))
+                    .child("Copy")
+                    .child(div().text_color(c(theme::FAINT)).child(shortcut))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        if let Some((_, text)) = this.copy_menu.take() {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        }
+                        cx.notify();
+                    })),
+            );
+        let corner = if above { Corner::BottomLeft } else { Corner::TopLeft };
+        Some(deferred(anchored().position(pos).anchor(corner).snap_to_window_with_margin(gpui::Edges::all(px(4.))).child(menu)).with_priority(4).into_any_element())
+    }
+
     pub(super) fn tip_el(&self, window: &Window) -> Option<AnyElement> {
         let (tip, pos) = self.tip.as_ref()?;
         let vp = window.viewport_size();
@@ -1443,6 +1517,8 @@ chat_list(
                 }
             }))
             .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(list_el))
+            // after the rows: it hit-tests against the flows they drew
+            .child(super::select::sel_layer(self.sel_main.clone()))
             .when(overflow, |d| d.child(div().flex_none().w(px(8.)).h_full()))
             .children(self.scrollbar(cx))
             .children(self.pill(cx));
@@ -1465,6 +1541,7 @@ chat_list(
             .children(self.toasts_el())
             .children(self.mod_pop_el(window, cx))
             .children(self.pin_pick_el(window, cx))
+            .children(self.copy_menu_el(window, cx))
             .child(self.send_box(window, cx))
             .children(self.tip_el(window))
     }
@@ -1491,7 +1568,7 @@ impl InlineContentBuilder {
         self.items.push(Item::Icon(IconItem { path, size, color, valign: VAlign::Middle, margin_x: 0.0 }));
     }
     pub fn pill(&mut self, t: &str, size: f32, color: Hsla, w: FontWeight, bg: Hsla, pad_x: f32, margin_r: f32) {
-        self.items.push(Item::Pill(PillItem { text: t.to_string().into(), size, color, weight: w, bg, pad_x, margin_r, radius: 4.0 }));
+        self.items.push(Item::Pill(PillItem { text: t.to_string().into(), size, color, weight: w, bg, pad_x, margin_r, radius: 4.0, copy: false }));
     }
     pub fn badge(&mut self, url: &str) {
         self.items.push(Item::Image(ImageItem {
