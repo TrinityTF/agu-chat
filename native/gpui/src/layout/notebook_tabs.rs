@@ -61,7 +61,7 @@ impl TabDot {
     pub fn color(self) -> u32 {
         match self {
             TabDot::Message => theme::FAINT,
-            TabDot::Live => theme::EMERALD_500, // the split header's connected / live dot
+            TabDot::Live => theme::EMERALD_500, // the same green as the live dot on the split header's platform logos
             TabDot::Highlight => theme::RED_500,
         }
     }

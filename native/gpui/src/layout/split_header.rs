@@ -1,13 +1,16 @@
 //! Port of src/renderer/layout/SplitHeader.tsx.
-//! The ~26px header on every split: platforms + channel names, connection dots, live pill + stream title,
-//! mod-mode toggle and the "⋯" menu.
-//! A merged split shows one chip per platform (icon, "2x" when it holds several channels of it, a status dot);
-//! names appear when there is room. Clicking a chip splits its channels out; dragging one drops it on any split edge.
+//! The ~26px header on every split: platforms + channel names, live pill + stream title, mod-mode toggle and the
+//! "⋯" menu.
+//! Each platform logo says two things: it is in colour while that chat is connected and grey (pulsing while it
+//! connects) when it is not, and a small green dot at its top right means the channel is live. A platform that
+//! does not know whether the channel is live shows no dot. Hovering says which, and why a chat is not connected.
+//! A merged split shows one chip per platform (logo, "2x" when it holds several channels of it); names appear when
+//! there is room. Clicking a chip splits its channels out; dragging one drops it on any split edge.
 //!
 //! The Modes button (layout/channel_modes.rs) sits before the mod toggle; it only shows to someone who can moderate.
 use std::time::Duration;
 
-use agu_chat_core::protocol::{ConnFrame, Platform};
+use agu_chat_core::protocol::{ConnFrame, Platform, SourceRef};
 use gpui::{
     div, prelude::*, px, Animation, AnimationExt, AnyElement, ClickEvent, Context, Window,
 };
@@ -19,26 +22,71 @@ use crate::layout::tree::{is_whisper, short_name, source_key, Edge, Leaf};
 use crate::layout::ui::{tip, MenuEntry, MenuItem};
 use crate::theme::{self, c};
 
-/// The dot a chip shows for several channels: the one most worth noticing.
-const WORST: [&str; 5] = ["error", "unavailable", "connecting", "offline", "open"];
-
-/// (colour, label) of a `conn` state; `connecting` also pulses.
-fn dot(state: &str) -> (u32, &'static str) {
-    match state {
-        "connecting" => (theme::AMBER_400, "Connecting"),
-        "open" => (theme::EMERALD_500, "Connected"),
-        "offline" => (theme::ZINC_500, "Offline"),
-        "error" => (theme::RED_500, "Error"),
-        _ => (theme::ORANGE_500, "Unavailable"),
-    }
-}
-
 fn state_of(st: Option<&ConnFrame>) -> &str {
     st.map(|s| s.state.as_str()).unwrap_or("connecting")
 }
 
-fn pulse(state: &str) -> bool {
-    state == "connecting"
+/// The chat is connected: messages arrive. Only the `open` state is; connecting, offline, error and unavailable
+/// all mean no chat is being read.
+pub fn is_connected(st: Option<&ConnFrame>) -> bool {
+    state_of(st) == "open"
+}
+
+/// The channel is live right now (as far as its platform says; unknown is not live).
+pub fn is_live(st: Option<&ConnFrame>) -> bool {
+    st.map(|s| s.live == Some(true)).unwrap_or(false)
+}
+
+/// What hovering a logo says about one source: "Connected · Live", or "Not connected: <why>".
+pub fn conn_label(st: Option<&ConnFrame>) -> String {
+    let live = match st.and_then(|s| s.live) {
+        Some(true) => " · Live",
+        Some(false) => " · Not live",
+        None => "",
+    };
+    if is_connected(st) {
+        return format!("Connected{live}");
+    }
+    let why = st.and_then(|s| s.detail.clone()).filter(|d| !d.trim().is_empty()).unwrap_or_else(|| {
+        match state_of(st) {
+            "connecting" => "Connecting",
+            "offline" => "Not live",
+            "error" => "Error",
+            _ => "Unavailable",
+        }
+        .to_string()
+    });
+    // "Not live" twice says nothing new
+    let live = if why == "Not live" && live == " · Not live" { "" } else { live };
+    format!("Not connected: {why}{live}")
+}
+
+/// A source's logo as the header shows it: in colour when connected, grey (pulsing while it connects) when not,
+/// with a green dot at its top right while the channel is live.
+fn source_mark(id: (&'static str, usize), s: &SourceRef, connected: bool, live: bool, pulsing: bool) -> gpui::Div {
+    let logo = if connected { icons::source_icon(s, 14., true) } else { icons::source_icon(s, 14., false).color(c(theme::FAINT)) };
+    let logo = div().id(id).flex_none().child(logo);
+    let logo = if pulsing {
+        logo.with_animation(("mark-pulse", id.1), Animation::new(Duration::from_secs(2)).repeat().with_easing(gpui::pulsating_between(0.4, 1.0)), |d, delta| d.opacity(delta))
+            .into_any_element()
+    } else {
+        logo.into_any_element()
+    };
+    div().relative().flex_none().child(logo).when(live, |d| {
+        d.child(
+            div()
+                .absolute()
+                .right(px(-3.))
+                .top(px(-3.))
+                .size(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(c(theme::RAISED))
+                .child(div().size(px(6.)).rounded_full().bg(c(theme::EMERALD_500))),
+        )
+    })
 }
 
 impl AguApp {
@@ -63,14 +111,7 @@ impl AguApp {
         }
         let dot_tip = |i: usize| {
             let (s, st) = &rows[i];
-            let (_, label) = dot(state_of(st.as_ref()));
-            format!(
-                "{} {}: {}{}",
-                icons::platform_label(s.platform),
-                short_name(s),
-                label,
-                st.as_ref().and_then(|s| s.detail.clone()).map(|d| format!(" - {d}")).unwrap_or_default()
-            )
+            format!("{} {}: {}", icons::platform_label(s.platform), short_name(s), conn_label(st.as_ref()))
         };
 
         let tab_id = tab_id.to_string();
@@ -107,14 +148,15 @@ impl AguApp {
         if merged {
             let mut chips = div().flex().min_w_0().flex_shrink().items_center().gap(px(6.)).overflow_hidden();
             for (gi, (platform, idxs)) in groups.iter().enumerate() {
-                let states: Vec<&str> = idxs.iter().map(|&i| state_of(rows[i].1.as_ref())).collect();
-                let worst = WORST.iter().find(|w| states.contains(w)).copied().unwrap_or("connecting");
+                // in colour only when every channel of the platform is connected; the dot when any is live
+                let connected = idxs.iter().all(|&i| is_connected(rows[i].1.as_ref()));
+                let live = idxs.iter().any(|&i| is_live(rows[i].1.as_ref()));
+                let pulsing = !connected && idxs.iter().any(|&i| state_of(rows[i].1.as_ref()) == "connecting");
                 let keys: Vec<String> = idxs.iter().map(|&i| source_key(&rows[i].0)).collect();
                 let names = idxs.iter().map(|&i| short_name(&rows[i].0)).collect::<Vec<_>>().join(", ");
                 let tooltip = idxs.iter().map(|&i| dot_tip(i)).chain(std::iter::once("Click to split out, or drag onto a split edge".to_string())).collect::<Vec<_>>().join("\n");
                 let multi = idxs.len() > 1;
                 let platform = *platform;
-                let (color, _) = dot(worst);
                 let chip_key = format!("chip:{leaf_id}:{}", platform.as_str());
                 let ck = chip_key.clone();
                 let (lid, tid) = (leaf_id.clone(), tab_id.clone());
@@ -148,23 +190,7 @@ impl AguApp {
                         this.toggle_menu(&ck, anchor, false, entries, cx);
                     }))
                     .child(
-                        div()
-                            .relative()
-                            .flex_none()
-                            .child(icons::source_icon(&rows[idxs[0]].0, 14., true))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(-3.))
-                                    .top(px(-3.))
-                                    .size(px(8.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(c(theme::RAISED))
-                                    .child(div().id(("chip-dot", gi)).size(px(6.)).rounded_full().bg(c(color)).when(pulse(worst), |d| d.opacity(0.75))),
-                            )
+                        source_mark(("chip-logo", gi), &rows[idxs[0]].0, connected, live, pulsing)
                             .when(multi, |d| {
                                 d.child(
                                     div()
@@ -191,16 +217,8 @@ impl AguApp {
             header = header.child(chips);
         } else {
             for (i, (s, st)) in rows.iter().enumerate() {
-                let state = state_of(st.as_ref());
-                let (color, _) = dot(state);
-                let dot_el = div().id(("hdr-dot", i)).size(px(8.)).flex_none().rounded_full().bg(c(color));
-                let dot_el = if pulse(state) {
-                    dot_el
-                        .with_animation(("pulse", i), Animation::new(Duration::from_secs(2)).repeat().with_easing(gpui::pulsating_between(0.5, 1.0)), |d, delta| d.opacity(delta))
-                        .into_any_element()
-                } else {
-                    dot_el.into_any_element()
-                };
+                let st = st.as_ref();
+                let mark = source_mark(("hdr-logo", i), s, is_connected(st), is_live(st), state_of(st) == "connecting");
                 header = header.child(
                     div()
                         .id(("hdr-src", i))
@@ -210,9 +228,8 @@ impl AguApp {
                         .items_center()
                         .gap(px(6.))
                         .tooltip(tip(dot_tip(i)))
-                        .child(icons::source_icon(s, 14., true))
-                        .child(div().min_w_0().truncate().font_weight(gpui::FontWeight::MEDIUM).child(short_name(s)))
-                        .child(dot_el),
+                        .child(mark)
+                        .child(div().min_w_0().truncate().font_weight(gpui::FontWeight::MEDIUM).child(short_name(s))),
                 );
             }
         }
@@ -365,3 +382,48 @@ impl AguApp {
 
 #[allow(dead_code)]
 fn _w(_: &mut Window) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(v: serde_json::Value) -> ConnFrame {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn only_open_is_connected() {
+        assert!(is_connected(Some(&conn(serde_json::json!({"state": "open"})))));
+        for s in ["connecting", "offline", "error", "unavailable"] {
+            assert!(!is_connected(Some(&conn(serde_json::json!({"state": s})))), "{s}");
+        }
+        assert!(!is_connected(None));
+    }
+
+    #[test]
+    fn live_is_separate_from_connected() {
+        // reconnecting while the stream runs: grey logo, live dot
+        let f = conn(serde_json::json!({"state": "connecting", "live": true, "detail": "Reconnecting to YouTube... (live chat poll returned 503)"}));
+        assert!(!is_connected(Some(&f)) && is_live(Some(&f)));
+        // a connected chat on an offline channel (Twitch, Kick): colour, no dot
+        let f = conn(serde_json::json!({"state": "open", "live": false}));
+        assert!(is_connected(Some(&f)) && !is_live(Some(&f)));
+        // a platform that does not say: no dot
+        assert!(!is_live(Some(&conn(serde_json::json!({"state": "open"})))));
+        assert!(!is_live(None));
+    }
+
+    #[test]
+    fn hover_text() {
+        assert_eq!(conn_label(Some(&conn(serde_json::json!({"state": "open", "live": true, "detail": "Live"})))), "Connected · Live");
+        assert_eq!(conn_label(Some(&conn(serde_json::json!({"state": "open", "live": false})))), "Connected · Not live");
+        assert_eq!(conn_label(Some(&conn(serde_json::json!({"state": "open"})))), "Connected");
+        assert_eq!(
+            conn_label(Some(&conn(serde_json::json!({"state": "connecting", "live": true, "detail": "Reconnecting to YouTube... (live chat poll returned 503)"})))),
+            "Not connected: Reconnecting to YouTube... (live chat poll returned 503) · Live"
+        );
+        assert_eq!(conn_label(Some(&conn(serde_json::json!({"state": "offline", "live": false, "detail": "Not live"})))), "Not connected: Not live");
+        assert_eq!(conn_label(Some(&conn(serde_json::json!({"state": "error"})))), "Not connected: Error");
+        assert_eq!(conn_label(None), "Not connected: Connecting");
+    }
+}
