@@ -802,7 +802,7 @@ impl SendBox {
                 .collect()
         };
         // Only offer a jump for providers actually present: a tab that scrolls nowhere is worse than no tab.
-        let all_tabs = [(PickerProvider::Twitch, "Twitch"), (PickerProvider::SevenTv, "7TV"), (PickerProvider::Bttv, "BTTV"), (PickerProvider::Ffz, "FFZ"), (PickerProvider::Rumble, "Rumble"), (PickerProvider::Kick, "Kick")];
+        let all_tabs = [(PickerProvider::Twitch, "Twitch"), (PickerProvider::SevenTv, "7TV"), (PickerProvider::Bttv, "BTTV"), (PickerProvider::Ffz, "FFZ"), (PickerProvider::Rumble, "Rumble"), (PickerProvider::Kick, "Kick"), (PickerProvider::YouTube, "YouTube")];
 
         // Rows of the scrolling area, each with a fixed height, so only the visible ones are built (the images
         // of thousands of emotes are not even requested): label 19px, an emote row 34px (32 + the 2px gap), 8px under a section.

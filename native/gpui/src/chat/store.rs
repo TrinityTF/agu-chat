@@ -41,6 +41,8 @@ pub struct SourceState {
     pub rumble_badges: RumbleBadgeDefs,
     pub rumble_emotes: RumbleEmotes,
     pub kick_emotes: Value,
+    /// YouTube: the emojis a send here can use, `[{id, shortcuts, url, channel}]` (core youtube/mod.rs)
+    pub youtube_emotes: Value,
     pub known: HashMap<String, KnownChatter>,
 }
 
@@ -60,6 +62,7 @@ impl SourceState {
             rumble_badges: Default::default(),
             rumble_emotes: Default::default(),
             kick_emotes: Value::Null,
+            youtube_emotes: Value::Null,
             known: HashMap::new(),
         }
     }
@@ -564,6 +567,9 @@ impl ChatStore {
                 self.replace_backlog(sk, rows);
                 let st = self.source_mut(sk).unwrap();
                 st.status = f.get("status").filter(|s| !s.is_null()).cloned();
+                if let Some(e) = f.get("emotes").filter(|e| e.is_array()) {
+                    st.youtube_emotes = e.clone();
+                }
                 st.loaded = true;
             }
             "chat" => {
@@ -573,6 +579,7 @@ impl ChatStore {
                 self.trim();
             }
             "status" => self.source_mut(sk).unwrap().status = f.get("status").filter(|s| !s.is_null()).cloned(),
+            "emotes" => self.source_mut(sk).unwrap().youtube_emotes = f.get("emotes").cloned().unwrap_or(Value::Null),
             "unconfigured" => self.source_mut(sk).unwrap().loaded = true,
             _ => return false,
         }

@@ -1,8 +1,14 @@
 //! Port of src/main/youtube/index.js: the YouTube platform module (read-only). See docs/ARCHITECTURE.md.
 //!
 //! Emits the frames the agu.lol /ws/youtube relay sends, so the row code works unchanged:
-//!   {type:"chatlog", source, status, messages}, {type:"chat", messages:[...]}, {type:"status", status}
+//!   {type:"chatlog", source, status, messages, emotes}, {type:"chat", messages:[...]}, {type:"status", status},
+//!   {type:"emotes", emotes:[{id, shortcuts, url, channel}]}
 //! plus the uniform {type:"conn"} frame.
+//!
+//! Emotes (the send box's picker, and the emoji segments of a sent message): the chat's emoji list comes only with
+//! a logged-in `get_live_chat` (anonymous answers carry none, and the live_chat page refuses a non-browser client),
+//! so it is asked once per broadcast while logged in (`auth::fetch_chat_emojis`). YouTube's own emojis seen in the
+//! chat are added as they turn up, since every account may use them.
 //!
 //! One poll loop per source, paced by YouTube's own timeoutMs. A temporary failure (5xx, 429, a timeout, a dropped
 //! connection) shows as "connecting" and is retried after 2, 5, 10, then every 30 s (net::reconnect_delay_ms) until a
@@ -30,7 +36,7 @@ use crate::platforms::{Accounts, Ctx, Emit, PlatformModule, Source};
 use crate::protocol::{AccountState, Frame, Platform};
 use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, now_ms, truthy, Timer};
-use vendor::youtube::{fetch_metadata, parse_youtube_source, poll_chat, read_watch_page, source_string, to_youtube_chat_msg, youtube_source_url, ChatState, YtSource};
+use vendor::youtube::{fetch_metadata, parse_youtube_source, poll_chat, read_watch_page, source_string, to_youtube_chat_msg, youtube_emojis_in, youtube_source_url, ChatState, YtSource};
 
 const MAX_BACKLOG: usize = 300;
 // How often to re-check an offline channel for a new broadcast: a ~1 MB page fetch, so deliberately slow.
@@ -49,6 +55,10 @@ const NOT_LIVE_REASON: &str = "Not live";
 // Temporary poll failures in a row after which the chat's continuation is dropped and the stream looked up again:
 // YouTube can keep refusing a token it has quietly retired.
 const POLL_RETRIES_BEFORE_RESOLVE: u32 = 3;
+// Tries at the emoji list per broadcast when the failures are temporary; the picker is decoration.
+const EMOJI_LIST_TRIES: u32 = 3;
+// YouTube's own emoji set is a few hundred at most; this only bounds a misbehaving answer.
+const MAX_SEEN_EMOJIS: usize = 1000;
 
 /// normalized channel -> (video id, channel id) of the broadcast its source reads right now (what sending needs).
 static BROADCASTS: LazyLock<Mutex<HashMap<String, (String, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -143,7 +153,9 @@ async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
     }
     let key = parse_youtube_source(&req.source.channel).map(|s| source_string(&s)).unwrap_or_else(|| req.source.channel.clone());
     let Some((video_id, channel_id)) = BROADCASTS.lock().unwrap().get(&key).cloned() else { return Ok(route_err(409, NOT_LIVE_REASON)) };
-    match auth::send_chat(&video_id, &channel_id, &text).await {
+    // this chat's emoji shortcuts, so they go out as emojis; none known: plain text
+    let emojis = SOURCES.lock().unwrap().get(&key).and_then(|w| w.upgrade()).map(|s| s.emoji_shortcuts()).unwrap_or_default();
+    match auth::send_chat(&video_id, &channel_id, &text, &emojis).await {
         Ok(v) => {
             // the posted message is in the answer: show it now; the poll that brings it again is de-duplicated
             let src = SOURCES.lock().unwrap().get(&key).and_then(|w| w.upgrade());
@@ -152,6 +164,7 @@ async fn route_send(req: RouteReq) -> Result<RouteRes, RouteError> {
                 if !fresh.is_empty() {
                     src.emit(json!({"type": "chat", "messages": fresh}));
                 }
+                src.flush_emojis();
             }
             Ok(RouteRes { status: 200, body: json!({"ok": true}) })
         }
@@ -192,6 +205,26 @@ struct St {
     stopped: bool,
     last_conn_json: String,
     auth_listener: Option<u64>,
+    /// the emojis the logged-in account may use here, from the chat's emoji list (`auth::fetch_chat_emojis`)
+    emojis_listed: Vec<Value>,
+    /// YouTube's own emojis seen in this broadcast's chat (anyone may use them)
+    emojis_seen: Vec<Value>,
+    /// the emoji list changed since a frame last carried it
+    emojis_dirty: bool,
+    /// the watch page's chat continuation: the opening get_live_chat, the one the emoji list comes with
+    reload_cont: String,
+    /// the reload continuation the emoji list was last asked with ("" = ask again)
+    emojis_cont: String,
+    /// the broadcast whose emoji list arrived (not asked again on a re-resolve of the same stream)
+    emojis_video: String,
+}
+
+/// The emojis a send box can offer here: the account's list, then YouTube's own seen in chat that it lacks.
+fn emojis_of(st: &St) -> Vec<Value> {
+    let mut out = st.emojis_listed.clone();
+    let listed: HashSet<&str> = st.emojis_listed.iter().filter_map(|e| e["id"].as_str()).collect();
+    out.extend(st.emojis_seen.iter().filter(|e| !e["id"].as_str().map(|id| listed.contains(id)).unwrap_or(false)).cloned());
+    out
 }
 
 pub struct YoutubeSource {
@@ -238,7 +271,7 @@ fn conn_frame(st: &St) -> Value {
 }
 
 fn chatlog_of(src: &YtSource, st: &St) -> Value {
-    json!({"type": "chatlog", "source": {"kind": src.kind, "id": src.id}, "status": Value::Object(st.status.clone()), "messages": st.backlog})
+    json!({"type": "chatlog", "source": {"kind": src.kind, "id": src.id}, "status": Value::Object(st.status.clone()), "messages": st.backlog, "emotes": emojis_of(st)})
 }
 
 impl YoutubeSource {
@@ -277,6 +310,12 @@ impl YoutubeSource {
                 stopped: false,
                 last_conn_json: String::new(),
                 auth_listener: None,
+                emojis_listed: Vec::new(),
+                emojis_seen: Vec::new(),
+                emojis_dirty: false,
+                reload_cont: String::new(),
+                emojis_cont: String::new(),
+                emojis_video: String::new(),
             }),
         });
         SOURCES.lock().unwrap().insert(channel, Arc::downgrade(&me));
@@ -338,15 +377,114 @@ impl YoutubeSource {
     }
 
     fn chatlog_frame(&self) -> Value {
-        let st = self.st.lock().unwrap();
+        let mut st = self.st.lock().unwrap();
+        st.emojis_dirty = false; // the chatlog carries them
         chatlog_of(&self.src, &st)
+    }
+
+    /// shortcut -> emoji id of every emoji a send here can use
+    fn emoji_shortcuts(&self) -> HashMap<String, String> {
+        let st = self.st.lock().unwrap();
+        let mut m = HashMap::new();
+        for e in emojis_of(&st) {
+            let id = js_str_or_empty(e.get("id"));
+            for s in e["shortcuts"].as_array().into_iter().flatten().filter_map(|s| s.as_str()) {
+                m.entry(s.to_string()).or_insert_with(|| id.clone());
+            }
+        }
+        m
+    }
+
+    /// Send the emoji list when it changed since a frame last carried it.
+    fn flush_emojis(&self) {
+        let list = {
+            let mut st = self.st.lock().unwrap();
+            if !st.emojis_dirty {
+                return;
+            }
+            st.emojis_dirty = false;
+            emojis_of(&st)
+        };
+        self.emit(json!({"type": "emotes", "emotes": list}));
+    }
+
+    /// Ask for the chat's emoji list once per watch-page continuation, while logged in (anonymous answers have none).
+    fn maybe_load_emojis(self: &Arc<Self>) {
+        if !auth::is_logged_in() {
+            return;
+        }
+        let (cont, video) = {
+            let mut st = self.st.lock().unwrap();
+            let video = js_str_or_empty(st.status.get("videoId"));
+            if st.stopped || st.phase != "open" || video.is_empty() || st.reload_cont.is_empty() || st.reload_cont == st.emojis_cont || st.emojis_video == video {
+                return;
+            }
+            st.emojis_cont = st.reload_cont.clone();
+            (st.reload_cont.clone(), video)
+        };
+        let s = self.clone();
+        self.jobs.spawn(async move { s.load_emojis(cont, video).await });
+    }
+
+    async fn load_emojis(self: Arc<Self>, cont: String, video: String) {
+        let mut failures = 0;
+        let list = loop {
+            match auth::fetch_chat_emojis(&cont).await {
+                Ok(l) => break l,
+                Err(e) => {
+                    failures += 1;
+                    if self.stopped() {
+                        return;
+                    }
+                    if !crate::net::is_transient_failure(&e) || failures >= EMOJI_LIST_TRIES {
+                        // no list is a degradation, not a failure: shortcuts go out as text
+                        self.ctx.log(&format!("[youtube] {} emoji list unavailable: {e}", self.channel));
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(crate::net::reconnect_delay_ms(failures, rand::random::<f64>()))).await;
+                }
+            }
+        };
+        {
+            let mut st = self.st.lock().unwrap();
+            if st.stopped || js_str_or_empty(st.status.get("videoId")) != video {
+                return; // moved on to another broadcast
+            }
+            if !list.is_empty() {
+                st.emojis_video = video;
+            }
+            if st.emojis_listed == list {
+                return;
+            }
+            st.emojis_listed = list;
+            st.emojis_dirty = true;
+        }
+        self.flush_emojis();
+    }
+
+    /// The login changed: the emoji list belongs to the account, so ask again (or drop it when logged out).
+    fn on_auth_change(self: &Arc<Self>) {
+        let logged_in = auth::is_logged_in();
+        {
+            let mut st = self.st.lock().unwrap();
+            st.emojis_cont.clear();
+            st.emojis_video.clear();
+            if !logged_in && !st.emojis_listed.is_empty() {
+                st.emojis_listed.clear();
+                st.emojis_dirty = true;
+            }
+        }
+        self.flush_emojis();
+        self.maybe_load_emojis();
     }
 
     /// Normalize actions into rows, de-duplicated (bootstrap backlog and first poll overlap).
     fn ingest(&self, actions: &[Value]) -> Vec<Value> {
         let mut st = self.st.lock().unwrap();
         let mut fresh = Vec::new();
+        let mut emojis = Vec::new();
         for a in actions {
+            youtube_emojis_in(a, &mut emojis);
             // the mode lines arrive in order, so the last one is the mode now (published with the next conn frame)
             chat_rules::apply_mode_change(&mut st.chat_modes, a);
             let Some(msg) = to_youtube_chat_msg(a) else { continue };
@@ -355,6 +493,14 @@ impl YoutubeSource {
                 continue;
             }
             fresh.push(msg);
+        }
+        for e in emojis {
+            let id = js_str_or_empty(e.get("id"));
+            let known = st.emojis_seen.iter().chain(st.emojis_listed.iter()).any(|k| k["id"].as_str() == Some(id.as_str()));
+            if !known && st.emojis_seen.len() < MAX_SEEN_EMOJIS {
+                st.emojis_seen.push(e);
+                st.emojis_dirty = true;
+            }
         }
         if fresh.is_empty() {
             return fresh;
@@ -435,6 +581,7 @@ impl YoutubeSource {
         } else if !fresh.is_empty() {
             self.emit(json!({"type": "chat", "messages": fresh}));
         }
+        self.flush_emojis();
         self.set_status(vec![("error", Value::Null), ("notice", Value::Null)], Some("open"));
         self.refresh_metadata().await;
         {
@@ -511,6 +658,11 @@ impl YoutubeSource {
             st.chat_modes = Default::default();
             st.backlog.clear();
             st.seen.clear();
+            st.emojis_listed.clear();
+            st.emojis_seen.clear();
+            st.emojis_dirty = true;
+            st.emojis_cont.clear();
+            st.emojis_video.clear();
         }
         let title = or_cur(&res.title, &cur_title);
         if res.continuation.is_empty() {
@@ -526,6 +678,7 @@ impl YoutubeSource {
         {
             let mut st = self.st.lock().unwrap();
             st.chat = Some(ChatState { key: res.key.clone(), client_version: res.client_version.clone(), continuation: res.continuation.clone(), video_id: res.video_id.clone() });
+            st.reload_cont = res.continuation.clone();
             st.meta_at = 0;
         }
         auth::set_client_info(&res.client_version, &res.key);
@@ -547,9 +700,12 @@ impl YoutubeSource {
         let r = if have_chat { self.poll_step(false).await } else { self.resolve_step().await };
         let next = match r {
             Ok(n) => {
-                let mut st = self.st.lock().unwrap();
-                st.failures = 0;
-                st.retry_reason = None;
+                {
+                    let mut st = self.st.lock().unwrap();
+                    st.failures = 0;
+                    st.retry_reason = None;
+                }
+                self.maybe_load_emojis();
                 n
             }
             Err(e) => {
@@ -610,6 +766,7 @@ impl Source for YoutubeSource {
         let id = auth::EVENTS.on(Arc::new(move |_| {
             if let Some(s) = me.upgrade() {
                 s.publish_conn();
+                s.on_auth_change();
             }
         }));
         self.st.lock().unwrap().auth_listener = Some(id);
@@ -671,6 +828,12 @@ mod tests {
             stopped: false,
             last_conn_json: String::new(),
             auth_listener: None,
+            emojis_listed: Vec::new(),
+            emojis_seen: Vec::new(),
+            emojis_dirty: false,
+            reload_cont: String::new(),
+            emojis_cont: String::new(),
+            emojis_video: String::new(),
         }
     }
 
@@ -684,5 +847,16 @@ mod tests {
         assert_eq!(f["detail"], "Connecting to YouTube...");
         let f = conn_frame(&st("open", true, None));
         assert_eq!((f["state"].as_str(), f["detail"].as_str()), (Some("open"), Some("Live")));
+    }
+
+    #[test]
+    fn the_account_list_comes_first_and_seen_emojis_fill_in() {
+        let mut s = st("open", true, None);
+        s.emojis_listed = vec![json!({"id": "UCchan/a", "shortcuts": [":a:"], "url": "u", "channel": true}), json!({"id": "UCkszU2WH9gy1mb0dV-11UJg/yt", "shortcuts": [":yt:"], "url": "u", "channel": false})];
+        s.emojis_seen = vec![json!({"id": "UCkszU2WH9gy1mb0dV-11UJg/yt", "shortcuts": [":yt:"], "url": "u", "channel": false}), json!({"id": "UCkszU2WH9gy1mb0dV-11UJg/oops", "shortcuts": [":oops:"], "url": "u", "channel": false})];
+        let ids: Vec<String> = emojis_of(&s).iter().map(|e| e["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids, vec!["UCchan/a", "UCkszU2WH9gy1mb0dV-11UJg/yt", "UCkszU2WH9gy1mb0dV-11UJg/oops"]);
+        let log = chatlog_of(&YtSource { kind: "handle", id: "@x".into() }, &s);
+        assert_eq!(log["emotes"].as_array().map(|a| a.len()), Some(3));
     }
 }

@@ -610,9 +610,74 @@ pub fn to_youtube_chat_msg(action: &Value) -> Option<Value> {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Emojis (the send box's picker and the send's emoji segments)
+// ---------------------------------------------------------------------------
+
+/// YouTube's own custom emojis (`:yt:`, `:oops:`, `:hand-pink-waving:`, ...) have ids under this channel; anyone can
+/// use them. Every other custom emoji belongs to a channel (member emojis).
+pub const YOUTUBE_EMOJI_PREFIX: &str = "UCkszU2WH9gy1mb0dV-11UJg/";
+
+/// One emoji definition as YouTube ships it (`{emojiId, shortcuts, searchTerms, image, isCustomEmoji, isLocked}`)
+/// -> `{id, shortcuts, url, channel}`, or None for a plain Unicode emoji, one the account can't use (locked), or
+/// one without a shortcut or an image.
+pub fn normalize_emoji(e: &Value) -> Option<Value> {
+    let id = js_str_or_empty(Some(&e["emojiId"]));
+    if id.is_empty() || e["isCustomEmoji"] != Value::Bool(true) || e["isLocked"] == Value::Bool(true) {
+        return None;
+    }
+    let shortcuts: Vec<String> = e["shortcuts"].as_array().into_iter().flatten().filter_map(|s| s.as_str()).filter(|s| !s.is_empty() && !s.contains(char::is_whitespace)).map(String::from).collect();
+    let url = last_thumb(&e["image"]["thumbnails"]);
+    if shortcuts.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(json!({"id": id, "shortcuts": shortcuts, "url": url, "channel": !id.starts_with(YOUTUBE_EMOJI_PREFIX)}))
+}
+
+/// The emoji list of a live chat answer: `continuationContents.liveChatContinuation.emojis` (get_live_chat) or
+/// `contents.liveChatRenderer.emojis` (the live_chat page's ytInitialData), else the first `emojis` array anywhere.
+/// Normalized, de-duplicated, in YouTube's order. Empty when the answer has none (anonymous answers never do).
+pub fn emoji_list_from_json(j: &Value) -> Vec<Value> {
+    fn find_emojis(v: &Value) -> Option<&Vec<Value>> {
+        match v {
+            Value::Object(m) => m.get("emojis").and_then(|e| e.as_array()).or_else(|| m.values().find_map(find_emojis)),
+            Value::Array(a) => a.iter().find_map(find_emojis),
+            _ => None,
+        }
+    }
+    let list = j["continuationContents"]["liveChatContinuation"]["emojis"].as_array().or_else(|| j["contents"]["liveChatRenderer"]["emojis"].as_array()).or_else(|| find_emojis(j));
+    let mut seen = std::collections::HashSet::new();
+    list.into_iter().flatten().filter_map(normalize_emoji).filter(|e| seen.insert(js_string(&e["id"]))).collect()
+}
+
+/// YouTube's own emojis used in a chat action (its message runs carry each emoji's full definition). These are
+/// usable by every account, so they can be offered even when no emoji list came; channel emojis are not taken from
+/// chat, since a message doesn't say who may use them.
+pub fn youtube_emojis_in(action: &Value, out: &mut Vec<Value>) {
+    match action {
+        Value::Object(m) => {
+            if m.contains_key("emojiId") {
+                if let Some(e) = normalize_emoji(action).filter(|e| e["channel"] == Value::Bool(false)) {
+                    out.push(e);
+                }
+                return;
+            }
+            for v in m.values() {
+                youtube_emojis_in(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                youtube_emojis_in(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    const OFFLINE_BROWSE: &str = r#"<html><script>ytcfg.set({"INNERTUBE_API_KEY":"KEY1","INNERTUBE_CLIENT_VERSION":"2.2026"});</script><script nonce="x">var ytInitialData = {"metadata":{"channelMetadataRenderer":{"title":"Esfand","externalId":"UC123"}}};</script></html>"#;
+    const OFFLINE_BROWSE:&str = r#"<html><script>ytcfg.set({"INNERTUBE_API_KEY":"KEY1","INNERTUBE_CLIENT_VERSION":"2.2026"});</script><script nonce="x">var ytInitialData = {"metadata":{"channelMetadataRenderer":{"title":"Esfand","externalId":"UC123"}}};</script></html>"#;
 
     #[test]
     fn offline_channel_reads_as_offline_not_an_error() {
@@ -764,5 +829,48 @@ mod tests {
         assert!(to_youtube_chat_msg(&json!({"addChatItemAction": {"item": {"liveChatViewerEngagementMessageRenderer": {}}}})).is_none());
         assert_eq!(strip_handle("@"), "@");
         assert_eq!(strip_handle("@a"), "a");
+    }
+
+    /// Trimmed from real youtube.com answers (2026-11-20): YouTube's own emoji and a channel emoji exactly as a
+    /// chat run carries them; the list sits under `liveChatContinuation.emojis` / `liveChatRenderer.emojis`.
+    fn yt_emoji() -> Value {
+        json!({"emojiId": "UCkszU2WH9gy1mb0dV-11UJg/dG5IY-mhEof9jgSykoCgBw", "shortcuts": [":face-blue-star-eyes:"], "searchTerms": ["face-blue-star-eyes"],
+            "image": {"thumbnails": [{"url": "https://yt3.ggpht.com/m_AN=w24-h24-c-k-nd", "width": 24, "height": 24}, {"url": "https://yt3.ggpht.com/m_AN=w48-h48-c-k-nd", "width": 48, "height": 48}],
+                "accessibility": {"accessibilityData": {"label": "face-blue-star-eyes"}}}, "isCustomEmoji": true})
+    }
+    fn channel_emoji() -> Value {
+        json!({"emojiId": "UCgmPnx-EEeOrZSg5Tiw7ZRQ/Lnt_Yc7VE-SM8gTe6oGgBQ", "shortcuts": [":_derp:", ":derp:"], "searchTerms": ["_derp", "derp"],
+            "image": {"thumbnails": [{"url": "https://yt3.ggpht.com/ye__=w24-h24-c-k-nd", "width": 24, "height": 24}, {"url": "https://yt3.ggpht.com/ye__=w48-h48-c-k-nd", "width": 48, "height": 48}],
+                "accessibility": {"accessibilityData": {"label": "derp"}}}, "isCustomEmoji": true})
+    }
+
+    #[test]
+    fn emoji_lists_are_read_and_locked_or_unicode_ones_dropped() {
+        let mut locked = channel_emoji();
+        locked["emojiId"] = json!("UCgmPnx-EEeOrZSg5Tiw7ZRQ/locked");
+        locked["shortcuts"] = json!([":_members:"]);
+        locked["isLocked"] = json!(true);
+        let unicode = json!({"emojiId": "\u{1f923}", "shortcuts": [":rolling_on_the_floor_laughing:"], "image": {"thumbnails": [{"url": "https://fonts.gstatic.com/s/e/notoemoji/15.1/1f923/72.png"}]}});
+        let list = json!([channel_emoji(), locked, unicode, yt_emoji(), channel_emoji()]);
+        let want = vec![
+            json!({"id": "UCgmPnx-EEeOrZSg5Tiw7ZRQ/Lnt_Yc7VE-SM8gTe6oGgBQ", "shortcuts": [":_derp:", ":derp:"], "url": "https://yt3.ggpht.com/ye__=w48-h48-c-k-nd", "channel": true}),
+            json!({"id": "UCkszU2WH9gy1mb0dV-11UJg/dG5IY-mhEof9jgSykoCgBw", "shortcuts": [":face-blue-star-eyes:"], "url": "https://yt3.ggpht.com/m_AN=w48-h48-c-k-nd", "channel": false}),
+        ];
+        assert_eq!(emoji_list_from_json(&json!({"continuationContents": {"liveChatContinuation": {"emojis": list.clone(), "actions": []}}})), want);
+        assert_eq!(emoji_list_from_json(&json!({"contents": {"liveChatRenderer": {"emojis": list.clone()}}})), want);
+        assert_eq!(emoji_list_from_json(&json!({"elsewhere": [{"x": {"emojis": list}}]})), want);
+        assert!(emoji_list_from_json(&json!({"continuationContents": {"liveChatContinuation": {"actions": []}}})).is_empty());
+        let mut no_image = yt_emoji();
+        no_image["image"] = json!({});
+        assert_eq!(normalize_emoji(&no_image), None);
+    }
+
+    #[test]
+    fn youtube_own_emojis_are_picked_out_of_chat() {
+        let action = json!({"addChatItemAction": {"item": {"liveChatTextMessageRenderer": {"message": {"runs": [{"text": "hi "}, {"emoji": yt_emoji()}, {"emoji": channel_emoji()}]}}}}});
+        let mut out = Vec::new();
+        youtube_emojis_in(&action, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["shortcuts"], json!([":face-blue-star-eyes:"]));
     }
 }

@@ -1,6 +1,6 @@
 //! Port of src/renderer/chat/input/inventory.ts and the picker types of EmotePicker.tsx (PickerItem /
 //! PickerSection): the `emoteInventory` builders (categorized picker sections + the flattened autocomplete
-//! inventory) for Twitch, Rumble and Kick, as pure functions over the pane's already-filtered provider sets
+//! inventory) for Twitch, Rumble, Kick and YouTube, as pure functions over the pane's already-filtered provider sets
 //! (settings.sevenTv / bttv / ffz applied by the caller).
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ pub enum PickerProvider {
     Twitch,
     Rumble,
     Kick,
+    YouTube,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -204,6 +205,38 @@ pub fn build_kick_inventory(emotes: &Value) -> Inventory {
     }
 }
 
+/// `emotes` is the YouTube emoji list: `[{id, shortcuts, url, channel}]`, the account's usable ones only. The
+/// channel's own (member) emojis come first, then YouTube's. An entry reads as its first shortcut without the
+/// colons (what `:` autocomplete matches) and inserts the shortcut itself, which the send turns into the emoji.
+pub fn build_youtube_inventory(emotes: &Value) -> Inventory {
+    let Some(list) = emotes.as_array().filter(|l| !l.is_empty()) else { return Inventory::default() };
+    let item = |e: &Value| -> Option<PickerItem> {
+        let shortcut = e.get("shortcuts")?.as_array()?.iter().find_map(|s| s.as_str().filter(|s| !s.is_empty()))?;
+        let name = shortcut.strip_prefix(':').and_then(|s| s.strip_suffix(':')).filter(|s| !s.is_empty()).unwrap_or(shortcut);
+        let img = e.get("url").and_then(|u| u.as_str()).unwrap_or("");
+        (!img.is_empty()).then(|| PickerItem {
+            key: format!("yt:{}", e.get("id").and_then(|i| i.as_str()).unwrap_or(shortcut)),
+            name: name.to_string(),
+            img: img.to_string(),
+            tooltip: shortcut.to_string(),
+            insert: Some(shortcut.to_string()),
+        })
+    };
+    let is_channel = |e: &&Value| e.get("channel").and_then(|c| c.as_bool()).unwrap_or(false);
+    let channel: Vec<PickerItem> = list.iter().filter(is_channel).filter_map(item).collect();
+    let youtube: Vec<PickerItem> = list.iter().filter(|e| !is_channel(e)).filter_map(item).collect();
+    let mut sections = Vec::new();
+    let mut inventory = Vec::new();
+    for (id, label, items) in [("youtube-channel", "YouTube Channel", channel), ("youtube", "YouTube", youtube)] {
+        if items.is_empty() {
+            continue;
+        }
+        inventory.extend(items.iter().map(|it| InvEntry { name: it.name.clone(), img: it.img.clone(), label: label.into(), channel_scope: id == "youtube-channel", insert: it.insert.clone() }));
+        sections.push(PickerSection { id: id.into(), label: label.into(), provider: PickerProvider::YouTube, items });
+    }
+    Inventory { sections, inventory }
+}
+
 pub fn merge_inventories(list: &[Inventory]) -> Inventory {
     if list.len() == 1 {
         return list[0].clone();
@@ -305,6 +338,28 @@ mod tests {
         assert_eq!(kick.sections[0].items[0].img, "https://files.kick.com/emotes/123/fullsize");
         assert_eq!(build_kick_inventory(&Value::Null), Inventory::default());
         assert_eq!(build_rumble_inventory(&Default::default()), Inventory::default());
+    }
+
+    #[test]
+    fn youtube_channel_emojis_come_first_and_insert_their_shortcut() {
+        let list = json!([
+            {"id": "UCkszU2WH9gy1mb0dV-11UJg/hand", "shortcuts": [":hand-pink-waving:"], "url": "https://yt3/hand=w48", "channel": false},
+            {"id": "UCchan/derp", "shortcuts": [":_derp:", ":derp:"], "url": "https://yt3/derp=w48", "channel": true},
+            {"id": "UCchan/broken", "shortcuts": [], "url": "https://yt3/x", "channel": true},
+            {"id": "UCchan/noimg", "shortcuts": [":noimg:"], "url": "", "channel": true}
+        ]);
+        let inv = build_youtube_inventory(&list);
+        let ids: Vec<&str> = inv.sections.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["youtube-channel", "youtube"]);
+        assert_eq!((inv.sections[0].label.as_str(), inv.sections[1].label.as_str()), ("YouTube Channel", "YouTube"));
+        assert!(inv.sections.iter().all(|s| s.provider == PickerProvider::YouTube));
+        let derp = &inv.sections[0].items[0];
+        assert_eq!((derp.key.as_str(), derp.name.as_str(), derp.tooltip.as_str(), derp.insert.as_deref()), ("yt:UCchan/derp", "_derp", ":_derp:", Some(":_derp:")));
+        assert_eq!(inv.sections[0].items.len(), 1);
+        let names: Vec<(&str, Option<&str>, bool)> = inv.inventory.iter().map(|e| (e.name.as_str(), e.insert.as_deref(), e.channel_scope)).collect();
+        assert_eq!(names, vec![("_derp", Some(":_derp:"), true), ("hand-pink-waving", Some(":hand-pink-waving:"), false)]);
+        assert_eq!(build_youtube_inventory(&Value::Null), Inventory::default());
+        assert_eq!(build_youtube_inventory(&json!([])), Inventory::default());
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //!
 //! EXPIRY. YouTube answers 401/403 to a session it no longer accepts. `mark_expired` forgets the session and the
 //! account state says so.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ const SECRET_KEY: &str = "youtube";
 const ORIGIN: &str = "https://www.youtube.com";
 const ACCOUNT_MENU_URL: &str = "https://www.youtube.com/youtubei/v1/account/account_menu?prettyPrint=false";
 const SEND_URL: &str = "https://www.youtube.com/youtubei/v1/live_chat/send_message?prettyPrint=false";
+const LIVE_CHAT_URL: &str = "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?prettyPrint=false";
 /// Used until a watch page has told us the client version the site runs.
 const FALLBACK_CLIENT_VERSION: &str = "2.20260101.00.00";
 /// The sign-in window has this long.
@@ -272,9 +273,39 @@ pub fn send_message_params(video_id: &str, channel_id: &str, number0: u8) -> Str
     b64.encode(encode_uri_component(&b64.encode(&raw)).as_bytes())
 }
 
+/// The `richMessage.textSegments` of a message, the way youtube.com's own client sends emojis: every
+/// whitespace-separated word that is exactly a shortcut of this chat's emojis (`:hand-pink-waving:`) becomes its own
+/// `{"emojiId"}` segment; the rest stays text, whitespace included, with neighbouring text merged into one segment.
+/// `emojis` maps each shortcut to its emoji id; with none known the message is one text segment, as before.
+pub fn rich_segments(text: &str, emojis: &HashMap<String, String>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        // the next run of whitespace, or of anything else
+        let ws = rest.starts_with(char::is_whitespace);
+        let end = rest.find(|c: char| c.is_whitespace() != ws).unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(end);
+        rest = tail;
+        match emojis.get(run).filter(|_| !ws) {
+            Some(id) => {
+                if !buf.is_empty() {
+                    out.push(json!({"text": std::mem::take(&mut buf)}));
+                }
+                out.push(json!({"emojiId": id}));
+            }
+            None => buf.push_str(run),
+        }
+    }
+    if !buf.is_empty() || out.is_empty() {
+        out.push(json!({"text": buf}));
+    }
+    out
+}
+
 /// The body of `live_chat/send_message`.
-pub fn build_send_body(version: &str, params: &str, text: &str, client_message_id: &str) -> Value {
-    with_context(version, json!({"params": params, "richMessage": {"textSegments": [{"text": text}]}, "clientMessageId": client_message_id}))
+pub fn build_send_body(version: &str, params: &str, segments: Vec<Value>, client_message_id: &str) -> Value {
+    with_context(version, json!({"params": params, "richMessage": {"textSegments": segments}, "clientMessageId": client_message_id}))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -597,6 +628,21 @@ pub(crate) async fn call(url: &str, body: &Value, expire_on_403: bool) -> Result
     Ok((status, v))
 }
 
+/// The emojis this account may use in a live chat: the chat's opening `get_live_chat` (the watch page's reload
+/// `continuation`), asked as the logged-in user, which is when YouTube includes the emoji list (an anonymous answer
+/// has none; member emojis the account lacks come marked locked and are dropped). Decoration only: a refusal here
+/// never signs the account out. Errors are "<what> returned <status>" or a network failure, so
+/// `net::is_transient_failure` can tell a retry from an answer.
+pub async fn fetch_chat_emojis(continuation: &str) -> Result<Vec<Value>, String> {
+    let Some(rec) = st().record.clone() else { return Err(logged_out_reason().into()) };
+    let body = with_context(&client_version(), json!({"continuation": continuation}));
+    let (status, v) = post_with(&rec.cookies, LIVE_CHAT_URL, &body, 15_000).await.map_err(|_| "fetch failed".to_string())?;
+    if !(200..300).contains(&status) {
+        return Err(format!("live chat emojis returned {status}"));
+    }
+    Ok(crate::youtube::vendor::youtube::emoji_list_from_json(&v))
+}
+
 async fn fetch_identity(cookies: &BTreeMap<String, String>) -> Result<Identity, ApiError> {
     let body = with_context(&client_version(), json!({}));
     let (status, v) = post_with(cookies, ACCOUNT_MENU_URL, &body, 15_000).await?;
@@ -606,15 +652,21 @@ async fn fetch_identity(cookies: &BTreeMap<String, String>) -> Result<Identity, 
 /// Post one chat message to a live broadcast as the logged-in user. YouTube's own error text comes back verbatim.
 /// `video_id` and `channel_id` (UC...) are the broadcast's.
 /// Ok carries YouTube's answer, which holds the posted message (`actions[].addChatItemAction`).
-pub async fn send_chat(video_id: &str, channel_id: &str, text: &str) -> Result<Value, SendError> {
+/// `emojis` (shortcut -> emoji id, this chat's) turns emoji shortcuts into emoji segments (`rich_segments`).
+pub async fn send_chat(video_id: &str, channel_id: &str, text: &str, emojis: &HashMap<String, String>) -> Result<Value, SendError> {
     if !is_logged_in() {
         return Err(SendError { status: 401, message: logged_out_reason().into() });
     }
     let version = client_version();
     let mut last = SendError { status: 502, message: "YouTube did not answer".into() };
-    // the number after the ids is not documented; 1 first, 2 when YouTube calls the request malformed
-    for number0 in [1u8, 2] {
-        let body = build_send_body(&version, &send_message_params(video_id, channel_id, number0), text, &uuid_v4());
+    let rich = rich_segments(text, emojis);
+    let has_emoji = rich.iter().any(|s| s.get("emojiId").is_some());
+    // the number after the ids is not documented; 1 first, 2 when YouTube calls the request malformed. A message with
+    // emoji segments YouTube calls malformed both ways goes once more as plain text, so an emoji never costs the message.
+    let tries: Vec<(u8, bool)> = if has_emoji { vec![(1, true), (2, true), (1, false), (2, false)] } else { vec![(1, false), (2, false)] };
+    for (number0, use_rich) in tries {
+        let segments = if use_rich { rich.clone() } else { vec![json!({"text": text})] };
+        let body = build_send_body(&version, &send_message_params(video_id, channel_id, number0), segments, &uuid_v4());
         let (status, v) = call(SEND_URL, &body, true).await.map_err(|e| SendError { status: if e.status == 0 { 502 } else { e.status }, message: e.message })?;
         if status == 401 || status == 403 {
             return Err(SendError { status: 401, message: EXPIRED_MESSAGE.into() });
@@ -691,12 +743,27 @@ mod tests {
 
     #[test]
     fn send_body_and_answers() {
-        let b = build_send_body("2.1", "P", "hi", "id1");
+        let b = build_send_body("2.1", "P", rich_segments("hi", &HashMap::new()), "id1");
         assert_eq!(b, json!({"context": {"client": {"clientName": "WEB", "clientVersion": "2.1"}}, "params": "P", "richMessage": {"textSegments": [{"text": "hi"}]}, "clientMessageId": "id1"}));
         assert_eq!(parse_send_response(200, &json!({"actions": []})), Ok(()));
         assert_eq!(parse_send_response(400, &json!({"error": {"message": "Request contains an invalid argument."}})), Err(SendError { status: 400, message: "Request contains an invalid argument.".into() }));
         assert_eq!(parse_send_response(200, &json!({"error": {"message": "nope"}})), Err(SendError { status: 422, message: "nope".into() }));
         assert_eq!(parse_send_response(500, &Value::Null), Err(SendError { status: 500, message: "YouTube rejected the message (500)".into() }));
+    }
+
+    #[test]
+    fn emoji_shortcuts_become_emoji_segments() {
+        let emojis: HashMap<String, String> = [(":yt:", "UCkszU2WH9gy1mb0dV-11UJg/yt"), (":_derp:", "UCchan/derp"), (":derp:", "UCchan/derp")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let seg = |t: &str| rich_segments(t, &emojis);
+        assert_eq!(seg("hi :yt: there"), vec![json!({"text": "hi "}), json!({"emojiId": "UCkszU2WH9gy1mb0dV-11UJg/yt"}), json!({"text": " there"})]);
+        assert_eq!(seg(":yt: :derp:"), vec![json!({"emojiId": "UCkszU2WH9gy1mb0dV-11UJg/yt"}), json!({"text": " "}), json!({"emojiId": "UCchan/derp"})]);
+        assert_eq!(seg(":_derp:"), vec![json!({"emojiId": "UCchan/derp"})]);
+        // only a whole word counts; anything glued on stays text, and so does an unknown shortcut
+        assert_eq!(seg("a:yt: :yt:! :nope: x"), vec![json!({"text": "a:yt: :yt:! :nope: x"})]);
+        assert_eq!(seg("x  :yt:\tok"), vec![json!({"text": "x  "}), json!({"emojiId": "UCkszU2WH9gy1mb0dV-11UJg/yt"}), json!({"text": "\tok"})]);
+        // no emoji list: the message is one text segment, as it always was
+        assert_eq!(rich_segments("hi :yt:", &HashMap::new()), vec![json!({"text": "hi :yt:"})]);
+        assert_eq!(rich_segments("", &emojis), vec![json!({"text": ""})]);
     }
 
     #[test]

@@ -1121,6 +1121,7 @@ impl ChatPane {
                             }
                             Platform::Rumble => build_rumble_inventory(&st.rumble_emotes),
                             Platform::Kick => build_kick_inventory(&st.kick_emotes),
+                            Platform::Youtube => build_youtube_inventory(&st.youtube_emotes),
                             _ => Inventory::default(),
                         });
                         cache.insert(st.sk.clone(), (self.gen, i.clone()));
@@ -1369,6 +1370,11 @@ impl ChatPane {
             match m {
                 Inbox::Reset(sk) => self.store.reset_source(&sk),
                 Inbox::Frame(sk, f) => {
+                    // an emote list that arrives after the chat (Rumble, Kick and YouTube send them late) rebuilds
+                    // that source's send box inventory
+                    if f.get("type").and_then(|t| t.as_str()).is_some_and(|t| t == "emotes" || t == "chatlog") {
+                        self.inv_cache.borrow_mut().remove(&sk);
+                    }
                     self.store.apply(&sk, &f);
                 }
                 Inbox::SubError(sk, msg) => {
