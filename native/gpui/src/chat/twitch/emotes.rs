@@ -96,6 +96,35 @@ pub struct EmoteSets {
     pub all: EmoteMap,
 }
 
+/// Where a message's name-matched emotes come from: the sender's 7TV personal set first, then the channel / global
+/// sets. That is the 7TV extension's order (its tokenizer tries `localEmoteMap` = personal + the message's native
+/// Twitch emotes before the channel map); the native Twitch emotes are positional here and carved out before any
+/// word is looked up, so they still win over both.
+#[derive(Clone, Copy, Default)]
+pub struct EmoteLookup<'a> {
+    pub sets: Option<&'a EmoteSets>,
+    pub personal: Option<&'a EmoteMap>,
+}
+
+impl<'a> EmoteLookup<'a> {
+    pub fn new(sets: Option<&'a EmoteSets>, personal: Option<&'a EmoteMap>) -> Self {
+        EmoteLookup { sets, personal: personal.filter(|p| !p.is_empty()) }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&'a Arc<ProviderEmote>> {
+        self.personal.and_then(|p| p.get(name)).or_else(|| self.sets.and_then(|s| s.all.get(name)))
+    }
+
+    /// The word is drawn from the sender's personal set (the popup says so).
+    pub fn is_personal(&self, name: &str) -> bool {
+        self.personal.is_some_and(|p| p.contains_key(name))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.personal.is_none_or(|p| p.is_empty()) && self.sets.is_none_or(|s| s.all.is_empty())
+    }
+}
+
 // ---- JSON file cache --------------------------------------------------------------------------
 
 pub const EMOTE_CHANNEL_TTL_MS: i64 = 3_600_000;
@@ -365,6 +394,61 @@ fn seven_tv_map(emotes: Option<&Value>) -> EmoteMap {
     m
 }
 
+/// 7TV's role id of a paying subscriber: personal emotes are a subscriber perk, and a lapsed one keeps the set.
+pub const SEVEN_TV_SUBSCRIBER_ROLE: &str = "01F37R3RFR0000K96678WEQT01";
+
+/// The id of the personal emote set in a 7TV user object (`user` of `/v3/users/<platform>/<id>`, or the whole
+/// answer of `/v3/users/<7tv id>`): the set flagged 4 (personal), or one named "personal" (older accounts).
+pub fn personal_set_id(user: &Value) -> Option<String> {
+    let sets = user.get("emote_sets")?.as_array()?;
+    let flagged = |st: &&Value| st.get("flags").and_then(|f| f.as_i64()).unwrap_or(0) & 4 == 4;
+    let named = |st: &&Value| s(st, "name").to_lowercase().contains("personal");
+    sets.iter().find(flagged).or_else(|| sets.iter().find(named)).map(|st| s(st, "id")).filter(|id| !id.is_empty())
+}
+
+/// Whether 7TV draws this user's personal set for others: they hold the Subscriber role. An answer without a
+/// `roles` list says nothing either way and counts as yes.
+pub fn seven_tv_subscriber(user: &Value) -> bool {
+    match user.get("roles").and_then(|r| r.as_array()) {
+        Some(roles) => roles.iter().any(|r| r.as_str() == Some(SEVEN_TV_SUBSCRIBER_ROLE)),
+        None => true,
+    }
+}
+
+/// An emote of a set answer cut to what `seven_tv_emote` reads (the full one carries every file of every size).
+fn trim_seven_tv_emote(e: &Value) -> Value {
+    json!({
+        "id": e.get("id"),
+        "name": e.get("name"),
+        "flags": e.get("flags"),
+        "data": {"flags": e.pointer("/data/flags"), "animated": e.pointer("/data/animated")},
+    })
+}
+
+/// A personal set's emotes, cached an hour (`emotes:7tv:personal-emotes:<set>`, trimmed). `None`: the lookup
+/// failed and is worth retrying; a set 7TV doesn't know is an empty map.
+pub async fn fetch_seven_tv_personal_set(client: &reqwest::Client, set_id: &str) -> Option<EmoteMap> {
+    cache_ready().await;
+    let key = format!("emotes:7tv:personal-emotes:{set_id}");
+    let list = match read_cache(&key, EMOTE_CHANNEL_TTL_MS) {
+        Some(v) => v,
+        None => {
+            let r = client.get(format!("https://7tv.io/v3/emote-sets/{set_id}")).send().await.ok()?;
+            let l = if r.status() == reqwest::StatusCode::NOT_FOUND {
+                json!([])
+            } else if r.status().is_success() {
+                let d: Value = r.json().await.ok()?;
+                Value::Array(d.get("emotes").and_then(|a| a.as_array()).into_iter().flatten().map(trim_seven_tv_emote).collect())
+            } else {
+                return None;
+            };
+            write_cache(&key, &l);
+            l
+        }
+    };
+    Some(seven_tv_map(Some(&list)))
+}
+
 /// The emotes of one 7TV set by id, never cached (a set the channel just switched to).
 pub async fn fetch_seven_tv_set(client: &reqwest::Client, set_id: &str) -> Option<EmoteMap> {
     let r = client.get(format!("https://7tv.io/v3/emote-sets/{set_id}")).send().await.ok()?;
@@ -605,14 +689,7 @@ pub async fn fetch_seven_tv_personal(client: &reqwest::Client, twitch_user_id: &
                     return None;
                 }
                 let d: Value = r.json().await.ok()?;
-                let id = d
-                    .get("emote_sets")
-                    .and_then(|a| a.as_array())
-                    .and_then(|sets| {
-                        sets.iter().find(|st| st.get("flags").and_then(|f| f.as_i64()).unwrap_or(0) & 4 == 4 || s(st, "name").to_lowercase().contains("personal"))
-                    })
-                    .map(|st| s(st, "id"))
-                    .unwrap_or_default();
+                let id = personal_set_id(&d).unwrap_or_default();
                 write_cache(&set_key, &json!(id));
                 id
             }
@@ -620,21 +697,7 @@ pub async fn fetch_seven_tv_personal(client: &reqwest::Client, twitch_user_id: &
         if set_id.is_empty() {
             return None;
         }
-        let emotes_key = format!("emotes:7tv:personal-emotes:{set_id}");
-        let list = match read_cache(&emotes_key, EMOTE_CHANNEL_TTL_MS) {
-            Some(v) => v,
-            None => {
-                let r = client.get(format!("https://7tv.io/v3/emote-sets/{set_id}")).send().await.ok()?;
-                if !r.status().is_success() {
-                    return None;
-                }
-                let d: Value = r.json().await.ok()?;
-                let l = d.get("emotes").cloned().unwrap_or(json!([]));
-                write_cache(&emotes_key, &l);
-                l
-            }
-        };
-        Some(seven_tv_map(Some(&list)).into_values().collect())
+        Some(fetch_seven_tv_personal_set(client, &set_id).await?.into_values().collect())
     }
     go(client, twitch_user_id).await.unwrap_or_default()
 }
@@ -686,6 +749,40 @@ pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personal_set_id_is_the_flagged_set() {
+        // the `user` of `/v3/users/twitch/<id>` (and the whole answer of `/v3/users/<7tv id>`), trimmed
+        let user = json!({
+            "id": "01FE9DRF000009TR6M9N941CYW",
+            "emote_sets": [
+                {"id": "01FE9DRF000009TR6M9N941CYW", "name": "xQc's Emotes", "flags": 0, "tags": [], "capacity": 1000},
+                {"id": "01GN7SRYE8000EK2J7DFXT0WE5", "name": "Personal Emotes", "flags": 4, "tags": [], "capacity": 5}
+            ],
+            "roles": ["01F37R3RFR0000K96678WEQT01"]
+        });
+        assert_eq!(personal_set_id(&user).as_deref(), Some("01GN7SRYE8000EK2J7DFXT0WE5"));
+        assert!(seven_tv_subscriber(&user));
+        // the flag wins over a name; an old unflagged "personal" set still counts
+        let named = json!({"emote_sets": [{"id": "a", "name": "my personal stuff", "flags": 0}, {"id": "b", "name": "x", "flags": 4}]});
+        assert_eq!(personal_set_id(&named).as_deref(), Some("b"));
+        let old = json!({"emote_sets": [{"id": "a", "name": "Personal", "flags": 0}]});
+        assert_eq!(personal_set_id(&old).as_deref(), Some("a"));
+        assert_eq!(personal_set_id(&json!({"emote_sets": [{"id": "a", "name": "Channel", "flags": 0}]})), None);
+        assert_eq!(personal_set_id(&json!({})), None);
+        // roles: listed without Subscriber = not drawn; not listed at all = no word on it
+        assert!(!seven_tv_subscriber(&json!({"roles": ["01G68MMQFR0007J6GNM9E2M0TM"]})));
+        assert!(seven_tv_subscriber(&json!({})));
+    }
+
+    #[test]
+    fn trimmed_personal_emotes_parse_like_full_ones() {
+        let full = json!({"id": "e1", "name": "EsfandWiggle", "flags": 0, "timestamp": 1, "actor_id": "x",
+            "data": {"id": "e1", "name": "EsfandWiggle", "flags": 256, "animated": true, "host": {"url": "//cdn.7tv.app/emote/e1", "files": [{"name": "1x.webp"}]}}});
+        let (a, b) = (seven_tv_emote(&full), seven_tv_emote(&trim_seven_tv_emote(&full)));
+        assert_eq!(a, b);
+        assert!(b.zero_width && b.animated && b.name == "EsfandWiggle");
+    }
 
     #[test]
     fn kick_channels_look_up_their_kick_linked_7tv_set() {

@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use super::emoji::{split_emoji, Seg};
-use super::emotes::{EmoteProvider, EmoteSets};
+use super::emotes::{EmoteLookup, EmoteProvider, EmoteSets};
 use crate::chat::chat_text::{as_link, mention_word};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,6 +165,12 @@ pub fn split_keep_ws(text: &str) -> Vec<&str> {
 }
 
 pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, known: Option<&HashMap<String, KnownChatter>>, gifs_tag: &str) -> Vec<MsgPart> {
+    build_parts_in(text, emotes_tag, EmoteLookup::new(emotes, None), known, gifs_tag)
+}
+
+/// `build_parts` with the sender's 7TV personal set in `emotes` (it wins over the channel's sets, not over the
+/// positional Twitch emotes).
+pub fn build_parts_in(text: &str, emotes_tag: &str, emotes: EmoteLookup, known: Option<&HashMap<String, KnownChatter>>, gifs_tag: &str) -> Vec<MsgPart> {
     let chars: Vec<char> = text.chars().collect();
     enum R {
         Emote(String),
@@ -221,7 +227,7 @@ pub fn build_parts(text: &str, emotes_tag: &str, emotes: Option<&EmoteSets>, kno
                         }
                         continue;
                     }
-                    if let Some(e) = emotes.and_then(|s| s.all.get(w)) {
+                    if let Some(e) = emotes.get(w) {
                         mid.push(Mid::Emote { source: EmoteSource::Provider(e.provider), id: e.id.clone(), name: e.name.clone(), zero_width: e.zero_width });
                         continue;
                     }
@@ -323,6 +329,11 @@ pub fn split_kick(text: &str) -> Vec<(bool, String, String)> {
 /// Kick's own emotes come from markup and 7TV's from plain words, so a Kick emote always wins over a 7TV emote that
 /// shares its name.
 pub fn build_kick_parts(text: &str, emotes: Option<&EmoteSets>) -> Vec<MsgPart> {
+    build_kick_parts_in(text, EmoteLookup::new(emotes, None))
+}
+
+/// `build_kick_parts` with the sender's 7TV personal set in `emotes`, ahead of the channel's.
+pub fn build_kick_parts_in(text: &str, emotes: EmoteLookup) -> Vec<MsgPart> {
     // the markup splitter leaves a broken "[emote:" as its own text piece: join neighbouring text back together
     let mut segs: Vec<(bool, String, String)> = Vec::new();
     for seg in split_kick(text) {
@@ -346,12 +357,12 @@ pub fn build_kick_parts(text: &str, emotes: Option<&EmoteSets>) -> Vec<MsgPart> 
             out.push(MsgPart::Emote { source: EmoteSource::Kick, id: a, name, overlays: Vec::new() });
             continue;
         }
-        let Some(sets) = emotes.filter(|e| !e.all.is_empty()) else {
+        if emotes.is_empty() {
             push_text(&mut out, &a);
             continue;
-        };
+        }
         for w in split_keep_ws(&a) {
-            let Some(e) = sets.all.get(w) else {
+            let Some(e) = emotes.get(w) else {
                 push_text(&mut out, w);
                 continue;
             };
@@ -495,6 +506,41 @@ mod tests {
         // after plain text it stays an emote of its own
         let p = build_parts("hi RedCircle", "", Some(&sets), None, "");
         assert!(matches!(&p[..], [MsgPart::Text(_), MsgPart::Text(_), MsgPart::Emote { name, overlays, .. }] if name == "RedCircle" && overlays.is_empty()));
+    }
+
+    #[test]
+    fn personal_emotes_beat_channel_emotes_but_not_twitch_ones() {
+        let sets = seven(&[("chan", "Same", false), ("chan2", "Chan", false)]);
+        let personal = seven(&[("pers", "Same", false), ("wig", "EsfandWiggle", false), ("tw", "Kappa", false)]).all;
+        let s7 = EmoteSource::Provider(EmoteProvider::SevenTv);
+        let look = EmoteLookup::new(Some(&sets), Some(&personal));
+        let p = build_parts_in("EsfandWiggle Same Chan Kappa", "25:23-27", look, None, "");
+        let emotes: Vec<(EmoteSource, &str)> = p.iter().filter_map(|x| if let MsgPart::Emote { source, id, .. } = x { Some((*source, id.as_str())) } else { None }).collect();
+        // a personal-only word, a name both sets have (personal wins), a channel-only word, and a native Twitch
+        // emote (positional, so the personal "Kappa" never sees it)
+        assert_eq!(emotes, vec![(s7, "wig"), (s7, "pers"), (s7, "chan2"), (EmoteSource::Twitch, "25")]);
+        assert!(look.is_personal("Same") && !look.is_personal("Chan"));
+        // without the personal set the shared name is the channel's again, and the personal-only word is text
+        let p = build_parts("EsfandWiggle Same", "", Some(&sets), None, "");
+        assert!(matches!(&p[0], MsgPart::Text(t) if t == "EsfandWiggle"));
+        assert!(matches!(&p[2], MsgPart::Emote { id, .. } if id == "chan"));
+        // a personal set alone (channel sets not loaded yet) still draws
+        let p = build_parts_in("EsfandWiggle", "", EmoteLookup::new(None, Some(&personal)), None, "");
+        assert!(matches!(&p[0], MsgPart::Emote { id, .. } if id == "wig"));
+        // an empty personal set is no set
+        assert!(EmoteLookup::new(None, Some(&Default::default())).is_empty());
+    }
+
+    #[test]
+    fn kick_messages_take_the_senders_personal_emotes_first() {
+        let sets = seven(&[("chan", "Same", false)]);
+        let personal = seven(&[("pers", "Same", false), ("wig", "EsfandWiggle", false)]).all;
+        let p = build_kick_parts_in("[emote:1:Same] Same EsfandWiggle", EmoteLookup::new(Some(&sets), Some(&personal)));
+        let ids: Vec<&str> = p.iter().filter_map(|x| if let MsgPart::Emote { id, .. } = x { Some(id.as_str()) } else { None }).collect();
+        // Kick's own markup first, then the personal set over the channel's
+        assert_eq!(ids, vec!["1", "pers", "wig"]);
+        let p = build_kick_parts_in("EsfandWiggle", EmoteLookup::new(None, Some(&personal)));
+        assert!(matches!(&p[0], MsgPart::Emote { id, .. } if id == "wig"));
     }
 
     #[test]

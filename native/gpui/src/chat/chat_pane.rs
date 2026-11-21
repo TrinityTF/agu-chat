@@ -226,6 +226,8 @@ pub struct ChatPane {
     pub(super) last_act: Option<(gpui::Bounds<Pixels>, gpui::Bounds<Pixels>)>,
     /// the acting account's 7TV personal emote set (picker / autocomplete)
     pub(super) personal: Vec<Arc<super::twitch::emotes::ProviderEmote>>,
+    /// the Twitch user id `personal` belongs to (it is kept while the next account's loads)
+    personal_owner: String,
     pub(super) inv_cache: RefCell<HashMap<String, (u64, Arc<super::input::inventory::Inventory>)>>,
     pub(super) hidden_pins: Vec<String>,
     pub(super) pin_open: HashSet<String>,
@@ -485,6 +487,7 @@ impl ChatPane {
             cards: Vec::new(),
             last_act: None,
             personal: Vec::new(),
+            personal_owner: String::new(),
             inv_cache: RefCell::new(HashMap::new()),
             hidden_pins,
             pin_open: HashSet::new(),
@@ -1046,6 +1049,7 @@ impl ChatPane {
         if id.is_empty() || !self.requested.insert(format!("personal:{id}")) {
             return;
         }
+        let owner = id.clone();
         let task = self.svc.net.run({
             let client = self.svc.net.client.clone();
             async move { super::twitch::emotes::fetch_seven_tv_personal(&client, &id).await }
@@ -1054,6 +1058,7 @@ impl ChatPane {
             if let Some(list) = task.await {
                 let _ = this.update(cx, |p, cx| {
                     p.personal = list;
+                    p.personal_owner = owner;
                     p.data_changed(cx);
                 });
             }
@@ -1181,6 +1186,9 @@ impl ChatPane {
         let me_id = self.me_id();
         let defs = self.svc.cosmetics.defs();
         let empty = ProviderScopedMap::default();
+        // the account's own personal set, for its own lines (the send box's inventory has it too)
+        let my_personal: Option<Arc<super::twitch::emotes::EmoteMap>> = (rs.seven_tv && !me_id.is_empty() && self.personal_owner == me_id && !self.personal.is_empty())
+            .then(|| Arc::new(self.personal.iter().map(|e| (e.name.clone(), e.clone())).collect()));
         let mut envs = HashMap::new();
         for st in self.store.sources.iter().filter(|s| s.source.platform == Platform::Twitch) {
             let d = self.twitch.get(&st.sk).cloned().unwrap_or_default();
@@ -1210,6 +1218,7 @@ impl ChatPane {
                     caps: d.caps.clone(),
                     viewer: ModViewer { id: me_id.clone(), broadcaster, lead },
                     me_login_lower: me_login.clone(),
+                    my_personal: my_personal.clone(),
                 }),
             );
         }
@@ -2421,7 +2430,7 @@ impl ChatPane {
             RowBody::Msg(m) => {
                 let env = self.envs.get(&row.sk)?.clone();
                 let st = st?;
-                let lookup = if rs.seven_tv_cosmetics { self.svc.cosmetics.style_of(&m.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                let lookup = if rs.seven_tv_cosmetics || rs.seven_tv { self.svc.cosmetics.style_of(&m.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
                 let style: Option<ChatterStyle> = match lookup {
                     StyleLookup::Known(s) => s,
                     StyleLookup::Unknown => None,
@@ -2439,7 +2448,7 @@ impl ChatPane {
                 let line = match st {
                     Some(st) if !n.text.is_empty() && n.seventv.is_none() && !is_redeem && !n.user.id.is_empty() => {
                         let msg = notice_chat_msg(n, seen.as_ref());
-                        let lookup = if rs.seven_tv_cosmetics { self.svc.cosmetics.style_of(&msg.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                        let lookup = if rs.seven_tv_cosmetics || rs.seven_tv { self.svc.cosmetics.style_of(&msg.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
                         let style: Option<ChatterStyle> = match lookup {
                             StyleLookup::Known(s) => s,
                             StyleLookup::Unknown => None,
@@ -2467,7 +2476,7 @@ impl ChatPane {
                 let seen = self.last_line_of(&row.sk, &h.user.id);
                 let known_color = st.known.get(&h.user.login.to_lowercase()).map(|k| k.color.as_str());
                 let msg = held_chat_msg(h, seen.as_ref(), known_color);
-                let lookup = if rs.seven_tv_cosmetics { self.svc.cosmetics.style_of(&h.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                let lookup = if rs.seven_tv_cosmetics || rs.seven_tv { self.svc.cosmetics.style_of(&h.user.id, &self.svc.net, cx) } else { StyleLookup::Known(None) };
                 let style: Option<ChatterStyle> = match lookup {
                     StyleLookup::Known(s) => s,
                     StyleLookup::Unknown => None,
@@ -2484,7 +2493,7 @@ impl ChatPane {
                 let st = st?;
                 let env = CoEnv { source: st.source.clone(), emotes: self.kick_emotes.get(&row.sk).cloned(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new() };
                 let key = super::twitch::cosmetics::kick_key(&m.user.id);
-                let lookup = if rs.seven_tv_cosmetics && !m.user.anonymous { self.svc.cosmetics.style_of(&key, &self.svc.net, cx) } else { StyleLookup::Known(None) };
+                let lookup = if (rs.seven_tv_cosmetics || rs.seven_tv) && !m.user.anonymous { self.svc.cosmetics.style_of(&key, &self.svc.net, cx) } else { StyleLookup::Known(None) };
                 let style: Option<ChatterStyle> = match lookup {
                     StyleLookup::Known(s) => s,
                     StyleLookup::Unknown => None,

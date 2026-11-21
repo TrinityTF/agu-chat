@@ -24,7 +24,7 @@ use super::twitch::colors::{name_color, readable_color};
 use super::twitch::cosmetics::{paint_color_at, ChatterStyle, SevenTvDefs};
 use super::twitch::emotes::*;
 use super::twitch::events::{builtin_redeem, notice_kind, ChatEventKind, DEFAULT_EVENTS};
-use super::twitch::parts::{build_kick_parts, build_parts, split_keep_ws, split_kick, EmoteSource, KnownChatter, MsgPart};
+use super::twitch::parts::{build_kick_parts_in, build_parts, build_parts_in, split_keep_ws, split_kick, EmoteSource, KnownChatter, MsgPart};
 use super::twitch::reply_mention::drop_reply_mention;
 use super::types::*;
 use super::ui_util::*;
@@ -105,6 +105,9 @@ pub struct TwitchEnv {
     pub caps: ModCaps,
     pub viewer: ModViewer,
     pub me_login_lower: String,
+    /// the logged-in account's 7TV personal set (None with 7TV emotes off): its own lines draw it at once, before
+    /// (and whether or not) the cosmetics lookup of the account answers
+    pub my_personal: Option<Arc<EmoteMap>>,
 }
 
 #[derive(Clone)]
@@ -408,7 +411,7 @@ fn link_item(href: &str, text: &str, base: f32) -> Item {
 }
 
 /// MessageText: the message's parts as inline items.
-fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<&EmoteSets>, text_color: Hsla, strike: bool, readable_mentions: bool, mut mention_acts: Option<(&mut Vec<RowAction>, &str)>) {
+fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: EmoteLookup, text_color: Hsla, strike: bool, readable_mentions: bool, mut mention_acts: Option<(&mut Vec<RowAction>, &str)>) {
     let base = f.base;
     let density = density_for(base, size);
     for p in parts {
@@ -451,7 +454,7 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
                     ti.overlays = overlays
                         .iter()
                         .map(|o| {
-                            let oe = emotes.and_then(|e| e.all.get(&o.name)).cloned();
+                            let oe = emotes.get(&o.name).cloned();
                             emote_part_url(o.source, &o.id, density, oe.as_deref()).into()
                         })
                         .collect();
@@ -462,14 +465,18 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
             MsgPart::Emote { source, id, name, overlays } => {
                 let entry = match source {
                     EmoteSource::Twitch | EmoteSource::Kick => None,
-                    EmoteSource::Provider(_) => emotes.and_then(|e| e.all.get(name)).cloned(),
+                    EmoteSource::Provider(_) => emotes.get(name).cloned(),
                 };
                 let url = emote_part_url(*source, id, density, entry.as_deref());
-                let tip = Rc::new(emote_tip(*source, id, name, false, entry.as_deref()));
+                let mut tip = emote_tip(*source, id, name, false, entry.as_deref());
+                if matches!(source, EmoteSource::Provider(EmoteProvider::SevenTv)) && emotes.is_personal(name) {
+                    tip.label = "7TV Personal".into();
+                }
+                let tip = Rc::new(tip);
                 let ov: Vec<SharedStr> = overlays
                     .iter()
                     .map(|o| {
-                        let oe = emotes.and_then(|e| e.all.get(&o.name)).cloned();
+                        let oe = emotes.get(&o.name).cloned();
                         emote_part_url(o.source, &o.id, density, oe.as_deref()).into()
                     })
                     .collect();
@@ -482,7 +489,7 @@ fn message_items(f: &mut Flow, parts: &[MsgPart], size: SizeOpt, emotes: Option<
 /// The parts of a message as inline items (used by the pinned card).
 pub fn message_flow(base: f32, parts: &[MsgPart], size: SizeOpt, emotes: Option<&EmoteSets>, color: Hsla) -> Vec<Item> {
     let mut f = Flow::new(base);
-    message_items(&mut f, parts, size, emotes, color, false, true, None);
+    message_items(&mut f, parts, size, EmoteLookup::new(emotes, None), color, false, true, None);
     f.items
 }
 
@@ -789,7 +796,17 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
     let color = hex(&name_color(&msg.user, rs.readable_colors));
     let mentions_me = text_mentions_login(&msg.text, &env.me_login_lower);
     let hl = row_highlight(msg, mentions_me, *susp, *rule);
-    let built = build_parts(&msg.text, &msg.emotes, env.emotes.as_deref(), Some(known), msg.gifs.as_deref().unwrap_or(""));
+    // the sender's 7TV personal set: the account's own (loaded at login) on its own lines, else what the
+    // chatter's 7TV lookup found; only with 7TV emotes on
+    let personal = if !rs.seven_tv {
+        None
+    } else if !env.viewer.id.is_empty() && msg.user.id == env.viewer.id && env.my_personal.is_some() {
+        env.my_personal.as_deref()
+    } else {
+        style.and_then(|s| s.personal.as_deref())
+    };
+    let emotes = EmoteLookup::new(env.emotes.as_deref(), personal);
+    let built = build_parts_in(&msg.text, &msg.emotes, emotes, Some(known), msg.gifs.as_deref().unwrap_or(""));
     let parts = match &msg.reply {
         Some(r) => drop_reply_mention(built, &r.user),
         None => built,
@@ -856,7 +873,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
         // A 7TV paint covers the whole message as one span (Electron puts the name's paint style on the
         // message's <span>), not one gradient per word.
         let mark = f.items.len();
-        message_items(&mut f, &parts, size, env.emotes.as_deref(), color, struck, rs.readable_colors, Some((&mut actions, &sk)));
+        message_items(&mut f, &parts, size, emotes, color, struck, rs.readable_colors, Some((&mut actions, &sk)));
         let spec = paint.and_then(super::paint_text::PaintSpec::from_paint).map(Rc::new);
         for it in f.items[mark..].iter_mut() {
             if let Item::Text(t) = it {
@@ -871,7 +888,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
             f.spans.push((mark, f.items.len()));
         }
     } else {
-        message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::TEXT), struck, rs.readable_colors, Some((&mut actions, &sk)));
+        message_items(&mut f, &parts, size, emotes, token(theme::TEXT), struck, rs.readable_colors, Some((&mut actions, &sk)));
     }
     if struck {
         let note = msg.deleted_note.clone().unwrap_or_else(|| "Deleted".into());
@@ -1030,7 +1047,7 @@ pub fn notice_row(row: &Row, n: &Notice, ctx: &RowCtx, env: &TwitchEnv, seen: Op
     } else {
         let parts = build_parts(&n.text, n.emotes.as_deref().unwrap_or(""), env.emotes.as_deref(), None, "");
         let mut f = Flow::new(base);
-        message_items(&mut f, &parts, size, env.emotes.as_deref(), token(theme::MUTED), false, rs.readable_colors, None);
+        message_items(&mut f, &parts, size, EmoteLookup::new(env.emotes.as_deref(), None), token(theme::MUTED), false, rs.readable_colors, None);
         Some(f.finish())
     };
     BuiltRow::Notice(NoticeSpec { system: sys.finish(), text, raid, icon, head, card, bar: None, reply: None, line })
@@ -1533,10 +1550,13 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     // Kick's own emotes, plus 7TV's (the channel's Kick-linked set and global) with the same popup and zero-width
     // stacking as on Twitch; links and mentions in the text in between
     let size = SizeOpt::parse(&rs.emote_size);
-    for p in build_kick_parts(&m.text, env.emotes.as_deref()) {
+    // (and the sender's 7TV personal set ahead of the channel's, as on Twitch)
+    let personal = if rs.seven_tv { style.and_then(|s| s.personal.as_deref()) } else { None };
+    let emotes = EmoteLookup::new(env.emotes.as_deref(), personal);
+    for p in build_kick_parts_in(&m.text, emotes) {
         match &p {
             MsgPart::Text(t) => run_text(&mut f, t, col, striking),
-            _ => message_items(&mut f, std::slice::from_ref(&p), size, env.emotes.as_deref(), col, striking, rs.readable_colors, None),
+            _ => message_items(&mut f, std::slice::from_ref(&p), size, emotes, col, striking, rs.readable_colors, None),
         }
     }
     let mut spec = frame(f.finish(), actions, ctx, row.ord);

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use super::emotes::{read_cache, write_cache};
+use super::emotes::{fetch_seven_tv_personal_set, personal_set_id, read_cache, seven_tv_subscriber, write_cache, EmoteMap};
 use crate::chat::net::Net;
 
 #[derive(Clone, Debug, Default)]
@@ -63,6 +63,8 @@ pub struct ChatterStyle {
     pub color: Option<i64>,
     pub paint_id: Option<String>,
     pub badge_id: Option<String>,
+    /// the chatter's 7TV personal emotes (a subscriber's own set, drawn in every channel); None without one
+    pub personal: Option<Arc<EmoteMap>>,
 }
 
 const DEFS_KEY: &str = "emotes:7tv:cosmetics:global:v2";
@@ -147,8 +149,23 @@ fn split_key(key: &str) -> (&'static str, &str) {
     }
 }
 
+/// What a chatter's 7TV user answer says: their style (paint, badge, colour) and, for a subscriber, the id of
+/// their personal emote set. `None` when there is neither.
+fn style_from_user(d: &Value) -> Option<(ChatterStyle, Option<String>)> {
+    let user = d.get("user").filter(|u| !u.is_null())?;
+    let personal_set = if seven_tv_subscriber(user) { personal_set_id(user) } else { None };
+    let st = user.get("style").filter(|s| !s.is_null());
+    if st.is_none() && personal_set.is_none() {
+        return None;
+    }
+    let field = |k: &str| st.and_then(|s| s.get(k)).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let style = ChatterStyle { color: st.and_then(|s| s.get("color")).and_then(|c| c.as_i64()), paint_id: field("paint_id"), badge_id: field("badge_id"), personal: None };
+    Some((style, personal_set))
+}
+
 /// `None`: the lookup failed (network, 5xx, rate limit) and is worth retrying; `Some(None)`: 7TV answered,
-/// and the chatter has no style (or no 7TV account).
+/// and the chatter has no style (or no 7TV account). A personal set is fetched in the same lookup (so it counts
+/// against the same in-flight limit) and comes from the emote cache when it was seen within the hour.
 async fn fetch_chatter_style(client: &reqwest::Client, key: &str) -> Option<Option<ChatterStyle>> {
     let (platform, user_id) = split_key(key);
     let r = client.get(format!("https://7tv.io/v3/users/{platform}/{user_id}")).send().await.ok()?;
@@ -159,12 +176,12 @@ async fn fetch_chatter_style(client: &reqwest::Client, key: &str) -> Option<Opti
         return None;
     }
     let d: Value = r.json().await.ok()?;
-    let Some(st) = d.pointer("/user/style").filter(|s| !s.is_null()) else { return Some(None) };
-    Some(Some(ChatterStyle {
-        color: st.get("color").and_then(|c| c.as_i64()),
-        paint_id: st.get("paint_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        badge_id: st.get("badge_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-    }))
+    let Some((mut style, personal_set)) = style_from_user(&d) else { return Some(None) };
+    if let Some(set_id) = personal_set {
+        let emotes = fetch_seven_tv_personal_set(client, &set_id).await?;
+        style.personal = (!emotes.is_empty()).then(|| Arc::new(emotes));
+    }
+    Some(Some(style))
 }
 
 /// Wait before retrying a failed lookup: 5 s, 15 s, 60 s, then every 5 minutes.
@@ -249,7 +266,7 @@ impl Cosmetics {
             for u in f.get("users").and_then(|u| u.as_array()).into_iter().flatten() {
                 let id = u.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let paint_id = u.get("paint_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                styles.insert(id, Some(ChatterStyle { color: None, paint_id, badge_id: None }));
+                styles.insert(id, Some(ChatterStyle { color: None, paint_id, badge_id: None, personal: None }));
             }
         }
         Cosmetics(Rc::new(RefCell::new(CosmeticsState {
@@ -417,6 +434,47 @@ mod tests {
         assert_eq!(kick_key(""), "");
         assert_eq!(split_key("kick:42"), ("kick", "42"));
         assert_eq!(split_key("42"), ("twitch", "42"));
+    }
+
+    /// `/v3/users/twitch/<id>` as 7TV answers it (2026-11, trimmed: the channel set's emotes, editors and
+    /// connections cut).
+    fn seven_tv_user(roles: Value, style: Value) -> Value {
+        json!({
+            "id": "71092938", "platform": "TWITCH", "username": "xqc", "display_name": "xQc",
+            "emote_set_id": "01FE9DRF000009TR6M9N941CYW",
+            "emote_set": {"id": "01FE9DRF000009TR6M9N941CYW", "name": "xQc's Emotes", "flags": 0, "emotes": []},
+            "user": {
+                "id": "01FE9DRF000009TR6M9N941CYW", "username": "xqc", "display_name": "xQc",
+                "style": style,
+                "emote_sets": [
+                    {"id": "01GN7SRYE8000EK2J7DFXT0WE5", "name": "Personal Emotes", "flags": 4, "tags": [], "capacity": 5},
+                    {"id": "01FE9DRF000009TR6M9N941CYW", "name": "xQc's Emotes", "flags": 0, "tags": [], "capacity": 1000},
+                    {"id": "01J9MMS2R800036CR40E1041ED", "name": "Halloween Emotes 2026", "flags": 0, "tags": ["spooky"], "capacity": 1000}
+                ],
+                "roles": roles
+            }
+        })
+    }
+
+    #[test]
+    fn a_subscribers_lookup_carries_their_personal_set() {
+        let style = json!({"color": -1857617921, "paint_id": "01JHXJFACX42RV996VE9933TB8", "badge_id": "01JJJ74CRHZBRMCM8F4Y2WBN6R"});
+        let sub = json!(["01F37RCTH00000K96678WEQT02", "01F37R3RFR0000K96678WEQT01", "01G68MMQFR0007J6GNM9E2M0TM"]);
+        let (st, set) = style_from_user(&seven_tv_user(sub.clone(), style.clone())).unwrap();
+        assert_eq!(set.as_deref(), Some("01GN7SRYE8000EK2J7DFXT0WE5"));
+        assert_eq!(st.paint_id.as_deref(), Some("01JHXJFACX42RV996VE9933TB8"));
+        assert_eq!(st.badge_id.as_deref(), Some("01JJJ74CRHZBRMCM8F4Y2WBN6R"));
+        assert_eq!(st.color, Some(-1857617921));
+        // no paint or badge picked: the personal set alone is still worth an entry
+        let (st, set) = style_from_user(&seven_tv_user(sub, Value::Null)).unwrap();
+        assert!(set.is_some() && st.paint_id.is_none() && st.badge_id.is_none());
+        // a lapsed subscriber keeps the set, but 7TV no longer draws it
+        let lapsed = json!(["01G68MMQFR0007J6GNM9E2M0TM"]);
+        let (st, set) = style_from_user(&seven_tv_user(lapsed.clone(), style)).unwrap();
+        assert!(set.is_none() && st.paint_id.is_some());
+        assert!(style_from_user(&seven_tv_user(lapsed, Value::Null)).is_none());
+        // no 7TV user at all
+        assert!(style_from_user(&json!({"id": "1", "user": null})).is_none());
     }
 
     #[test]
