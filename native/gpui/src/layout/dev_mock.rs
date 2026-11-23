@@ -182,7 +182,7 @@ fn harness_log(platform: Platform) -> Value {
                 msg(7, &b, "Cheer100 told you, ogre mound", json!({ "bits": 100 })),
                 msg(12, &c, "cheer1 bibleTHUMP5000 Cheer100x plus Kappa1000 gg", json!({ "bits": 6101 })),
                 msg(13, &a, "Cheer100 without bits stays text", json!({})),
-                msg(8, &c, "redeem text", json!({ "rewardId": "r1", "reward": { "title": "Hydrate", "cost": 500 } })),
+                msg(8, &c, "redeem text", json!({ "rewardId": "r1", "reward": { "title": "Highlight My Message", "cost": 500 } })),
                 msg(9, &a, "waves", json!({ "action": true })),
                 json!({ "notice": true, "id": "n1", "ts": now - 30000, "system": "cooldude subscribed with Prime. They've subscribed for 12 months!", "msgId": "resub", "user": b, "text": "love the stream", "emotes": "" }),
                 json!({ "notice": true, "id": "n2", "ts": now - 29000, "system": "5 raiders from somechannel have joined!", "msgId": "raid", "user": c, "text": "" }),

@@ -1,7 +1,7 @@
 //! The Mentions bell and panel (DankChat's mentions sheet): the bell in the title bar turns red with a count
 //! when a message mentions you in any open chat; it opens a panel listing every such message, oldest at the top,
-//! drawn like the chat list draws them. Opening it marks them read (the tabs keep their own red dots until
-//! viewed); a click on an entry jumps to the message in its chat.
+//! drawn like the chat list draws them. Opening it marks them read and turns the tabs' red dots grey (their
+//! mentions are seen here; the grey "new messages" dot stays); a click on an entry jumps to the message in its chat.
 //!
 //! The rows are drawn by the pane that has their chat (`ChatPane::mention_row_els`), so names open the user
 //! card and the hover tools act there.
@@ -67,6 +67,13 @@ impl AguApp {
             self.menu = None;
             self.mentions_open = true;
             self.mentions.mark_all_read();
+            // every red tab dot is a mention this panel now shows: seen here, the tab keeps only its grey
+            // "new messages" dot
+            for a in self.unread.values_mut() {
+                if *a == crate::chat::chat_pane::Activity::Highlight {
+                    *a = crate::chat::chat_pane::Activity::Message;
+                }
+            }
             // the newest at the bottom, in view
             self.mentions_scroll.scroll_to_bottom();
             self.mentions_count = self.mentions.len();

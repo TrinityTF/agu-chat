@@ -42,10 +42,11 @@ pub enum Section {
     Hotkeys,
     ModButtons,
     Updates,
+    Report,
     About,
 }
 
-const SECTIONS: [(Section, &str); 8] = [
+const SECTIONS: [(Section, &str); 9] = [
     (Section::Accounts, "Accounts"),
     (Section::Appearance, "Appearance and chat"),
     (Section::Highlights, "Highlights"),
@@ -53,6 +54,7 @@ const SECTIONS: [(Section, &str); 8] = [
     (Section::Hotkeys, "Hotkeys"),
     (Section::ModButtons, "Mod buttons"),
     (Section::Updates, "Updates"),
+    (Section::Report, "Report a bug"),
     (Section::About, "About"),
 ];
 
@@ -67,6 +69,7 @@ impl Section {
             "hotkeys" => Section::Hotkeys,
             "modbuttons" => Section::ModButtons,
             "updates" => Section::Updates,
+            "report" => Section::Report,
             "about" => Section::About,
             _ => return None,
         })
@@ -1715,6 +1718,29 @@ impl SettingsDialog {
             .into_any_element()
     }
 
+    // ---- report a bug ---------------------------------------------------------------------------------------------
+
+    fn render_report(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let new_issue = new_issue_url(&self.info.version, std::env::consts::OS);
+        let open = self.link("report-new", &new_issue, "Report a bug on GitHub", cx);
+        let list = self.link("report-list", &format!("{REPO_URL}/issues"), "See reported bugs", cx);
+        let tips = [
+            "What you did, what you expected, and what happened instead.",
+            "Which platform and chat it was on (Twitch, Kick, YouTube, Rumble or X).",
+            "A screenshot or a short clip, if you can.",
+        ];
+        div()
+            .child(Self::h("Report a bug"))
+            .child(
+                Self::card()
+                    .child(div().child("Found a bug or have an idea? Open an issue on GitHub. Your app version and system are filled in for you."))
+                    .child(div().mt(px(8.)).text_color(c(theme::MUTED)).child("Helpful to include:"))
+                    .children(tips.iter().map(|t| div().text_color(c(theme::MUTED)).child(format!("\u{2022} {t}"))))
+                    .child(div().mt(px(12.)).flex().gap(px(16.)).child(open).child(list)),
+            )
+            .into_any_element()
+    }
+
     // ---- about ----------------------------------------------------------------------------------------------------
 
     fn render_about(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1730,6 +1756,21 @@ impl SettingsDialog {
             )
             .into_any_element()
     }
+}
+
+/// GitHub's new-issue page with the app version and system already in the body (nothing personal: no names,
+/// no channels).
+fn new_issue_url(version: &str, os: &str) -> String {
+    let os = match os {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        o => o,
+    };
+    let body = format!(
+        "**What happened**\n\n\n**What you expected**\n\n\n**Steps to reproduce**\n1. \n\n**Platform / chat** (Twitch, Kick, YouTube, Rumble, X)\n\n\n---\nAgu Chat {version} on {os}\n"
+    );
+    let enc: String = body.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    format!("{REPO_URL}/issues/new?body={enc}")
 }
 
 const MOD_ICON_LABELS: [&str; 10] = ["Ban", "Clock", "Trash", "Shield", "Warning", "Flag", "Hidden", "Chat", "Pin", "Check"];
@@ -1810,6 +1851,7 @@ impl Render for SettingsDialog {
             Section::Hotkeys => self.render_hotkeys(cx),
             Section::ModButtons => self.render_mod_buttons(window, cx),
             Section::Updates => self.render_updates(cx),
+            Section::Report => self.render_report(cx),
             Section::About => self.render_about(cx),
         };
 

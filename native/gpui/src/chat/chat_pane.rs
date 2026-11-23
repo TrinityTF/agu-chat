@@ -2359,7 +2359,22 @@ impl ChatPane {
                 // my-px, a 3px left bar; header `pt-0.5` + a 19.5 px line (+ pb-0.5 when nothing follows)
                 let inner_w = width - 3.0;
                 // (a picture on the right makes the header as tall as it, with pb-0.5 under it)
-                let line = e.image.as_ref().map(|_| super::rows::event_image_px(base)).unwrap_or(0.0).max(19.5);
+                // the header's text wraps in a narrow pane: measure it beside what sits on its right (icon, amount,
+                // picture; 4 px apart) and the 8 px gap, inside px-2, so the next row never draws over it
+                let mut right: Vec<f32> = Vec::new();
+                if e.is_bits || e.amount.is_some() {
+                    right.push(base);
+                }
+                if let Some(a) = e.amount {
+                    right.push(super::inline::plain_text_width(window, &super::pane_render::thousands(a), base, gpui::FontWeight::SEMIBOLD));
+                }
+                if e.image.is_some() {
+                    right.push(super::rows::event_image_px(base));
+                }
+                let right_w = right.iter().sum::<f32>() + 4.0 * right.len().saturating_sub(1) as f32;
+                let text_w = (inner_w - 16.0 - 8.0 - right_w).max(1.0);
+                let text_h = e.content.height_at(text_w, window, cx);
+                let line = e.image.as_ref().map(|_| super::rows::event_image_px(base)).unwrap_or(0.0).max(19.5).max(text_h);
                 let header = 2.0 + line + if e.inner.is_some() && e.image.is_none() { 0.0 } else { 2.0 };
                 let inner = e.inner.as_ref().map(|f| frame_h(f, inner_w, window, cx)).unwrap_or(0.0);
                 ItemMetrics { h: header + inner, mt: 1.0, mb: 1.0 }
