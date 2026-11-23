@@ -119,22 +119,93 @@ pub struct Resize {
     pub px: f32,
 }
 
+/// "Split out…" from a header chip's menu: these channels (`source_key`s) of `leaf_id` go to the spot picked next,
+/// on the same drop zones a chip drag shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pick {
+    pub tab_id: String,
+    pub leaf_id: String,
+    pub keys: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct SplitViewState {
     /// own drag (header / chip); a tab drag comes from `AguApp::tab_drag`
     pub dragging: Option<Dragging>,
+    /// the zone under the pointer, during a drag or a pick
     pub hover: Option<(String, Zone)>,
     pub resize: Option<Resize>,
+    pub pick: Option<Pick>,
 }
 
 impl SplitViewState {
     pub fn clear_drag(&mut self) {
         self.dragging = None;
-        self.hover = None;
+        if self.pick.is_none() {
+            self.hover = None;
+        }
     }
 }
 
 impl AguApp {
+    /// "Split out…": the splits show their drop zones (as for a chip drag) until one is clicked, which puts `keys`
+    /// of `leaf_id` there; Escape or a click anywhere else cancels.
+    pub fn start_pick(&mut self, tab_id: &str, leaf_id: &str, keys: Vec<String>, cx: &mut Context<Self>) {
+        self.sv.pick = Some(Pick { tab_id: tab_id.to_string(), leaf_id: leaf_id.to_string(), keys });
+        self.sv.hover = None;
+        cx.notify();
+    }
+
+    pub fn cancel_pick(&mut self, cx: &mut Context<Self>) {
+        if self.sv.pick.take().is_some() {
+            self.sv.hover = None;
+            cx.notify();
+        }
+    }
+
+    /// What dropping `keys` of `leaf_id` beside a split adds there: the split itself when they are all it has.
+    fn sources_what(&self, leaf_id: &str, keys: &[String]) -> DropWhat {
+        let all = find_leaf(self.active_tab().root.as_ref(), leaf_id).is_some_and(|l| l.sources.iter().all(|s| keys.contains(&source_key(s))));
+        if all {
+            DropWhat::Move(leaf_id.to_string())
+        } else {
+            DropWhat::New
+        }
+    }
+
+    /// The pointer is at `pos` over split `leaf_id` (`bounds`): the zone there becomes the highlighted one, unless it
+    /// is an edge without room on the screen for `what`. Shared by drags and "Split out…" picks.
+    #[allow(clippy::too_many_arguments)]
+    fn hover_zone(&mut self, tab_id: &str, leaf_id: &str, bounds: Bounds<Pixels>, pos: Point<Pixels>, can_merge: bool, what: &DropWhat, cx: &mut Context<Self>) {
+        let z = if bounds.contains(&pos) { Some((leaf_id.to_string(), zone_at(bounds, pos, can_merge))) } else { None };
+        let z = z.filter(|(_, zone)| match zone {
+            Zone::Edge(e) => {
+                let adding = match what {
+                    DropWhat::Move(src) => Adding::Move(src),
+                    DropWhat::New => Adding::New,
+                    DropWhat::Tab(t) => Adding::Tab(t),
+                };
+                self.edge_fits(tab_id, leaf_id, *e, adding)
+            }
+            Zone::Center => true,
+        });
+        let mine = self.sv.hover.as_ref().map(|(l, _)| l == leaf_id).unwrap_or(false);
+        if z.is_some() && self.sv.hover != z {
+            self.sv.hover = z;
+            cx.notify();
+        } else if z.is_none() && mine {
+            self.sv.hover = None;
+            cx.notify();
+        }
+    }
+
+    /// A pick's pointer left every split (it is over the tab bar or a divider): no zone is highlighted.
+    pub fn pick_pointer_out(&mut self, cx: &mut Context<Self>) {
+        if self.sv.pick.is_some() && self.sv.hover.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The drag in progress, if any: a split / chip from this view, or another tab dragged from the tab bar.
     fn current_dragging(&self, cx: &Context<Self>) -> Option<Dragging> {
         if !cx.has_active_drag() {
@@ -150,6 +221,8 @@ impl AguApp {
     }
 
     pub fn on_root_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // the root only hears the pointer outside the pick overlays (they block it from what is under them)
+        self.pick_pointer_out(cx);
         let Some(r) = &self.sv.resize else { return };
         let pos = if r.horizontal { f32::from(ev.position.x) } else { f32::from(ev.position.y) };
         let delta = (pos - r.start) / r.px;
@@ -182,6 +255,7 @@ impl AguApp {
             base: d.sizes.clone(),
             px: px_total.max(1.0),
         });
+        self.cancel_pick(cx);
         cx.stop_propagation();
     }
 
@@ -189,6 +263,16 @@ impl AguApp {
         let tab = self.active_tab().clone();
         let tab_id = tab.id.clone();
         let dragging = self.current_dragging(cx);
+        // a pick ends when a drag starts, another tab is shown, or its channels left their split
+        let pick_ok = self.sv.pick.as_ref().is_some_and(|p| {
+            dragging.is_none() && p.tab_id == tab_id && find_leaf(tab.root.as_ref(), &p.leaf_id).is_some_and(|l| l.sources.iter().any(|s| p.keys.contains(&source_key(s))))
+        });
+        if self.sv.pick.is_some() && !pick_ok {
+            self.sv.pick = None;
+            if dragging.is_none() {
+                self.sv.hover = None;
+            }
+        }
 
         let Some(root) = tab.root.as_ref() else {
             let tab_drag = match &dragging {
@@ -285,6 +369,28 @@ impl AguApp {
                 }));
             host_el = host_el.child(wrap.child(line).child(handle));
         }
+        // "Split out…": what to do now (the pill takes no clicks: they reach the zones under it)
+        if let Some(p) = &self.sv.pick {
+            let names = find_leaf(tab.root.as_ref(), &p.leaf_id)
+                .map(|l| l.sources.iter().filter(|s| p.keys.contains(&source_key(s))).map(crate::layout::tree::short_name).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            host_el = host_el.child(
+                div().absolute().top(px(34.)).left_0().right_0().flex().justify_center().px(px(16.)).child(
+                    div()
+                        .max_w_full()
+                        .truncate()
+                        .rounded(px(4.))
+                        .bg(c(theme::ACCENT))
+                        .px(px(10.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(c(theme::WHITE))
+                        .shadow_lg()
+                        .child(format!("Click where {names} should go \u{00b7} Esc to cancel")),
+                ),
+            );
+        }
         host_el.absolute().top_0().left_0().into_any_element()
     }
 
@@ -298,6 +404,10 @@ impl AguApp {
             Some(Dragging::Split { leaf_id: l }) => *l != leaf.id,
             Some(Dragging::Sources { leaf_id: l, keys }) => *l != leaf.id || keys.len() < leaf.sources.len(),
         };
+        // "Split out…" (no drag then): every split is a target, as for dragging the chip, edges only (it splits out)
+        let pick = self.sv.pick.clone().filter(|p| dragging.is_none() && p.tab_id == tab_id);
+        let picking = pick.as_ref().is_some_and(|p| p.leaf_id != leaf.id || p.keys.len() < leaf.sources.len());
+        let drop_target = drop_target || picking;
         // Merging only means something into another split; a whole tab only goes beside one.
         let can_merge = match dragging {
             Some(Dragging::Split { leaf_id: l }) | Some(Dragging::Sources { leaf_id: l, .. }) => *l != leaf.id,
@@ -326,33 +436,8 @@ impl AguApp {
         if drop_target {
             let hover = self.sv.hover.clone().filter(|(l, _)| *l == leaf_id).map(|(_, z)| z);
             let tid = tab_id.to_string();
-            let lid = leaf_id.clone();
-            let tid_o = tid.clone();
             // `what`: what the drop would add (`Adding` as owned data): an edge without room for it shows no zone
-            let over = move |this: &mut AguApp, bounds: Bounds<Pixels>, pos: Point<Pixels>, what: DropWhat, cx: &mut Context<AguApp>| {
-                let z = if bounds.contains(&pos) { Some((lid.clone(), zone_at(bounds, pos, can_merge))) } else { None };
-                let z = z.filter(|(_, zone)| match zone {
-                    Zone::Edge(e) => {
-                        let adding = match &what {
-                            DropWhat::Move(src) => Adding::Move(src),
-                            DropWhat::New => Adding::New,
-                            DropWhat::Tab(t) => Adding::Tab(t),
-                        };
-                        this.edge_fits(&tid_o, &lid, *e, adding)
-                    }
-                    Zone::Center => true,
-                });
-                let mine = this.sv.hover.as_ref().map(|(l, _)| *l == lid).unwrap_or(false);
-                if z.is_some() && this.sv.hover != z {
-                    this.sv.hover = z;
-                    cx.notify();
-                } else if z.is_none() && mine {
-                    this.sv.hover = None;
-                    cx.notify();
-                }
-            };
-            let over2 = over.clone();
-            let over3 = over.clone();
+            let (ta, tb, tc, la, lb, lc) = (tid.clone(), tid.clone(), tid.clone(), leaf_id.clone(), leaf_id.clone(), leaf_id.clone());
             let mut overlay = div()
                 .id(SharedString::from(format!("drop-{leaf_id}")))
                 .absolute()
@@ -361,20 +446,53 @@ impl AguApp {
                 .size_full()
                 .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<SplitDrag>, _w, cx| {
                     let what = DropWhat::Move(ev.drag(cx).leaf_id.clone());
-                    over(this, ev.bounds, ev.event.position, what, cx)
+                    this.hover_zone(&ta, &la, ev.bounds, ev.event.position, can_merge, &what, cx)
                 }))
                 .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<SourcesDrag>, _w, cx| {
                     let d = ev.drag(cx);
-                    let (leaf, keys) = (d.leaf_id.clone(), d.keys.clone());
                     // every channel of the split: that is moving the split
-                    let all = find_leaf(this.active_tab().root.as_ref(), &leaf).is_some_and(|l| l.sources.iter().all(|s| keys.contains(&source_key(s))));
-                    let what = if all { DropWhat::Move(leaf) } else { DropWhat::New };
-                    over2(this, ev.bounds, ev.event.position, what, cx)
+                    let what = this.sources_what(&d.leaf_id, &d.keys);
+                    this.hover_zone(&tb, &lb, ev.bounds, ev.event.position, can_merge, &what, cx)
                 }))
                 .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<TabDrag>, _w, cx| {
                     let what = DropWhat::Tab(ev.drag(cx).tab_id.clone());
-                    over3(this, ev.bounds, ev.event.position, what, cx)
+                    this.hover_zone(&tc, &lc, ev.bounds, ev.event.position, can_merge, &what, cx)
                 }));
+            if let Some(p) = pick.filter(|_| picking) {
+                // the same zones, followed by the pointer instead of a drag; the overlay takes the pointer from the chat
+                // under it, so a click only picks
+                let probe_key = format!("pick-{leaf_id}");
+                let (tm, lm, km) = (tid.clone(), leaf_id.clone(), probe_key.clone());
+                let (lk, kk) = (leaf_id.clone(), probe_key.clone());
+                let what = self.sources_what(&p.leaf_id, &p.keys);
+                let what2 = what.clone();
+                overlay = overlay
+                    .occlude()
+                    .cursor(CursorStyle::PointingHand)
+                    .child(self.probe(probe_key, cx))
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _w, cx| {
+                        if let Some(b) = this.anchor(&km) {
+                            this.hover_zone(&tm, &lm, b, ev.position, false, &what, cx);
+                        }
+                    }))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        let Some(p) = this.sv.pick.clone() else { return };
+                        // the zone under the click itself (no move may have come since the menu closed)
+                        if let Some(b) = this.anchor(&kk) {
+                            this.hover_zone(&p.tab_id, &lk, b, ev.position, false, &what2, cx);
+                        }
+                        let zone = this.sv.hover.clone().filter(|(l, _)| *l == lk).map(|(_, z)| z);
+                        this.cancel_pick(cx);
+                        if let Some(Zone::Edge(e)) = zone {
+                            this.split_out(&p.tab_id, &p.leaf_id, &p.keys, &lk, e, cx);
+                        }
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener(|this, _: &MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        this.cancel_pick(cx);
+                    }));
+            }
             let (t1, t2, t3, l1, l2, l3) = (tid.clone(), tid.clone(), tid, leaf_id.clone(), leaf_id.clone(), leaf_id.clone());
             overlay = overlay
                 .on_drop(cx.listener(move |this, d: &SplitDrag, _w, cx| {

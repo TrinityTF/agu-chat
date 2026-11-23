@@ -563,6 +563,19 @@ impl<T> ImageCache<T> {
         self.map.get(url).map(|e| &e.state)
     }
 
+    /// Ends every failed URL's cooldown: each is fetched again the next time it is asked for (the user asked to
+    /// reload emotes). Returns how many there were.
+    pub fn retry_failed(&mut self) -> usize {
+        let mut n = 0;
+        for e in self.map.values_mut() {
+            if matches!(e.state, State::Failed) {
+                e.retry_at = 0;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Hand finished decodes to the frontend (bounded per call). `upload` returns the frontend's
     /// handle and how many bytes it holds. Returns true if more are waiting.
     pub fn pump(&mut self, mut upload: impl FnMut(&str, &Decoded) -> (T, u64)) -> bool {
@@ -781,6 +794,20 @@ mod tests {
         assert!(matches!(c.get("gone", (28, 28)), State::Failed), "a 404 is not asked for again a minute later");
         advance(&mut c, RETRY_PERMANENT_MS);
         assert!(matches!(c.get("gone", (28, 28)), State::Loading));
+    }
+
+    #[test]
+    fn retry_failed_ends_the_cooldown_at_once() {
+        let (_rt, mut c) = cache();
+        c.get("gone", (28, 28));
+        c.get("ok", (28, 28));
+        c.tx.send(("gone".into(), Err(("HTTP status client error (404 Not Found)".into(), Fail::Permanent)).into())).unwrap();
+        c.tx.send(("ok".into(), Ok(decoded(1)).into())).unwrap();
+        c.pump(|_, _| (1, 16));
+        assert!(matches!(c.get("gone", (28, 28)), State::Failed));
+        assert_eq!(c.retry_failed(), 1, "only the failed one");
+        assert!(matches!(c.get("gone", (28, 28)), State::Loading));
+        assert!(matches!(c.get("ok", (2, 2)), State::Ready(_)));
     }
 
     #[test]

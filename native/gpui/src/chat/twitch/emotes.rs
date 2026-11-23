@@ -283,6 +283,8 @@ pub enum CacheMode {
     Fresh,
     /// only what is cached, however old: shown at once on startup while the network catches up
     CacheOnly,
+    /// the network for every set, the global ones too (the user asked to reload emotes); the old entry if that fails
+    Reload,
 }
 
 #[allow(dead_code)] // the plain forms, for sets that need no startup / retry handling
@@ -307,7 +309,7 @@ async fn fetch_json_mode(client: &reqwest::Client, key: &str, ttl: i64, url: &st
                 return Some(v);
             }
         }
-        CacheMode::Fresh => {}
+        CacheMode::Fresh | CacheMode::Reload => {}
     }
     let got = async {
         let r = client.get(url).send().await.ok()?;
@@ -425,27 +427,41 @@ fn trim_seven_tv_emote(e: &Value) -> Value {
     })
 }
 
+/// The entry under `key` while it is fresh, else what `fetch` gets (written back). `fresh` skips the entry (a reload
+/// the user asked for) and falls back to it, however old, when the fetch fails; otherwise a failed fetch is `None`.
+async fn cached_or(key: &str, ttl: i64, fresh: bool, fetch: impl std::future::Future<Output = Option<Value>>) -> Option<Value> {
+    if !fresh {
+        if let Some(v) = read_cache(key, ttl) {
+            return Some(v);
+        }
+    }
+    match fetch.await {
+        Some(v) => {
+            write_cache(key, &v);
+            Some(v)
+        }
+        None if fresh => read_cache_any(key),
+        None => None,
+    }
+}
+
 /// A personal set's emotes, cached an hour (`emotes:7tv:personal-emotes:<set>`, trimmed). `None`: the lookup
-/// failed and is worth retrying; a set 7TV doesn't know is an empty map.
-pub async fn fetch_seven_tv_personal_set(client: &reqwest::Client, set_id: &str) -> Option<EmoteMap> {
+/// failed and is worth retrying; a set 7TV doesn't know is an empty map. `fresh` goes past the cache.
+pub async fn fetch_seven_tv_personal_set(client: &reqwest::Client, set_id: &str, fresh: bool) -> Option<EmoteMap> {
     cache_ready().await;
     let key = format!("emotes:7tv:personal-emotes:{set_id}");
-    let list = match read_cache(&key, EMOTE_CHANNEL_TTL_MS) {
-        Some(v) => v,
-        None => {
-            let r = client.get(format!("https://7tv.io/v3/emote-sets/{set_id}")).send().await.ok()?;
-            let l = if r.status() == reqwest::StatusCode::NOT_FOUND {
-                json!([])
-            } else if r.status().is_success() {
-                let d: Value = r.json().await.ok()?;
-                Value::Array(d.get("emotes").and_then(|a| a.as_array()).into_iter().flatten().map(trim_seven_tv_emote).collect())
-            } else {
-                return None;
-            };
-            write_cache(&key, &l);
-            l
+    let list = cached_or(&key, EMOTE_CHANNEL_TTL_MS, fresh, async {
+        let r = client.get(format!("https://7tv.io/v3/emote-sets/{set_id}")).send().await.ok()?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            Some(json!([]))
+        } else if r.status().is_success() {
+            let d: Value = r.json().await.ok()?;
+            Some(Value::Array(d.get("emotes").and_then(|a| a.as_array()).into_iter().flatten().map(trim_seven_tv_emote).collect()))
+        } else {
+            None
         }
-    };
+    })
+    .await?;
     Some(seven_tv_map(Some(&list)))
 }
 
@@ -525,7 +541,7 @@ pub async fn seven_tv_sets(client: &reqwest::Client, channel_id: &str, mode: Cac
 
 pub async fn seven_tv_sets_on(client: &reqwest::Client, platform: SevenTvPlatform, channel_id: &str, mode: CacheMode) -> (ProviderScopedMap, Option<SevenTvIds>) {
     let (ck, cu) = (seven_tv_channel_key_on(platform, channel_id), seven_tv_user_url(platform, channel_id));
-    // a live update reloads the channel's set only
+    // a live update reloads the channel's set only (a reload the user asked for does both)
     let global_mode = if mode == CacheMode::Fresh { CacheMode::Normal } else { mode };
     let (g, c) = tokio::join!(
         fetch_json_mode(client, "emotes:7tv:global:global", EMOTE_GLOBAL_TTL_MS, "https://7tv.io/v3/emote-sets/global", global_mode),
@@ -659,47 +675,42 @@ pub fn merge_emote_sets(seven: &ProviderScopedMap, bttv: &ProviderScopedMap, ffz
 
 // ---- Twitch picker emotes -----------------------------------------------------------------------
 
-/// The 7TV personal emote set of the ACTING user; best effort, any missing step yields nothing.
-pub async fn fetch_seven_tv_personal(client: &reqwest::Client, twitch_user_id: &str) -> Vec<Arc<ProviderEmote>> {
-    async fn go(client: &reqwest::Client, uid: &str) -> Option<Vec<Arc<ProviderEmote>>> {
+/// The 7TV personal emote set of the ACTING user; best effort, any missing step yields nothing. `fresh` goes past
+/// the cache at every step (the user asked to reload emotes).
+pub async fn fetch_seven_tv_personal(client: &reqwest::Client, twitch_user_id: &str, fresh: bool) -> Vec<Arc<ProviderEmote>> {
+    async fn go(client: &reqwest::Client, uid: &str, fresh: bool) -> Option<Vec<Arc<ProviderEmote>>> {
         cache_ready().await;
         let id_key = format!("emotes:7tv:personal-id:{uid}");
-        let seven_id = match read_cache(&id_key, EMOTE_GLOBAL_TTL_MS) {
-            Some(v) => v.as_str().unwrap_or("").to_string(),
-            None => {
-                let r = client.get(format!("https://7tv.io/v3/users/twitch/{uid}")).send().await.ok()?;
-                if !r.status().is_success() {
-                    return None;
-                }
-                let d: Value = r.json().await.ok()?;
-                let id = d.pointer("/user/id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                write_cache(&id_key, &json!(id));
-                id
+        let seven_id = cached_or(&id_key, EMOTE_GLOBAL_TTL_MS, fresh, async {
+            let r = client.get(format!("https://7tv.io/v3/users/twitch/{uid}")).send().await.ok()?;
+            if !r.status().is_success() {
+                return None;
             }
-        };
+            let d: Value = r.json().await.ok()?;
+            Some(json!(d.pointer("/user/id").and_then(|v| v.as_str()).unwrap_or("")))
+        })
+        .await?;
+        let seven_id = seven_id.as_str().unwrap_or("").to_string();
         if seven_id.is_empty() {
             return None;
         }
         let set_key = format!("emotes:7tv:personal-set:{seven_id}");
-        let set_id = match read_cache(&set_key, EMOTE_GLOBAL_TTL_MS) {
-            Some(v) => v.as_str().unwrap_or("").to_string(),
-            None => {
-                let r = client.get(format!("https://7tv.io/v3/users/{seven_id}")).send().await.ok()?;
-                if !r.status().is_success() {
-                    return None;
-                }
-                let d: Value = r.json().await.ok()?;
-                let id = personal_set_id(&d).unwrap_or_default();
-                write_cache(&set_key, &json!(id));
-                id
+        let set_id = cached_or(&set_key, EMOTE_GLOBAL_TTL_MS, fresh, async {
+            let r = client.get(format!("https://7tv.io/v3/users/{seven_id}")).send().await.ok()?;
+            if !r.status().is_success() {
+                return None;
             }
-        };
+            let d: Value = r.json().await.ok()?;
+            Some(json!(personal_set_id(&d).unwrap_or_default()))
+        })
+        .await?;
+        let set_id = set_id.as_str().unwrap_or("").to_string();
         if set_id.is_empty() {
             return None;
         }
-        Some(fetch_seven_tv_personal_set(client, &set_id).await?.into_values().collect())
+        Some(fetch_seven_tv_personal_set(client, &set_id, fresh).await?.into_values().collect())
     }
-    go(client, twitch_user_id).await.unwrap_or_default()
+    go(client, twitch_user_id, fresh).await.unwrap_or_default()
 }
 
 /// Picker / autocomplete ONLY - never merged into the message-rendering map; incoming messages already carry
@@ -729,20 +740,20 @@ fn picker_json(r: &TwitchEmotesResp) -> Value {
     json!({"channel": l(&r.channel), "global": l(&r.global), "other": l(&r.other)})
 }
 
-/// fetchTwitchPickerEmotes: the relay's `/api/chat/twitch-emotes` (cached like the site, 6 h).
-pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol::AguBridge>, source: &agu_chat_core::protocol::SourceRef, channel_id: &str) -> TwitchEmotesResp {
+/// fetchTwitchPickerEmotes: the relay's `/api/chat/twitch-emotes` (cached like the site, 6 h). `fresh` asks the
+/// relay again past the cache, keeping the cached answer if that fails.
+pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol::AguBridge>, source: &agu_chat_core::protocol::SourceRef, channel_id: &str, fresh: bool) -> TwitchEmotesResp {
     let key = format!("emotes:twitch:channel:{channel_id}");
     cache_ready().await;
-    if let Some(c) = read_cache(&key, EMOTE_GLOBAL_TTL_MS) {
-        return TwitchEmotesResp { channel: picker_list(c.get("channel")), global: picker_list(c.get("global")), other: picker_list(c.get("other")) };
+    let got = cached_or(&key, EMOTE_GLOBAL_TTL_MS, fresh, async {
+        let r = crate::chat::mod_caps::relay_api(bridge, source, "/api/chat/twitch-emotes", None, None).await;
+        r.ok.then(|| picker_json(&TwitchEmotesResp { channel: picker_list(r.body.get("channel")), global: picker_list(r.body.get("global")), other: picker_list(r.body.get("other")) }))
+    })
+    .await;
+    match got {
+        Some(c) => TwitchEmotesResp { channel: picker_list(c.get("channel")), global: picker_list(c.get("global")), other: picker_list(c.get("other")) },
+        None => TwitchEmotesResp::default(),
     }
-    let r = crate::chat::mod_caps::relay_api(bridge, source, "/api/chat/twitch-emotes", None, None).await;
-    if !r.ok {
-        return TwitchEmotesResp::default();
-    }
-    let resp = TwitchEmotesResp { channel: picker_list(r.body.get("channel")), global: picker_list(r.body.get("global")), other: picker_list(r.body.get("other")) };
-    write_cache(&key, &picker_json(&resp));
-    resp
 }
 
 

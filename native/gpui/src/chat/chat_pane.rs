@@ -188,6 +188,8 @@ pub struct ChatPane {
     /// per Kick source: `kick_seven` with the settings applied, what its rows render against
     pub(super) kick_emotes: HashMap<String, Arc<EmoteSets>>,
     requested: HashSet<String>,
+    /// "Reload emotes" in progress: (loads still out, whether one came back without everything)
+    reload: Option<(usize, bool)>,
     /// the 7TV EventAPI subscriptions this pane holds, per Twitch or Kick source
     seven_subs: HashMap<String, SevenTvIds>,
     seven_seq: u64,
@@ -460,6 +462,7 @@ impl ChatPane {
             kick_seven: HashMap::new(),
             kick_emotes: HashMap::new(),
             requested: HashSet::new(),
+            reload: None,
             seven_subs: HashMap::new(),
             seven_seq: 0,
             scroll_held: false,
@@ -863,7 +866,7 @@ impl ChatPane {
     fn start_loads(&mut self, cx: &mut Context<Self>) {
         let sks: Vec<(String, SourceRef, Option<String>)> = self.store.sources.iter().map(|s| (s.sk.clone(), s.source.clone(), s.channel_id.clone())).collect();
         let acct = format!("{}:{}", self.accounts.get(&Platform::Twitch).map(|a| a.connected).unwrap_or(false), self.me_id());
-        self.load_personal(cx);
+        self.load_personal(false, cx);
         for (sk, source, channel_id) in sks {
             match source.platform {
                 Platform::Twitch => {
@@ -910,25 +913,17 @@ impl ChatPane {
                         .detach();
                     }
                     if !whisper && self.requested.insert(format!("pickeremotes:{sk}:{}", channel_id.clone().unwrap_or_default())) {
-                        let (bridge, s2, sk2, cid) = (self.bridge.clone(), source.clone(), sk.clone(), channel_id.clone().unwrap_or_else(|| sk.clone()));
-                        cx.spawn(async move |this, cx| {
-                            let r = super::twitch::emotes::fetch_twitch_picker_emotes(&bridge, &s2, &cid).await;
-                            let _ = this.update(cx, |p, cx| {
-                                p.twitch.entry(sk2).or_default().twitch_emotes = r;
-                                p.data_changed(cx);
-                            });
-                        })
-                        .detach();
+                        self.load_picker_emotes(sk.clone(), source.clone(), channel_id.clone().unwrap_or_else(|| sk.clone()), false, cx);
                     }
                     if let Some(cid) = channel_id {
                         if self.requested.insert(format!("emotes:{sk}:{cid}")) {
-                            self.load_emote_sets(sk.clone(), cid, 0, cx);
+                            self.load_emote_sets(sk.clone(), cid, 0, false, cx);
                         }
                     }
                 }
                 Platform::Rumble | Platform::Kick => {
                     if source.platform == Platform::Kick {
-                        self.load_kick_seven(&sk, cx);
+                        self.load_kick_seven(&sk, false, cx);
                     }
                     let key = format!("cocaps:{sk}:{}{}", self.accounts.get(&Platform::Rumble).map(|a| a.connected as u8).unwrap_or(0), self.accounts.get(&Platform::Kick).map(|a| a.connected as u8).unwrap_or(0));
                     if self.requested.insert(key) {
@@ -979,21 +974,26 @@ impl ChatPane {
         self.twitch.get_mut(sk).and_then(|d| d.provider_sets.as_mut())
     }
 
-    /// A Kick source's 7TV emotes, once its broadcaster's user id is known.
-    fn load_kick_seven(&mut self, sk: &str, cx: &mut Context<Self>) {
+    /// A Kick source's 7TV emotes, once its broadcaster's user id is known. `reload`: again past the cache, part of
+    /// "Reload emotes".
+    fn load_kick_seven(&mut self, sk: &str, reload: bool, cx: &mut Context<Self>) {
         let Some(uid) = self.kick_user_id(sk) else { return };
-        if !self.requested.insert(format!("kick7tv:{sk}:{uid}")) {
+        if !self.requested.insert(format!("kick7tv:{sk}:{uid}")) && !reload {
             return;
         }
         let sk2 = sk.to_string();
-        let task = self.svc.net.run(load_kick_provider_sets(self.svc.net.client.clone(), uid));
+        let task = self.svc.net.run(load_kick_provider_sets(self.svc.net.client.clone(), uid, reload));
+        self.reload_begin(reload);
         cx.spawn(async move |this, cx| {
-            if let Some(sets) = task.await {
-                let _ = this.update(cx, |p, cx| {
+            let sets = task.await;
+            let _ = this.update(cx, |p, cx| {
+                let ok = sets.is_some();
+                if let Some(sets) = sets {
                     p.kick_seven.insert(sk2, Arc::new(sets));
                     p.data_changed(cx);
-                });
-            }
+                }
+                p.reload_end(reload, ok, cx);
+            });
         })
         .detach();
     }
@@ -1001,11 +1001,12 @@ impl ChatPane {
     /// A Twitch channel's 7TV / BTTV / FFZ sets. The first try shows what is cached at once (however old) while the
     /// network refreshes it; a refresh that did not get everything (a provider down or slow at startup) is tried
     /// again with growing waits. Each arrival rebuilds the rows already in the list, so lines that came in before
-    /// the sets get their emotes too.
-    fn load_emote_sets(&mut self, sk: String, cid: String, attempt: u32, cx: &mut Context<Self>) {
+    /// the sets get their emotes too. `reload` ("Reload emotes") skips the cache, the global sets' too.
+    fn load_emote_sets(&mut self, sk: String, cid: String, attempt: u32, reload: bool, cx: &mut Context<Self>) {
         let client = self.svc.net.client.clone();
-        let cached = (attempt == 0).then(|| self.svc.net.run(load_cached_provider_sets(client.clone(), cid.clone())));
-        let task = self.svc.net.run(load_provider_sets(client, cid.clone()));
+        let cached = (attempt == 0 && !reload).then(|| self.svc.net.run(load_cached_provider_sets(client.clone(), cid.clone())));
+        let task = self.svc.net.run(load_provider_sets(client, cid.clone(), reload));
+        self.reload_begin(reload);
         cx.spawn(async move |this, cx| {
             let same_channel = |p: &ChatPane| p.store.source(&sk).and_then(|s| s.channel_id.as_deref()) == Some(cid.as_str());
             if let Some(cached) = cached {
@@ -1018,17 +1019,22 @@ impl ChatPane {
                     });
                 }
             }
-            let Some((sets, complete)) = task.await else { return };
-            let applied = this
+            let got = task.await;
+            let (applied, complete) = this
                 .update(cx, |p, cx| {
-                    if !same_channel(p) {
-                        return false;
+                    let Some((sets, complete)) = got else {
+                        p.reload_end(reload, false, cx);
+                        return (false, false);
+                    };
+                    let applied = same_channel(p);
+                    if applied {
+                        p.twitch.entry(sk.clone()).or_default().provider_sets = Some(Arc::new(sets));
+                        p.data_changed(cx);
                     }
-                    p.twitch.entry(sk.clone()).or_default().provider_sets = Some(Arc::new(sets));
-                    p.data_changed(cx);
-                    true
+                    p.reload_end(reload, complete || !applied, cx);
+                    (applied, complete)
                 })
-                .unwrap_or(false);
+                .unwrap_or((false, false));
             if complete || !applied {
                 return;
             }
@@ -1036,34 +1042,111 @@ impl ChatPane {
             cx.background_executor().timer(wait).await;
             let _ = this.update(cx, |p, cx| {
                 if same_channel(p) {
-                    p.load_emote_sets(sk.clone(), cid.clone(), attempt + 1, cx);
+                    p.load_emote_sets(sk.clone(), cid.clone(), attempt + 1, false, cx);
                 }
             });
         })
         .detach();
     }
 
-    /// The acting account's 7TV personal set, loaded once per account.
-    fn load_personal(&mut self, cx: &mut Context<Self>) {
+    /// The acting account's 7TV personal set, loaded once per account (and again past the cache on `reload`).
+    fn load_personal(&mut self, reload: bool, cx: &mut Context<Self>) {
         let id = self.me_id();
-        if id.is_empty() || !self.requested.insert(format!("personal:{id}")) {
+        if id.is_empty() || (!self.requested.insert(format!("personal:{id}")) && !reload) {
             return;
         }
         let owner = id.clone();
         let task = self.svc.net.run({
             let client = self.svc.net.client.clone();
-            async move { super::twitch::emotes::fetch_seven_tv_personal(&client, &id).await }
+            async move { super::twitch::emotes::fetch_seven_tv_personal(&client, &id, reload).await }
         });
+        self.reload_begin(reload);
         cx.spawn(async move |this, cx| {
-            if let Some(list) = task.await {
-                let _ = this.update(cx, |p, cx| {
+            let list = task.await;
+            let _ = this.update(cx, |p, cx| {
+                let ok = list.is_some();
+                if let Some(list) = list {
                     p.personal = list;
                     p.personal_owner = owner;
                     p.data_changed(cx);
-                });
-            }
+                }
+                p.reload_end(reload, ok, cx);
+            });
         })
         .detach();
+    }
+
+    /// Twitch's own emotes of a channel for the picker / autocomplete (`reload`: past the cache).
+    fn load_picker_emotes(&mut self, sk: String, source: SourceRef, cid: String, reload: bool, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        self.reload_begin(reload);
+        cx.spawn(async move |this, cx| {
+            let r = super::twitch::emotes::fetch_twitch_picker_emotes(&bridge, &source, &cid, reload).await;
+            let _ = this.update(cx, |p, cx| {
+                p.twitch.entry(sk).or_default().twitch_emotes = r;
+                p.data_changed(cx);
+                p.reload_end(reload, true, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// "Reload emotes" (the split's ⋯ menu): every emote set this split's sources draw with, fetched again past the
+    /// disk cache: Twitch's own (picker) emotes, the 7TV / BTTV / FFZ channel and global sets, the account's 7TV
+    /// personal set, and a Kick channel's 7TV set. Images that failed to load are tried again at once. Rows rebuild
+    /// as each set arrives; a toast says when all are back. Kick / Rumble / YouTube's own sets come with the chat
+    /// connection and are not refetched here.
+    pub fn reload_emotes(&mut self, cx: &mut Context<Self>) {
+        if self.reload.is_some() {
+            return; // already on its way
+        }
+        // one held for this call, so loads that finish at once can't end it early
+        self.reload = Some((1, false));
+        self.toast("Reloading emotes\u{2026}", false, cx);
+        self.svc.images.0.retry_failed();
+        self.load_personal(true, cx);
+        let sources: Vec<(String, SourceRef, Option<String>)> = self.store.sources.iter().map(|s| (s.sk.clone(), s.source.clone(), s.channel_id.clone())).collect();
+        for (sk, source, channel_id) in sources {
+            match source.platform {
+                Platform::Twitch if !is_whisper(&source) => {
+                    self.requested.insert(format!("pickeremotes:{sk}:{}", channel_id.clone().unwrap_or_default()));
+                    self.load_picker_emotes(sk.clone(), source, channel_id.clone().unwrap_or_else(|| sk.clone()), true, cx);
+                    if let Some(cid) = channel_id {
+                        self.requested.insert(format!("emotes:{sk}:{cid}"));
+                        self.load_emote_sets(sk, cid, 0, true, cx);
+                    }
+                }
+                Platform::Kick => self.load_kick_seven(&sk, true, cx),
+                _ => {}
+            }
+        }
+        // rows drawn again, so failed images are asked for again
+        self.data_changed(cx);
+        self.reload_end(true, true, cx);
+    }
+
+    /// A load that is part of "Reload emotes" started.
+    fn reload_begin(&mut self, reload: bool) {
+        if let (true, Some((n, _))) = (reload, self.reload.as_mut()) {
+            *n += 1;
+        }
+    }
+
+    /// A load that is part of "Reload emotes" ended (`ok`: it got everything); the last one says so.
+    fn reload_end(&mut self, reload: bool, ok: bool, cx: &mut Context<Self>) {
+        let Some((n, missed)) = self.reload.as_mut().filter(|_| reload) else { return };
+        *n = n.saturating_sub(1);
+        *missed |= !ok;
+        if *n > 0 {
+            return;
+        }
+        let missed = *missed;
+        self.reload = None;
+        if missed {
+            self.toast("Some emote sets did not load; trying again", true, cx);
+        } else {
+            self.toast("Emotes reloaded", false, cx);
+        }
     }
 
     /// Display names newest-first for the given source keys (read lazily: only when "@" or Tab is used).

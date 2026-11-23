@@ -123,6 +123,11 @@ impl Images {
         matches!(self.cache.borrow().peek(url), Some(State::Failed))
     }
 
+    /// Every failed image is fetched again the next time it is drawn ("Reload emotes").
+    pub fn retry_failed(&self) -> usize {
+        self.cache.borrow_mut().retry_failed()
+    }
+
     /// Hand finished decodes to the GPU side; returns whether more are waiting.
     pub fn pump(&self) -> bool {
         let mut loaded: Vec<String> = Vec::new();

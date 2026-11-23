@@ -18,7 +18,7 @@ use gpui::{
 use crate::icons;
 use crate::layout::app::{AguApp, DragGhost, Dialog, SourcesDrag, SplitDrag};
 use crate::layout::hotkeys::{hotkey_hint, HotkeyAction};
-use crate::layout::tree::{is_whisper, short_name, source_key, Edge, Leaf};
+use crate::layout::tree::{is_whisper, short_name, source_key, Leaf};
 use crate::layout::ui::{tip, MenuEntry, MenuItem};
 use crate::theme::{self, c};
 
@@ -154,7 +154,7 @@ impl AguApp {
                 let pulsing = !connected && idxs.iter().any(|&i| state_of(rows[i].1.as_ref()) == "connecting");
                 let keys: Vec<String> = idxs.iter().map(|&i| source_key(&rows[i].0)).collect();
                 let names = idxs.iter().map(|&i| short_name(&rows[i].0)).collect::<Vec<_>>().join(", ");
-                let tooltip = idxs.iter().map(|&i| dot_tip(i)).chain(std::iter::once("Click to split out, or drag onto a split edge".to_string())).collect::<Vec<_>>().join("\n");
+                let tooltip = idxs.iter().map(|&i| dot_tip(i)).chain(std::iter::once("Click to split out or open the stream, or drag onto a split edge".to_string())).collect::<Vec<_>>().join("\n");
                 let multi = idxs.len() > 1;
                 let platform = *platform;
                 let chip_key = format!("chip:{leaf_id}:{}", platform.as_str());
@@ -346,19 +346,21 @@ impl AguApp {
         for s in &srcs {
             let key = source_key(s);
             let (t1, l1, k1) = (tab_id.to_string(), leaf_id.to_string(), key.clone());
-            let (t2, l2, k2) = (t1.clone(), l1.clone(), key.clone());
             let (t3, l3, k3) = (t1.clone(), l1.clone(), key.clone());
             out.push(MenuEntry::Heading(format!("{}: {}", icons::platform_label(s.platform), short_name(s))));
-            out.push(MenuEntry::Item(MenuItem::new("Split out to the right", move |this, _w, cx| this.split_out(&t1, &l1, std::slice::from_ref(&k1), &l1.clone(), Edge::Right, cx))));
-            out.push(MenuEntry::Item(MenuItem::new("Split out below", move |this, _w, cx| this.split_out(&t2, &l2, std::slice::from_ref(&k2), &l2.clone(), Edge::Bottom, cx))));
+            // where it goes is picked on the splits, with the overlay a drag shows
+            out.push(MenuEntry::Item(MenuItem::new("Split out\u{2026}", move |this, _w, cx| this.start_pick(&t1, &l1, vec![k1.clone()], cx))));
+            if let Some(url) = stream_url(s) {
+                out.push(MenuEntry::Item(MenuItem::new("Stream link", move |this, _w, _cx| this.bridge.open_external(url.clone()))));
+            }
             out.push(MenuEntry::Item(MenuItem::new("Remove from this split", move |this, _w, cx| this.remove_source(&t3, &l3, &k3, cx)).danger()));
         }
         if srcs.len() > 1 {
             let keys: Vec<String> = srcs.iter().map(|s| source_key(s)).collect();
             let (t, l) = (tab_id.to_string(), leaf_id.to_string());
             out.push(MenuEntry::Sep);
-            out.push(MenuEntry::Item(MenuItem::new(format!("Split all {} {} out to the right", srcs.len(), icons::platform_label(platform)), move |this, _w, cx| {
-                this.split_out(&t, &l, &keys, &l.clone(), Edge::Right, cx)
+            out.push(MenuEntry::Item(MenuItem::new(format!("Split all {} {} out\u{2026}", srcs.len(), icons::platform_label(platform)), move |this, _w, cx| {
+                this.start_pick(&t, &l, keys.clone(), cx)
             })));
         }
         out
@@ -370,13 +372,48 @@ impl AguApp {
         let (t1, l1) = (t0.clone(), l0.clone());
         let (t2, l2) = (t0.clone(), l0.clone());
         let (t3, l3) = (t0.clone(), l0.clone());
+        let l4 = l0.clone();
         vec![
             MenuEntry::Item(MenuItem::new("Change channel(s)\u{2026}", move |this, w, cx| this.open_dialog(Dialog::Change { tab_id: t0.clone(), leaf_id: l0.clone() }, w, cx))),
             MenuEntry::Item(MenuItem::new("Add split right", move |this, w, cx| this.open_dialog(Dialog::Split { tab_id: t1.clone(), leaf_id: l1.clone(), below: false }, w, cx))),
             MenuEntry::Item(MenuItem::new("Add split below", move |this, w, cx| this.open_dialog(Dialog::Split { tab_id: t2.clone(), leaf_id: l2.clone(), below: true }, w, cx))),
             MenuEntry::Sep,
+            MenuEntry::Item(MenuItem::new("Reload emotes", move |this, _w, cx| this.reload_emotes(&l4, cx))),
+            MenuEntry::Sep,
             MenuEntry::Item(MenuItem::new("Close split", move |this, _w, cx| this.close_leaf(&t3, &l3, cx)).hint(close_key).danger()),
         ]
+    }
+}
+
+/// The page a source's stream plays on, for "Stream link"; None for a whisper conversation (no stream) or a channel
+/// that does not parse. Built from the same parsers the platforms normalise channels with.
+pub fn stream_url(s: &SourceRef) -> Option<String> {
+    use agu_chat_core::{kick::vendor::kick::parse_kick_source, rumble::vendor::rumble::parse_rumble_source, youtube::vendor::youtube::parse_youtube_source};
+    let ch = s.channel.trim();
+    match s.platform {
+        Platform::Twitch => {
+            if is_whisper(s) {
+                return None;
+            }
+            let login = if ch.to_lowercase().contains("twitch.tv/") { ch.split(['?', '#']).next().unwrap_or("").trim_end_matches('/').rsplit('/').next().unwrap_or("") } else { ch };
+            let login = login.trim_start_matches(['#', '@']).to_lowercase();
+            let ok = (1..=25).contains(&login.len()) && login.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            ok.then(|| format!("https://www.twitch.tv/{login}"))
+        }
+        Platform::Kick => parse_kick_source(ch).map(|slug| format!("https://kick.com/{slug}")),
+        Platform::Youtube => parse_youtube_source(ch).map(|y| match y.kind {
+            "video" => format!("https://www.youtube.com/watch?v={}", y.id),
+            "channel" => format!("https://www.youtube.com/channel/{}/live", y.id),
+            _ => format!("https://www.youtube.com/{}/live", y.id), // a handle: "@name"
+        }),
+        Platform::Rumble => parse_rumble_source(ch).map(|r| match r.space {
+            Some(space) => format!("https://rumble.com/{space}/{}", r.id),
+            None => format!("https://rumble.com/embed/{}/", r.id), // a video id
+        }),
+        Platform::X => agu_chat_core::x::normalize_channel(ch).ok().map(|h| match h.strip_prefix("broadcast:") {
+            Some(id) => format!("https://x.com/i/broadcasts/{id}"),
+            None => format!("https://x.com/{h}"),
+        }),
     }
 }
 
@@ -411,6 +448,39 @@ mod tests {
         // a platform that does not say: no dot
         assert!(!is_live(Some(&conn(serde_json::json!({"state": "open"})))));
         assert!(!is_live(None));
+    }
+
+    #[test]
+    fn stream_urls() {
+        let u = |platform: Platform, channel: &str| stream_url(&SourceRef { platform, channel: channel.into() });
+        // Twitch: the login, from whatever was typed
+        assert_eq!(u(Platform::Twitch, "esfandtv").as_deref(), Some("https://www.twitch.tv/esfandtv"));
+        assert_eq!(u(Platform::Twitch, "#EsfandTV").as_deref(), Some("https://www.twitch.tv/esfandtv"));
+        assert_eq!(u(Platform::Twitch, "https://www.twitch.tv/EsfandTV/").as_deref(), Some("https://www.twitch.tv/esfandtv"));
+        // a whisper conversation has no stream
+        let whisper = agu_chat_core::twitch::whisper::channel_for("bob");
+        assert!(is_whisper(&SourceRef { platform: Platform::Twitch, channel: whisper.clone() }));
+        assert_eq!(u(Platform::Twitch, &whisper), None);
+        assert_eq!(u(Platform::Twitch, "has space"), None);
+        // Kick: the slug as its URL spells it
+        assert_eq!(u(Platform::Kick, "some_user").as_deref(), Some("https://kick.com/some-user"));
+        assert_eq!(u(Platform::Kick, "https://kick.com/Foo").as_deref(), Some("https://kick.com/foo"));
+        // YouTube: a handle's or a channel id's live page, a pinned video's watch page
+        assert_eq!(u(Platform::Youtube, "@esfandtv").as_deref(), Some("https://www.youtube.com/@esfandtv/live"));
+        assert_eq!(u(Platform::Youtube, "lofigirl").as_deref(), Some("https://www.youtube.com/@lofigirl/live"));
+        assert_eq!(u(Platform::Youtube, "UCSJ4gkVC6NrvII8umztf0Ow").as_deref(), Some("https://www.youtube.com/channel/UCSJ4gkVC6NrvII8umztf0Ow/live"));
+        assert_eq!(u(Platform::Youtube, "https://www.youtube.com/watch?v=jfKfPfyJRdk").as_deref(), Some("https://www.youtube.com/watch?v=jfKfPfyJRdk"));
+        assert_eq!(u(Platform::Youtube, ""), None);
+        // Rumble: the channel page in its namespace, or a video's player
+        assert_eq!(u(Platform::Rumble, "c/foo").as_deref(), Some("https://rumble.com/c/foo"));
+        assert_eq!(u(Platform::Rumble, "user/foobar").as_deref(), Some("https://rumble.com/user/foobar"));
+        assert_eq!(u(Platform::Rumble, "Foo").as_deref(), Some("https://rumble.com/c/Foo"));
+        assert_eq!(u(Platform::Rumble, "v7capuk").as_deref(), Some("https://rumble.com/embed/v7capuk/"));
+        // X: the profile, or a broadcast
+        assert_eq!(u(Platform::X, "esfandtv").as_deref(), Some("https://x.com/esfandtv"));
+        assert_eq!(u(Platform::X, "@EsfandTV").as_deref(), Some("https://x.com/esfandtv"));
+        assert_eq!(u(Platform::X, "broadcast:1DGleVdEapOJL").as_deref(), Some("https://x.com/i/broadcasts/1DGleVdEapOJL"));
+        assert_eq!(u(Platform::X, ""), None);
     }
 
     #[test]

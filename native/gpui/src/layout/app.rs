@@ -726,6 +726,13 @@ impl AguApp {
         });
     }
 
+    /// "Reload emotes" in a split's ⋯ menu: its chat fetches every emote set of its channels again.
+    pub fn reload_emotes(&mut self, leaf_id: &str, cx: &mut Context<Self>) {
+        if let Some(v) = self.panes.get(leaf_id).map(|s| s.view.clone()) {
+            v.update(cx, |p, cx| p.reload_emotes(cx));
+        }
+    }
+
     /// Another tab dragged onto this one's splits: its whole layout goes in at that edge, and the tab closes.
     pub fn take_tab(&mut self, tab_id: &str, src_tab_id: &str, target_id: Option<&str>, edge: Edge, cx: &mut Context<Self>) {
         self.fit_edge = target_id.map(|_| edge);
@@ -880,6 +887,12 @@ impl AguApp {
             cx.stop_propagation();
         };
         if ks.key == "escape" {
+            // "Split out…" waiting for a spot: Escape takes it back
+            if self.sv.pick.is_some() {
+                self.cancel_pick(cx);
+                stop(window, cx);
+                return;
+            }
             // the Mentions panel is on top of everything but menus and dialogs: it closes first
             if self.mentions_open && self.menu.is_none() && self.dialog.is_none() {
                 self.close_mentions(cx);
@@ -1332,6 +1345,8 @@ impl Render for AguApp {
                     slot.view.update(cx, |p, cx| p.set_alt(alt, cx));
                 }
             }))
+            // "Split out…": a press anywhere but a split's zones (they keep it from the root) takes the pick back
+            .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, _w, cx| this.cancel_pick(cx)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _w, cx| this.on_root_mouse_move(ev, cx)))
             .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _w, cx| this.on_root_mouse_up(ev, cx)))
             .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _w, cx| this.on_root_mouse_up(ev, cx)))

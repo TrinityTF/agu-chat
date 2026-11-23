@@ -178,7 +178,7 @@ async fn fetch_chatter_style(client: &reqwest::Client, key: &str) -> Option<Opti
     let d: Value = r.json().await.ok()?;
     let Some((mut style, personal_set)) = style_from_user(&d) else { return Some(None) };
     if let Some(set_id) = personal_set {
-        let emotes = fetch_seven_tv_personal_set(client, &set_id).await?;
+        let emotes = fetch_seven_tv_personal_set(client, &set_id, false).await?;
         style.personal = (!emotes.is_empty()).then(|| Arc::new(emotes));
     }
     Some(Some(style))

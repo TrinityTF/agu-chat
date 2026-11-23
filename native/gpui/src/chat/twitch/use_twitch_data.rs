@@ -14,7 +14,7 @@ use agu_chat_core::protocol::{AguBridge, SourceRef};
 use serde_json::Value;
 
 use super::badges::{build_badge_map, BadgeMap};
-use super::emotes::{bttv_sets, fetch_seven_tv_on, ffz_sets, flush_cache, seven_tv_sets, twitch_sets_cached, twitch_sets_fresh, CacheMode, ProviderScopedMap, SevenTvIds, SevenTvPlatform, TwitchEmotesResp};
+use super::emotes::{bttv_sets, fetch_seven_tv_on, ffz_sets, flush_cache, seven_tv_sets, seven_tv_sets_on, twitch_sets_cached, twitch_sets_fresh, CacheMode, ProviderScopedMap, SevenTvIds, SevenTvPlatform, TwitchEmotesResp};
 use crate::chat::mod_caps::{relay_api, ModCaps};
 
 #[derive(Clone, Default)]
@@ -68,16 +68,19 @@ async fn provider_sets(client: &reqwest::Client, channel_id: &str, mode: CacheMo
 
 /// A Kick channel's emotes beyond Kick's own: the 7TV set linked to the broadcaster's Kick account (`kick_user_id`, the
 /// user id, not the channel id) plus 7TV global, what kick.com shows with the 7TV extension. Kick has no BTTV or FFZ.
-pub async fn load_kick_provider_sets(client: reqwest::Client, kick_user_id: String) -> ProviderSets {
-    let (seven, seven_ids) = fetch_seven_tv_on(&client, SevenTvPlatform::Kick, &kick_user_id, false).await;
+/// `reload` goes past the cache for both (the user asked to reload emotes).
+pub async fn load_kick_provider_sets(client: reqwest::Client, kick_user_id: String, reload: bool) -> ProviderSets {
+    let mode = if reload { CacheMode::Reload } else { CacheMode::Normal };
+    let (seven, seven_ids) = seven_tv_sets_on(&client, SevenTvPlatform::Kick, &kick_user_id, mode).await;
     flush_cache();
     ProviderSets { seven, seven_ids, ..Default::default() }
 }
 
 /// 7TV + BTTV + FFZ, kept raw per provider so the pane can apply settings.sevenTv/bttv/ffz. The flag is false when
-/// some provider did not answer (what it had before is kept): the pane tries again later.
-pub async fn load_provider_sets(client: reqwest::Client, channel_id: String) -> (ProviderSets, bool) {
-    let sets = provider_sets(&client, &channel_id, CacheMode::Normal).await;
+/// some provider did not answer (what it had before is kept): the pane tries again later. `reload` goes past the
+/// cache for every set, the global ones too (the user asked to reload emotes).
+pub async fn load_provider_sets(client: reqwest::Client, channel_id: String, reload: bool) -> (ProviderSets, bool) {
+    let sets = provider_sets(&client, &channel_id, if reload { CacheMode::Reload } else { CacheMode::Normal }).await;
     flush_cache();
     (sets, twitch_sets_fresh(&channel_id))
 }
