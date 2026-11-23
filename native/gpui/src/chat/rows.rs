@@ -1583,6 +1583,9 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
     if let Some(p) = paid {
         return super_chat_row(row, m, p, rs);
     }
+    if m.notice.as_deref() == Some("membership") {
+        return member_row(row, m, ctx, env, rule);
+    }
     let can_mod = youtube_can_mod(m, env);
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
@@ -1682,6 +1685,53 @@ fn super_chat_row(row: &Row, m: &YouTubeMsg, p: &YouTubePaid, rs: &Settings) -> 
         bar: colour,
         reply: Some(user),
         line: None,
+    })
+}
+
+/// A new member or a membership milestone, drawn like a Twitch sub: a star, the name on its own line, YouTube's
+/// sentence ("New member", "Member for 12 months · Knight"), and a milestone's message as the member's own chat
+/// line under it (badges, a name that opens the card, mod buttons).
+fn member_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<&HighlightRule>) -> BuiltRow {
+    let base = ctx.rs.font_size;
+    let name = if m.user.name.is_empty() { "unknown".to_string() } else { m.user.name.clone() };
+    let user = CardUser { id: m.user.id.clone(), login: String::new(), name: name.clone(), avatar: m.user.avatar.clone() };
+    let mut h = Flow::new(base);
+    h.push(Item::Text(TextItem::new(name, base, token(0x2ba640)).weight(FontWeight::BOLD)));
+    let member = m.member.clone().unwrap_or_default();
+    // rows from before `member` existed carried the sub line as their text
+    let has_message = m.member.is_some() && member.has_message && !m.parts.is_empty();
+    let sub = if m.member.is_some() { member.sub.clone() } else { m.text.clone() };
+    let mut sys = Flow::new(base);
+    if !member.header.is_empty() {
+        sys.push(Item::Text(TextItem::new(member.header.clone(), base, token(theme::TEXT)).weight(FontWeight::BOLD)));
+        if !sub.is_empty() {
+            sys.push(Item::Text(TextItem::new(format!(" · {sub}"), base, token(theme::TEXT))));
+        }
+    } else {
+        sys.push(Item::Text(TextItem::new(if sub.is_empty() { "New member".to_string() } else { sub }, base, token(theme::TEXT)).weight(FontWeight::BOLD)));
+    }
+    let line = if has_message {
+        let plain = YouTubeMsg { notice: None, member: None, ..m.clone() };
+        match youtube_row(row, &plain, ctx, env, rule) {
+            BuiltRow::Frame(mut f) => {
+                f.alt = false;
+                Some(f)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    BuiltRow::Notice(NoticeSpec {
+        system: sys.finish(),
+        text: None,
+        raid: false,
+        icon: Some((crate::icons::STAR, 16.0)),
+        head: Some(h.finish()),
+        card: Some((row.sk.clone(), user)),
+        bar: None,
+        reply: None,
+        line,
     })
 }
 

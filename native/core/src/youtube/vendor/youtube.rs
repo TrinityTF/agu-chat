@@ -607,7 +607,28 @@ pub fn to_youtube_chat_msg(action: &Value) -> Option<Value> {
         } else { Value::Null },
         // New members and milestones render as notices rather than chat lines.
         "notice": if truthy(member) { json!("membership") } else { Value::Null },
+        // a membership's own lines: "Member for 12 months" (a milestone) and the sub line ("New member",
+        // "Welcome to X!", or the level's name); the member's message, if any, is `parts`
+        "member": if truthy(member) {
+            json!({"header": plain_text(&member["headerPrimaryText"]), "sub": plain_text(&member["headerSubtext"]), "hasMessage": truthy(&member["message"])})
+        } else { Value::Null },
     }))
+}
+
+/// A YouTube text object as plain text: `simpleText`, or its runs joined (emojis as their shortcut).
+fn plain_text(v: &Value) -> String {
+    if let Some(s) = v["simpleText"].as_str() {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for run in v["runs"].as_array().into_iter().flatten() {
+        if let Some(t) = run["text"].as_str() {
+            out.push_str(t);
+        } else if let Some(sc) = run["emoji"]["shortcuts"][0].as_str() {
+            out.push_str(sc);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -824,6 +845,10 @@ mod tests {
         assert_eq!(paid["paid"], json!({"amount": "$5.00", "bg": "rgba(0, 229, 255, 1.000)", "headerBg": "rgba(0, 184, 212, 1.000)", "sticker": false}));
         let member = to_youtube_chat_msg(&json!({"addChatItemAction": {"item": {"liveChatMembershipItemRenderer": {"id": "g", "headerSubtext": {"runs": [{"text": "Welcome"}]}}}}})).unwrap();
         assert_eq!((&member["notice"], &member["text"]), (&json!("membership"), &json!("Welcome")));
+        assert_eq!(member["member"], json!({"header": "", "sub": "Welcome", "hasMessage": false}));
+        let milestone = to_youtube_chat_msg(&json!({"addChatItemAction": {"item": {"liveChatMembershipItemRenderer": {"id": "h", "headerPrimaryText": {"runs": [{"text": "Member for "}, {"text": "12"}, {"text": " months"}]}, "headerSubtext": {"simpleText": "Knight"}, "message": {"runs": [{"text": "EZ"}]}}}}})).unwrap();
+        assert_eq!(milestone["member"], json!({"header": "Member for 12 months", "sub": "Knight", "hasMessage": true}));
+        assert_eq!(milestone["text"], json!("EZ"));
         assert_eq!(paid["menu"], Value::Null);
         assert!(to_youtube_chat_msg(&json!({"removeChatItemAction": {}})).is_none());
         assert!(to_youtube_chat_msg(&json!({"addChatItemAction": {"item": {"liveChatViewerEngagementMessageRenderer": {}}}})).is_none());

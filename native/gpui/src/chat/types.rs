@@ -192,6 +192,7 @@ lenient! {
 lenient! { pub struct YouTubePart { pub t: String, pub v: String, pub u: String, pub a: String, pub custom: bool } }
 lenient! { pub struct YouTubeBadge { pub label: String, pub icon: String, pub url: String } }
 lenient! { pub struct YouTubeUser { pub id: String, pub name: String, pub avatar: String } }
+lenient! { pub struct YouTubeMember { pub header: String, pub sub: String, pub has_message: bool } }
 lenient! { pub struct YouTubePaid { pub amount: String, pub bg: String, pub header_bg: String, pub sticker: bool } }
 lenient! {
     pub struct YouTubeMsg {
@@ -203,6 +204,8 @@ lenient! {
         pub text: String,
         pub paid: Option<YouTubePaid>,
         pub notice: Option<String>,
+        /// a new member / milestone's own lines
+        pub member: Option<YouTubeMember>,
         /// YouTube's context-menu params for this message: what moderation asks with
         pub menu: Option<String>,
     }
