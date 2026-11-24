@@ -270,10 +270,11 @@ impl AguApp {
             header = header.child(modes_view);
         }
 
-        // Mod mode toggle
+        // Mod mode toggle: only where this account can moderate (the streamer or a mod)
         let mod_on = leaf.mod_mode;
+        let can_mod = self.panes.get(&leaf.id).map(|s| s.view.read(cx).can_moderate_here()).unwrap_or(false);
         let (t1, l1) = (tab_id.clone(), leaf_id.clone());
-        header = header.when(!whispers_only, |h| h.child(
+        header = header.when(!whispers_only && can_mod, |h| h.child(
             div()
                 .id("hdr-mod")
                 .flex()

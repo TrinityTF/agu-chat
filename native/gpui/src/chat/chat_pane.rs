@@ -629,6 +629,8 @@ impl ChatPane {
         self.rebuild_envs();
         self.gen += 1;
         self.invalidate_all();
+        // a YouTube login shows or hides the header's mod mode toggle
+        cx.emit(PaneEvent::Status);
         cx.notify();
     }
 
@@ -908,6 +910,8 @@ impl ChatPane {
                             let _ = this.update(cx, |p, cx| {
                                 p.twitch.entry(sk2).or_default().caps = caps;
                                 p.data_changed(cx);
+                                // the header's mod mode toggle shows only where this account can moderate
+                                cx.emit(PaneEvent::Status);
                             });
                         })
                         .detach();
@@ -934,6 +938,7 @@ impl ChatPane {
                                 p.co_caps.insert(sk2, caps);
                                 p.gen += 1;
                                 p.invalidate_all();
+                                cx.emit(PaneEvent::Status);
                                 cx.notify();
                             });
                         })
@@ -1990,6 +1995,22 @@ impl ChatPane {
 
     pub(super) fn ref_of(&self, sk: &str) -> Option<SourceRef> {
         self.store.source(sk).map(|s| s.source.clone())
+    }
+
+    /// Whether this account may moderate any chat in this split, so the header shows the mod mode toggle: the
+    /// streamer or a mod on Twitch, Kick's and Rumble's own answers, and a YouTube login (YouTube says whether
+    /// it is allowed only when an action is tried). X chat has no moderation.
+    pub fn can_moderate_here(&self) -> bool {
+        self.store.sources.iter().any(|st| match st.source.platform {
+            Platform::Twitch => self
+                .twitch
+                .get(&st.sk)
+                .map(|d| d.caps.is_broadcaster == Some(true) || d.caps.is_mod == Some(true) || d.caps.ban || d.caps.delete)
+                .unwrap_or(false),
+            Platform::Kick | Platform::Rumble => self.co_caps.get(&st.sk).map(|c| c.can_moderate).unwrap_or(false),
+            Platform::Youtube => self.accounts.get(&Platform::Youtube).map(|a| a.connected).unwrap_or(false),
+            _ => false,
+        })
     }
 
     /// Ctrl+click on a name: the message box starts with "@name " (kept once if it already does), caret at the
