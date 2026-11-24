@@ -1688,9 +1688,9 @@ fn super_chat_row(row: &Row, m: &YouTubeMsg, p: &YouTubePaid, rs: &Settings) -> 
         raid: false,
         icon: Some((crate::icons::COINS, 16.0)),
         head: Some(h.finish()),
-        card: Some((row.sk.clone(), user.clone())),
+        card: Some((row.sk.clone(), user)),
         bar: colour,
-        reply: Some(user),
+        reply: None,
         line: None,
     })
 }
