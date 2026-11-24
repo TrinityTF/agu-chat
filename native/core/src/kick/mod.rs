@@ -39,6 +39,8 @@ use crate::ws::{self, WsEvent, WsHandle};
 use vendor::kick::{badges_mark_mod, channel_user_is_mod, get_channel_user, fetch_history, fetch_kick_emotes, get_kick_channel, get_realtime_descriptor, parse_kick_source, sub_badge_for, to_kick_chat_msg, to_kick_gift_msg, to_kick_host_msg, KickChannel, SubBadge};
 
 const MAX_BACKLOG: usize = 300;
+/// mod actions kept for a reconnecting split (bans, timeouts, deletes, clears)
+const MAX_MOD_FEED: usize = 100;
 // Kick's chat works whether or not the channel is live, so the socket stays up; this only keeps the header's
 // live pill, title, category and viewer count honest (and catches a missed StreamerIsLive event).
 const STATUS_POLL_MS: u64 = 60_000;
@@ -354,6 +356,8 @@ struct St {
     info_present: bool, // `info !== null`
     status: Map<String, Value>,
     backlog: Vec<Value>,
+    /// the mod action lines (`{ts, kind, text}`), Twitch's mod feed shape
+    mod_feed: Vec<Value>,
     emotes: Value,
     sub_badges: Vec<SubBadge>,
     ws: Option<(u64, Arc<WsHandle>)>,
@@ -411,8 +415,40 @@ fn conn_frame(st: &St) -> Value {
     f
 }
 
+/// The mod feed line for a Kick ban, timeout or unban (Pusher `UserBannedEvent` / `UserUnbannedEvent`), worded
+/// like Twitch's: `(kind, text)`, or None without a target. Kick's `duration` is in minutes.
+fn kick_ban_feed(data: &Value, unban: bool, now: i64) -> Option<(&'static str, String)> {
+    let target = js_str_or_empty(data["user"].get("username"));
+    if target.is_empty() {
+        return None;
+    }
+    let by = js_str_or_empty(data[if unban { "unbanned_by" } else { "banned_by" }].get("username"));
+    let by = if by.is_empty() { "A moderator".to_string() } else { by };
+    if unban {
+        // `permanent` says what is being lifted: a ban, or (false) a timeout
+        return Some(if data["permanent"] == json!(false) { ("timeout", format!("{by} removed the timeout on {target}")) } else { ("ban", format!("{by} unbanned {target}")) });
+    }
+    let expires_at = data["expires_at"].as_str().and_then(parse_rfc3339_ms).unwrap_or(0);
+    if truthy(&data["permanent"]) || expires_at == 0 {
+        return Some(("ban", format!("{by} banned {target}")));
+    }
+    let mins = data["duration"].as_f64().or_else(|| data["duration"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
+    let secs = if mins > 0.0 { mins * 60.0 } else { ((expires_at - now) as f64 / 1000.0).max(0.0) };
+    Some(("timeout", format!("{by} timed out {target} ({})", crate::twitch::vendor::modfeed_text::humanize_duration(secs))))
+}
+
+/// The mod feed line for a deleted Kick message: Kick names no moderator, only whether its AI moderation did it.
+fn kick_delete_feed(who: Option<&str>, ai: bool) -> String {
+    let who = who.unwrap_or("someone");
+    if ai {
+        format!("Kick's AI moderation deleted a message from {who}")
+    } else {
+        format!("a message from {who} was deleted")
+    }
+}
+
 fn chatlog_frame(st: &St) -> Value {
-    json!({"type": "chatlog", "source": {"userId": st.status["userId"], "slug": st.status["slug"]}, "status": Value::Object(st.status.clone()), "emotes": st.emotes, "messages": st.backlog})
+    json!({"type": "chatlog", "source": {"userId": st.status["userId"], "slug": st.status["slug"]}, "status": Value::Object(st.status.clone()), "emotes": st.emotes, "messages": st.backlog, "modfeed": st.mod_feed})
 }
 
 impl KickSource {
@@ -443,6 +479,7 @@ impl KickSource {
                 info_present: false,
                 status,
                 backlog: Vec::new(),
+                mod_feed: Vec::new(),
                 emotes: json!({}),
                 sub_badges: Vec::new(),
                 ws: None,
@@ -535,6 +572,20 @@ impl KickSource {
             }
         }
         self.emit(json!({"type": "delete", "ids": [mid]}));
+    }
+
+    /// A mod action line under the chat, like Twitch's mod feed.
+    fn push_mod_feed(&self, kind: &str, text: &str) {
+        let feed = json!({"ts": now_ms(), "kind": kind, "text": text});
+        {
+            let mut st = self.st.lock().unwrap();
+            st.mod_feed.push(feed.clone());
+            if st.mod_feed.len() > MAX_MOD_FEED {
+                let cut = st.mod_feed.len() - MAX_MOD_FEED;
+                st.mod_feed.drain(..cut);
+            }
+        }
+        self.emit(json!({"type": "modfeed", "feed": feed}));
     }
 
     fn push_backlog(&self, msg: Value) {
@@ -1007,7 +1058,9 @@ impl KickSource {
                 if mid.is_empty() {
                     return;
                 }
+                let who = self.st.lock().unwrap().backlog.iter().find(|m| m["id"] == mid.as_str()).map(|m| js_str_or_empty(m["user"].get("name"))).filter(|s| !s.is_empty());
                 self.mark_deleted(&mid);
+                self.push_mod_feed("delete", &kick_delete_feed(who.as_deref(), truthy(&data["aiModerated"])));
             }
             "App\\Events\\UserBannedEvent" => {
                 let user = if truthy(&data["user"]) { data["user"].clone() } else { json!({}) };
@@ -1032,12 +1085,21 @@ impl KickSource {
                     "permanent": truthy(&data["permanent"]) || expires_at == 0,
                     "expiresAt": expires_at,
                 }));
+                if let Some((kind, text)) = kick_ban_feed(&data, false, now_ms()) {
+                    self.push_mod_feed(kind, &text);
+                }
+            }
+            "App\\Events\\UserUnbannedEvent" => {
+                if let Some((kind, text)) = kick_ban_feed(&data, true, now_ms()) {
+                    self.push_mod_feed(kind, &text);
+                }
             }
             "App\\Events\\ChatroomClearEvent" => {
                 for msg in self.st.lock().unwrap().backlog.iter_mut() {
                     msg["deleted"] = json!(true);
                 }
                 self.emit(json!({"type": "clear"}));
+                self.push_mod_feed("clear", "chat was cleared");
             }
             "App\\Events\\PinnedMessageCreatedEvent" => {
                 let message = if truthy(&data["message"]) { self.dress_badges(to_kick_chat_msg(&data["message"])) } else { Value::Null };
@@ -1116,6 +1178,25 @@ fn dress_sub_badges(mut msg: Value, subs: &[SubBadge]) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ban_timeout_and_unban_lines_read_like_twitch() {
+        use super::{kick_ban_feed, kick_delete_feed};
+        use serde_json::json;
+        let ban = json!({"user": {"id": 1, "username": "Spammer"}, "banned_by": {"username": "ModGuy"}, "permanent": true});
+        assert_eq!(kick_ban_feed(&ban, false, 0), Some(("ban", "ModGuy banned Spammer".to_string())));
+        let to = json!({"user": {"id": 1, "username": "Spammer"}, "banned_by": {"username": "ModGuy"}, "permanent": false, "duration": 10, "expires_at": "2026-11-24T12:10:00Z"});
+        assert_eq!(kick_ban_feed(&to, false, 0), Some(("timeout", "ModGuy timed out Spammer (10m)".to_string())));
+        let anon = json!({"user": {"id": 1, "username": "Spammer"}, "permanent": true});
+        assert_eq!(kick_ban_feed(&anon, false, 0).unwrap().1, "A moderator banned Spammer");
+        let unban = json!({"user": {"username": "Spammer"}, "unbanned_by": {"username": "ModGuy"}, "permanent": true});
+        assert_eq!(kick_ban_feed(&unban, true, 0).unwrap().1, "ModGuy unbanned Spammer");
+        let untimeout = json!({"user": {"username": "Spammer"}, "unbanned_by": {"username": "ModGuy"}, "permanent": false});
+        assert_eq!(kick_ban_feed(&untimeout, true, 0), Some(("timeout", "ModGuy removed the timeout on Spammer".to_string())));
+        assert_eq!(kick_ban_feed(&json!({"user": {}}), false, 0), None);
+        assert_eq!(kick_delete_feed(Some("Bob"), false), "a message from Bob was deleted");
+        assert_eq!(kick_delete_feed(None, true), "Kick's AI moderation deleted a message from someone");
+    }
+
     use super::*;
 
     #[test]

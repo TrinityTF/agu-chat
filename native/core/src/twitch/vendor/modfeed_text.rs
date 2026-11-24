@@ -89,7 +89,7 @@ fn target_name(sub: Option<&Value>) -> String {
 
 // Humanizes a whole-second duration (90 -> "1m 30s", 600 -> "10m", 3600 -> "1h", 86400 -> "1d", 604800 -> "1w"):
 // largest unit that fits, plus a remainder in the NEXT smaller unit only (never more than two units).
-fn humanize_duration(total_seconds: f64) -> String {
+pub(crate) fn humanize_duration(total_seconds: f64) -> String {
     let n = if total_seconds.is_nan() { 0.0 } else { total_seconds };
     let s = (n + 0.5).floor().max(0.0) as i64; // Math.max(0, Math.round(Number(x) || 0))
     if s <= 0 {

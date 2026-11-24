@@ -458,11 +458,15 @@ impl ChatStore {
     }
 
     fn feed_row(&mut self, sk: &str, x: &Value) -> Row {
+        self.feed_row_on(sk, Platform::Twitch, x)
+    }
+
+    fn feed_row_on(&mut self, sk: &str, platform: Platform, x: &Value) -> Row {
         self.seq += 1;
         let ts = x.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
         let kind = x.get("feedKind").and_then(|k| k.as_str()).or_else(|| x.get("kind").and_then(|k| k.as_str())).unwrap_or("mode").to_string();
         let entry = ModFeedEntry { ts, feed_kind: kind, text: val_str(x, "text") };
-        Self::row(sk, Platform::Twitch, Self::mk(sk, "f", &self.seq.to_string()), ts, RowBody::ModFeed(entry))
+        Self::row(sk, platform, Self::mk(sk, "f", &self.seq.to_string()), ts, RowBody::ModFeed(entry))
     }
 
     fn rumble(&mut self, sk: &str, ty: &str, f: &Value) -> bool {
@@ -519,6 +523,9 @@ impl ChatStore {
                     let m = kick_event_dressed(Self::parse(m), rows.iter(), sk);
                     rows.push(row(m));
                 }
+                for x in f.get("modfeed").and_then(|m| m.as_array()).into_iter().flatten() {
+                    rows.push(self.feed_row_on(sk, Platform::Kick, x));
+                }
                 self.replace_backlog(sk, rows);
                 let st = self.source_mut(sk).unwrap();
                 st.status = f.get("status").filter(|s| !s.is_null()).cloned();
@@ -551,6 +558,13 @@ impl ChatStore {
                     RowBody::Kick(m) if r.sk == sk && m.user.id == uid && !m.deleted => Some(with_body(r, RowBody::Kick(KickMsg { deleted: true, ..m.clone() }))),
                     _ => None,
                 });
+            }
+            // a ban, timeout, unban, deleted message or clear, as a line like Twitch's mod feed
+            "modfeed" => {
+                let Some(feed) = f.get("feed").filter(|x| !x.is_null()) else { return false };
+                let row = self.feed_row_on(sk, Platform::Kick, feed);
+                self.add_row(row);
+                self.trim();
             }
             "unconfigured" => self.source_mut(sk).unwrap().loaded = true,
             _ => return false,

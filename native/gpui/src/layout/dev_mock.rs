@@ -218,6 +218,9 @@ fn harness_log(platform: Platform) -> Value {
         Platform::Kick => json!({ "type": "chatlog", "messages": [
             { "platform": "kick", "id": "k1", "ts": now - 22000, "user": { "id": "ki1", "login": "kicker", "name": "Kicker", "color": "#53fc18", "avatar": "", "verified": true, "anonymous": false }, "badges": [{ "type": "moderator", "text": "Moderator", "count": 0 }, { "type": "subscriber", "text": "Subscriber", "count": 3 }], "text": "kick message [emote:37226:KEKW] nice", "reply": null, "action": false, "notice": null },
             { "platform": "kick", "id": "k2", "ts": now - 20000, "user": { "id": "ki2", "login": "replier", "name": "Replier", "color": "#ff7a59", "avatar": "", "verified": false, "anonymous": false }, "badges": [], "text": "fair point", "reply": { "id": "o1", "text": "my take on it", "name": "MockKick" }, "action": false, "notice": null }
+        ], "modfeed": [
+            { "ts": now - 19000, "kind": "timeout", "text": "ModGuy timed out Spammer (10m)" },
+            { "ts": now - 18500, "kind": "delete", "text": "a message from Kicker was deleted" }
         ], "status": { "live": true }, "emotes": { "KEKW": { "id": "37226", "group": "global" } } }),
         Platform::Youtube => json!({ "type": "chatlog", "messages": [
             { "platform": "youtube", "id": "y1", "ts": now - 21000, "user": { "id": "yu1", "name": "YTViewer", "avatar": "" }, "badges": [{ "label": "Member", "icon": "", "url": "" }], "parts": [{ "t": "text", "v": "hello youtube " }], "text": "hello youtube", "paid": null, "notice": null },
