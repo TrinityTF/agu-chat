@@ -124,6 +124,8 @@ pub struct CoEnv {
     pub viewer_login: String,
     /// the logged-in account's id on this platform (YouTube: its channel id)
     pub viewer_id: String,
+    /// Kick: the account's username and slug, lowercased, for lines that mention or answer it
+    pub me_names: Vec<String>,
 }
 
 pub struct RowCtx<'a> {
@@ -1561,6 +1563,11 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
     }
     let mut spec = frame(f.finish(), actions, ctx, row.ord);
     co_frame_style(&mut spec, rule);
+    // a reply to you or your name in it: the same red frame and label as on Twitch
+    if !gift_line && super::mentions::kick_mentions(m, &env.me_names) {
+        let hl = row_highlight(&ChatMsg::default(), true, None, None);
+        (spec.bar, spec.bg, spec.label) = (hl.bar, hl.bg, hl.label);
+    }
     // like Twitch: the line it answers above it (emote codes as their names), the whole of it on hover
     spec.before = m.reply.as_ref().map(|r| {
         let text: String = split_kick(&r.text).into_iter().map(|(emote, a, name)| if emote { name } else { a }).collect();
@@ -1965,6 +1972,7 @@ mod kick_event_tests {
             rumble_emotes: Default::default(),
             viewer_login: "xqc".into(),
             viewer_id: String::new(),
+            me_names: Vec::new(),
         }
     }
 

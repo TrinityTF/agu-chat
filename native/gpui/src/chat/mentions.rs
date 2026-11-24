@@ -55,7 +55,7 @@ pub fn row_deleted(r: &Row) -> bool {
 
 /// What a newly arrived row is, or None when it marks nothing at all (backlog, the mod feed, your own line, a
 /// line hidden by ignores (`hidden`) or by the event toggles). `rule_of` is asked only when it is not a mention.
-pub fn classify(row: &Row, own: bool, hidden: bool, me_login_lower: &str, rule_of: impl FnOnce() -> Option<HighlightRule>) -> Option<Alert> {
+pub fn classify(row: &Row, own: bool, hidden: bool, me_login_lower: &str, kick_me: &[String], rule_of: impl FnOnce() -> Option<HighlightRule>) -> Option<Alert> {
     if row.backlog || matches!(row.body, RowBody::ModFeed(_)) || own || hidden {
         return None;
     }
@@ -72,7 +72,16 @@ pub fn classify(row: &Row, own: bool, hidden: bool, me_login_lower: &str, rule_o
     if matches!(&row.body, RowBody::Msg(m) if is_whisper_key(&row.sk) || text_mentions_login(&m.text, me_login_lower)) {
         return Some(Alert::Mention);
     }
+    if matches!(&row.body, RowBody::Kick(m) if kick_mentions(m, kick_me)) {
+        return Some(Alert::Mention);
+    }
     Some(rule_of().map(Alert::Rule).unwrap_or(Alert::Plain))
+}
+
+/// Is this Kick line addressed at the logged-in Kick account (`me`: its username and slug, lowercased): a reply to
+/// one of its lines, or its name in the text.
+pub fn kick_mentions(m: &KickMsg, me: &[String]) -> bool {
+    m.reply.as_ref().is_some_and(|r| me.iter().any(|n| !n.is_empty() && r.name.eq_ignore_ascii_case(n))) || me.iter().any(|n| text_mentions_login(&m.text, n))
 }
 
 /// One message across every split showing its chat: the source key (case-folded) and the row's own id.
@@ -180,7 +189,7 @@ mod tests {
     }
 
     fn red(row: &Row, own: bool, hidden: bool, r: Option<HighlightRule>) -> bool {
-        classify(row, own, hidden, "agu", || r).is_some_and(|a| a.red())
+        classify(row, own, hidden, "agu", &[], || r).is_some_and(|a| a.red())
     }
 
     #[test]
@@ -199,8 +208,28 @@ mod tests {
     }
 
     #[test]
+    fn kick_replies_and_names_count_for_the_kick_account() {
+        let me = vec!["a_g_u__".to_string(), "a-g-u".to_string()];
+        let kred = |r: &Row| classify(r, false, false, "agu", &me, || None).is_some_and(|a| a.red());
+        let mut reply = kick("kick:x", "1", "fair point");
+        if let RowBody::Kick(m) = &mut reply.body {
+            m.reply = Some(KickReply { id: "o1".into(), text: "yo".into(), name: "A_G_U__".into() });
+        }
+        assert!(kred(&reply));
+        assert!(kred(&kick("kick:x", "1", "hey @a_g_u__ gg")));
+        assert!(!kred(&kick("kick:x", "1", "hello")));
+        let mut other = reply.clone();
+        if let RowBody::Kick(m) = &mut other.body {
+            m.reply.as_mut().unwrap().name = "someone".into();
+        }
+        assert!(!kred(&other));
+        // logged out of Kick: nothing to match
+        assert!(!red(&reply, false, false, None));
+    }
+
+    #[test]
     fn badge_rules_ring_but_stay_plain() {
-        let a = classify(&twitch("twitch:x", "1", "hi"), false, false, "agu", || Some(rule("badge"))).unwrap();
+        let a = classify(&twitch("twitch:x", "1", "hi"), false, false, "agu", &[], || Some(rule("badge"))).unwrap();
         assert!(matches!(a, Alert::Rule(_)) && !a.red());
     }
 
@@ -209,18 +238,18 @@ mod tests {
         let row = twitch("twitch:x", "1", "@agu hi");
         assert!(!red(&row, true, false, None));
         assert!(!red(&row, false, true, None));
-        assert_eq!(classify(&row, false, true, "agu", || None), None);
+        assert_eq!(classify(&row, false, true, "agu", &[], || None), None);
         let mut gone = row.clone();
         if let RowBody::Msg(m) = &mut gone.body {
             m.deleted = true;
         }
-        assert_eq!(classify(&gone, false, false, "agu", || Some(rule("phrase"))), Some(Alert::Plain));
+        assert_eq!(classify(&gone, false, false, "agu", &[], || Some(rule("phrase"))), Some(Alert::Plain));
         let old = Row { backlog: true, ..row.clone() };
-        assert_eq!(classify(&old, false, false, "agu", || None), None);
+        assert_eq!(classify(&old, false, false, "agu", &[], || None), None);
         let feed = Row { body: RowBody::ModFeed(ModFeedEntry::default()), ..row };
-        assert_eq!(classify(&feed, false, false, "agu", || Some(rule("phrase"))), None);
+        assert_eq!(classify(&feed, false, false, "agu", &[], || Some(rule("phrase"))), None);
         // not logged in: your name can't be matched
-        assert!(classify(&twitch("twitch:x", "1", "hi agu"), false, false, "", || None).is_some_and(|a| !a.red()));
+        assert!(classify(&twitch("twitch:x", "1", "hi agu"), false, false, "", &[], || None).is_some_and(|a| !a.red()));
     }
 
     #[test]

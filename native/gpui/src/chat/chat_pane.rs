@@ -639,6 +639,14 @@ impl ChatPane {
         self.accounts.get(&platform).and_then(|a| a.user.as_ref()).map(|u| if u.login.is_empty() { u.name.clone() } else { u.login.clone() }).unwrap_or_default()
     }
 
+    /// The logged-in Kick account's username and slug, lowercased (empty when logged out): what a Kick mention names.
+    pub(super) fn kick_me(&self) -> Vec<String> {
+        let Some(u) = self.accounts.get(&Platform::Kick).and_then(|a| a.user.as_ref()) else { return Vec::new() };
+        let mut v: Vec<String> = [&u.name, &u.login].iter().map(|s| s.to_lowercase()).filter(|s| !s.is_empty()).collect();
+        v.dedup();
+        v
+    }
+
     pub(super) fn me_login_lower(&self) -> String {
         self.accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.login.to_lowercase()).unwrap_or_default()
     }
@@ -1639,6 +1647,7 @@ impl ChatPane {
     fn scan_alerts(&mut self, cx: &mut Context<Self>) {
         let rows: Vec<RowRef> = self.store.rows().to_vec();
         let me_login = self.me_login_lower();
+        let kick_me = self.kick_me();
         let mut max_ord = self.seen_ord;
         let mut activity: Option<Activity> = None;
         let mut fire: Vec<(String, AlertWants)> = Vec::new();
@@ -1659,7 +1668,7 @@ impl ChatPane {
             max_ord = max_ord.max(r.ord);
             let (own, hidden) = (self.is_own(r), apply_ignores(r, &self.ignores).is_none());
             // ignored rows never ring
-            let Some(alert) = super::mentions::classify(r, own, hidden, &me_login, || self.rule_of(r)) else { continue };
+            let Some(alert) = super::mentions::classify(r, own, hidden, &me_login, &kick_me, || self.rule_of(r)) else { continue };
             activity.get_or_insert(Activity::Message);
             if alert.red() {
                 activity = Some(Activity::Highlight);
@@ -2605,12 +2614,12 @@ impl ChatPane {
             }
             RowBody::Rumble(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), emotes: None, caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble), viewer_id: String::new() };
+                let env = CoEnv { source: st.source.clone(), emotes: None, caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: st.rumble_badges.clone(), rumble_emotes: st.rumble_emotes.clone(), viewer_login: self.co_login(Platform::Rumble), viewer_id: String::new(), me_names: Vec::new() };
                 Some(rumble_row(row, m, &ctx, &env, rule.as_ref()))
             }
             RowBody::Kick(m) => {
                 let st = st?;
-                let env = CoEnv { source: st.source.clone(), emotes: self.kick_emotes.get(&row.sk).cloned(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new() };
+                let env = CoEnv { source: st.source.clone(), emotes: self.kick_emotes.get(&row.sk).cloned(), caps: self.co_caps.get(&row.sk).cloned().unwrap_or_default(), can_send: st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false), rumble_badges: Default::default(), rumble_emotes: Default::default(), viewer_login: self.co_login(Platform::Kick), viewer_id: String::new(), me_names: self.kick_me() };
                 let key = super::twitch::cosmetics::kick_key(&m.user.id);
                 let lookup = if (rs.seven_tv_cosmetics || rs.seven_tv) && !m.user.anonymous { self.svc.cosmetics.style_of(&key, &self.svc.net, cx) } else { StyleLookup::Known(None) };
                 let style: Option<ChatterStyle> = match lookup {
@@ -2633,6 +2642,7 @@ impl ChatPane {
                     rumble_emotes: Default::default(),
                     viewer_login: self.co_login(Platform::Youtube),
                     viewer_id: yt.and_then(|a| a.user.as_ref()).map(|u| u.id.clone()).unwrap_or_default(),
+                    me_names: Vec::new(),
                 };
                 Some(youtube_row(row, m, &ctx, &env, rule.as_ref()))
             }
