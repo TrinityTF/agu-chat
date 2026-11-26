@@ -429,7 +429,8 @@ impl Element for ChatList {
                 let first = placed.first().map(|(i, y, _)| (*i, *y)).unwrap_or((0, 0.0));
                 let before: f32 = PAD + s.items[..first.0].iter().map(|m| m.map(|m| m.h + m.mb.max(m.mt)).unwrap_or(avg)).sum::<f32>();
                 let top = (before - first.1).clamp(0.0, total - vh);
-                let thumb_h = (vh * vh / total).clamp(20.0, vh);
+                // at least 20px, but never taller than a viewport squeezed under 20px (clamp would panic: min > max)
+                let thumb_h = (vh * vh / total).max(20.0).min(vh);
                 thumb = Some((top / (total - vh) * (vh - thumb_h), thumb_h));
             }
         }

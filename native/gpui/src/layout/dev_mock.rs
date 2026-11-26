@@ -345,6 +345,23 @@ impl AguBridge for MockBridge {
             let ok = |b: Value| ApiResult { status: 200, body: b };
             match p.as_str() {
                 "/api/mod/user" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "user": { "id": "2", "login": "cooldude", "displayName": "Cooldude", "avatar": "", "createdAt": "2016-04-30T12:00:00Z" }, "followedAt": "2019-07-09T12:00:00Z" })),
+                // a Level 1 train at 62% with four minutes left (AGU_MOCK_HYPE=off: none)
+                "/api/twitch/hype-train" => {
+                    if std::env::var("AGU_MOCK_HYPE").map(|v| v == "off").unwrap_or(false) {
+                        return ok(json!({ "active": false }));
+                    }
+                    let ends = chrono::DateTime::from_timestamp_millis(now_ms() + 280_000).map(|d| d.to_rfc3339()).unwrap_or_default();
+                    let e = |id: &str, t: &str| json!({ "id": id, "token": t, "url": format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0") });
+                    ok(json!({
+                        "active": true, "id": "mock", "level": 1, "progression": 1240, "goal": 2000, "percent": 62, "remaining": 760, "bits": 760, "subs": 2, "expiresAt": ends,
+                        "emotes": [e("25", "Kappa"), e("354", "4Head"), e("305954156", "PogChamp"), e("81273", "KomodoHype")],
+                        "conductors": [
+                            { "source": "SUBS", "login": "cooldude", "name": "Cooldude", "avatar": "", "quantity": 5 },
+                            { "source": "BITS", "login": "cheerer", "name": "Cheerer", "avatar": "", "quantity": 500 }
+                        ],
+                        "conductorRewards": ["BITS", "SUBS"], "treasure": false, "goldenKappa": false, "shared": false, "color": "d64545", "record": { "level": 4 }
+                    }))
+                }
                 "/api/twitch/web" => {
                     let signed_in = std::env::var("AGU_MOCK_WEB").map(|v| v != "out").unwrap_or(true);
                     ok(if signed_in { json!({ "signedIn": true, "pending": false, "expired": false, "login": "a_g_u__", "sameUser": std::env::var("AGU_MOCK_WEB").map(|v| v != "other").unwrap_or(true), "appLogin": "a_g_u__" }) } else { json!({ "signedIn": false, "pending": false, "expired": false }) })

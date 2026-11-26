@@ -14,6 +14,7 @@ pub mod channel;
 pub mod eventsub;
 pub mod helix;
 pub mod http;
+pub mod hype_train;
 pub mod irc_hub;
 pub mod routes;
 pub mod signin;
@@ -88,6 +89,7 @@ impl PlatformModule for TwitchModule {
     fn routes(&self) -> Vec<(String, Handler)> {
         let mut r = routes::routes();
         r.extend(web::routes());
+        r.extend(hype_train::routes());
         r
     }
 

@@ -629,6 +629,23 @@ async fn gql_with(auth_token: &str, operation: &str, query: &str, variables: Val
     parse_gql(status, &body)
 }
 
+/// A call for public data, without any session: only the web page's client id (the hype train bar).
+pub(super) async fn gql_public(operation: &str, query: &str, variables: Value) -> Result<Value, GqlError> {
+    let res = super::http::client()
+        .post(GQL_URL)
+        .header("User-Agent", user_agent())
+        .header("Client-Id", WEB_CLIENT_ID)
+        .header("Content-Type", "application/json")
+        .timeout(Duration::from_secs(15))
+        .body(gql_body(operation, query, variables).to_string())
+        .send()
+        .await
+        .map_err(|_| GqlError::Other("Could not reach Twitch".into()))?;
+    let status = res.status().as_u16();
+    let body: Value = res.json().await.unwrap_or(Value::Null);
+    parse_gql(status, &body)
+}
+
 /// A call with the stored session; a 401 forgets it.
 async fn gql(operation: &str, query: &str, variables: Value) -> Result<Value, GqlError> {
     let Some(rec) = session() else { return Err(GqlError::Unauthorized) };

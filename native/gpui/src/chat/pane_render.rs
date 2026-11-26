@@ -116,7 +116,7 @@ impl Element for ImageBox {
 impl ChatPane {
     // ---- inline flow with this pane's handlers ---------------------------------------------------------
 
-    fn flow(&self, content: &Rc<InlineContent>, actions: Rc<Vec<RowAction>>, cx: &mut Context<Self>) -> InlineFlow {
+    pub(super) fn flow(&self, content: &Rc<InlineContent>, actions: Rc<Vec<RowAction>>, cx: &mut Context<Self>) -> InlineFlow {
         let weak = cx.entity().downgrade();
         let w2 = weak.clone();
         let on_act: OnAct = Rc::new(move |act, rect, w, cx| {
@@ -1495,6 +1495,7 @@ impl Render for ChatPane {
         if needs_tick {
             self.ensure_pin_tick(cx);
         }
+        let hype = self.hype_bars(cx);
 
         let list_el: AnyElement = if self.shown.is_empty() {
             div().size_full().overflow_hidden().child(self.empty_el()).into_any_element()
@@ -1543,6 +1544,7 @@ chat_list(
             .text_color(c(theme::TEXT))
             .text_size(px(font))
             .font_family(theme::FONT)
+            .children(hype)
             .children(cards)
             .child(message_list)
             .children(self.toasts_el())
@@ -1590,6 +1592,23 @@ impl InlineContentBuilder {
             tip: None,
             overlays: vec![],
             radius: 0.0,
+            act: None,
+        }));
+    }
+    /// a picture of `size` px, square (`radius` rounds it: half the size for a circle)
+    pub fn image(&mut self, url: &str, size: f32, radius: f32, tip: Option<Rc<Tip>>) {
+        self.items.push(Item::Image(ImageItem {
+            url: url.to_string().into(),
+            max_w: size,
+            max_h: size,
+            fixed: true,
+            wrap: false,
+            vmargin: 0.0,
+            margin_x: 0.0,
+            valign: VAlign::BoxCenter,
+            tip,
+            overlays: vec![],
+            radius,
             act: None,
         }));
     }
