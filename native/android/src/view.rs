@@ -2,11 +2,16 @@
 //! colours, badge and emote image URLs, message parts), so the Kotlin side only lays it out.
 use std::collections::HashMap;
 
+use agu_chat_core::protocol::{AccountsState, HighlightRule, Settings};
+use agu_chat_model::highlights::{compile_highlights, match_input_of, rule_row_style, Highlighter};
+use agu_chat_model::ignores::{apply_ignores, compile_ignores, filter_ignored, CompiledIgnores, IgnoreCache};
+use agu_chat_model::mentions::{is_own, kick_me, me_login_lower, row_mentions_me};
+use agu_chat_model::shown::visible_rows;
 use agu_chat_model::twitch::badges::{parse_badge_list, BadgeMap};
 use agu_chat_model::twitch::colors::{fallback_color, name_color, readable_color};
 use agu_chat_model::twitch::emotes::{provider_emote_url_at, EmoteLookup, EmoteSets};
 use agu_chat_model::twitch::parts::{build_kick_parts_in, build_parts_in, EmoteSource, KnownChatter, MsgPart, Overlay};
-use agu_chat_model::types::{ChatUser, Row, RowBody};
+use agu_chat_model::types::{ChatUser, Row, RowBody, RowRef};
 use serde_json::{json, Value};
 
 /// Image density of emotes and badges: phones draw at 2.6x-3.5x, so the largest size the CDNs offer.
@@ -207,6 +212,77 @@ pub fn row_json(r: &Row, env: &Env) -> Value {
     v
 }
 
+/// The user's highlight rules, ignores and account names, compiled: what decides how a row is shown.
+pub struct Rules {
+    pub settings: Settings,
+    pub accounts: AccountsState,
+    highlighter: Highlighter,
+    ignores: CompiledIgnores,
+    me_login: String,
+    kick_me: Vec<String>,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Rules::new(Settings::default(), AccountsState::new())
+    }
+}
+
+impl Rules {
+    pub fn new(settings: Settings, accounts: AccountsState) -> Rules {
+        Rules {
+            highlighter: compile_highlights(&settings.highlight_rules),
+            ignores: compile_ignores(&settings.ignored_users, &settings.ignored_phrases),
+            me_login: me_login_lower(&accounts),
+            kick_me: kick_me(&accounts),
+            settings,
+            accounts,
+        }
+    }
+
+    pub fn me_login(&self) -> &str {
+        &self.me_login
+    }
+
+    pub fn kick_me(&self) -> &[String] {
+        &self.kick_me
+    }
+
+    pub fn is_own(&self, r: &Row) -> bool {
+        is_own(r, &self.accounts)
+    }
+
+    /// The first rule a line matches (never your own lines).
+    pub fn rule_of(&self, r: &Row) -> Option<HighlightRule> {
+        if self.highlighter.size() == 0 || self.is_own(r) {
+            return None;
+        }
+        match_input_of(r).and_then(|i| self.highlighter.matches(&i).cloned())
+    }
+
+    pub fn hidden(&self, r: &RowRef) -> bool {
+        apply_ignores(r, &self.ignores).is_none()
+    }
+
+    /// What a list shows of a store's rows: the event toggles, then ignores (hidden lines go, words are rewritten).
+    pub fn shown(&self, rows: &[RowRef], cache: &mut IgnoreCache) -> Vec<RowRef> {
+        filter_ignored(&visible_rows(rows, &self.settings), &self.ignores, cache)
+    }
+
+    /// The row's highlight fields: `highlight: {color, alpha}` for a matched rule, `mention: true` for a line that
+    /// names you (drawn red, ahead of a rule, like the desktop).
+    pub fn decorate(&self, v: &mut Value, r: &Row) {
+        let o = v.as_object_mut().unwrap();
+        if row_mentions_me(r, &self.me_login, &self.kick_me) {
+            o.insert("mention".into(), json!(true));
+        }
+        if let Some(rule) = self.rule_of(r) {
+            let s = rule_row_style(&rule.color);
+            o.insert("highlight".into(), json!({"color": format!("#{:02x}{:02x}{:02x}", s.bar.0, s.bar.1, s.bar.2), "alpha": s.background.3}));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +303,60 @@ mod tests {
         assert_ne!(v["user"]["color"], "#000000", "black names are lifted for the dark list");
         let parts = v["parts"].as_array().unwrap();
         assert!(parts.iter().any(|p| p["t"] == "emote" && p["url"] == twitch_emote_url("25")), "{parts:?}");
+    }
+
+    fn twitch_row(id: &str, login: &str, text: &str) -> RowRef {
+        let src = SourceRef { platform: Platform::Twitch, channel: "a_g_u__".into() };
+        let mut st = ChatStore::default();
+        st.sync(&[src.clone()]);
+        let sk = agu_chat_model::store::source_key(&src);
+        st.apply(&sk, &json!({"type": "chat", "msg": {"id": id, "ts": 1, "user": {"id": "9", "login": login, "name": login, "color": ""}, "text": text, "emotes": "", "badges": ""}}));
+        st.rows().last().expect("a row").clone()
+    }
+
+    fn rules(patch: Value, me: &str) -> Rules {
+        let mut s: Settings = serde_json::from_value(patch).unwrap();
+        s.highlight_sound_focused = true;
+        let mut acc = AccountsState::new();
+        if !me.is_empty() {
+            acc.insert(Platform::Twitch, serde_json::from_value(json!({"connected": true, "user": {"id": "1", "login": me, "name": me}})).unwrap());
+        }
+        Rules::new(s, acc)
+    }
+
+    fn flagged(rules: &Rules, r: &RowRef) -> Value {
+        let mut v = row_json(r, &Env::default());
+        rules.decorate(&mut v, r);
+        v
+    }
+
+    #[test]
+    fn a_matching_rule_gives_the_row_its_colour() {
+        let rl = rules(json!({"highlightRules": [{"id": "r", "enabled": true, "kind": "phrase", "pattern": "gg", "caseSensitive": false, "color": "#ff9f1a", "sound": true, "soundFile": "", "flash": false}]}), "");
+        let hit = flagged(&rl, &twitch_row("1", "bob", "well played gg"));
+        assert_eq!(hit["highlight"]["color"], "#ff9f1a");
+        assert!(hit["highlight"]["alpha"].as_f64().unwrap() > 0.0);
+        let miss = flagged(&rl, &twitch_row("2", "bob", "hello"));
+        assert!(miss.get("highlight").is_none() && miss.get("mention").is_none());
+    }
+
+    #[test]
+    fn your_twitch_name_marks_the_row_a_mention_but_your_own_lines_get_no_rule() {
+        let rl = rules(json!({"highlightRules": [{"id": "r", "enabled": true, "kind": "phrase", "pattern": "hi", "caseSensitive": false, "color": "#2bd4a4", "sound": false, "soundFile": "", "flash": false}]}), "a_g_u__");
+        let v = flagged(&rl, &twitch_row("1", "bob", "hi @A_G_U__"));
+        assert_eq!(v["mention"], true);
+        let own = flagged(&rl, &twitch_row("2", "a_g_u__", "hi chat"));
+        assert!(own.get("highlight").is_none(), "no rule on your own line");
+    }
+
+    #[test]
+    fn ignored_users_vanish_and_ignored_words_are_rewritten() {
+        let rl = rules(json!({"ignoredUsers": [{"platform": "twitch", "login": "spammer"}], "ignoredPhrases": [{"pattern": "darn", "regex": false, "caseSensitive": false, "action": "replace", "replacement": "***"}]}), "");
+        let rows = vec![twitch_row("1", "spammer", "buy followers"), twitch_row("2", "bob", "well darn it"), twitch_row("3", "bob", "fine")];
+        let shown = rl.shown(&rows, &mut IgnoreCache::default());
+        assert_eq!(shown.len(), 2, "the ignored user's line is hidden");
+        let v = row_json(&shown[0], &Env::default());
+        let text: String = v["parts"].as_array().unwrap().iter().filter_map(|p| p["s"].as_str()).collect();
+        assert_eq!(text, "well *** it");
     }
 }

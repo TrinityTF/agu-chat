@@ -10,7 +10,7 @@ pub use agu_chat_model::ignores;
 pub mod images;
 pub mod inline;
 pub mod link_card;
-pub mod mentions;
+pub use agu_chat_model::mentions;
 pub use agu_chat_model::mod_actions;
 pub use agu_chat_model::mod_buttons;
 pub use agu_chat_model::mod_caps;

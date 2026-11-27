@@ -9,10 +9,53 @@ use std::collections::{HashSet, VecDeque};
 
 use agu_chat_core::protocol::HighlightRule;
 
+use agu_chat_core::protocol::{AccountsState, Platform};
+use agu_chat_core::twitch::whisper;
+
 use super::chat_text::text_mentions_login;
 use super::twitch::events::notice_visible;
 use super::types::*;
-use crate::layout::tree::is_whisper_key;
+
+/// `twitch:whisper:bob`: a Twitch whisper conversation (a reserved channel, see core's twitch/whisper.rs).
+pub fn is_whisper_key(sk: &str) -> bool {
+    sk.strip_prefix("twitch:").map(|c| whisper::login_of(c).is_some()).unwrap_or(false)
+}
+
+/// The logged-in Twitch account's login, lowercased ("" when logged out): what a Twitch mention names.
+pub fn me_login_lower(accounts: &AccountsState) -> String {
+    accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.login.to_lowercase()).unwrap_or_default()
+}
+
+/// The logged-in Kick account's username and slug, lowercased (empty when logged out): what a Kick mention names.
+pub fn kick_me(accounts: &AccountsState) -> Vec<String> {
+    let Some(u) = accounts.get(&Platform::Kick).and_then(|a| a.user.as_ref()) else { return Vec::new() };
+    let mut v: Vec<String> = [&u.name, &u.login].iter().map(|s| s.to_lowercase()).filter(|s| !s.is_empty()).collect();
+    v.dedup();
+    v
+}
+
+/// The row is a line the logged-in account of its platform wrote itself.
+pub fn is_own(r: &Row, accounts: &AccountsState) -> bool {
+    let Some(me) = accounts.get(&r.platform).and_then(|a| a.user.as_ref()) else { return false };
+    let (id, login) = match &r.body {
+        RowBody::Msg(m) => (m.user.id.as_str(), m.user.login.as_str()),
+        RowBody::Rumble(m) => (m.user.id.as_str(), m.user.login.as_str()),
+        RowBody::Kick(m) => (m.user.id.as_str(), m.user.login.as_str()),
+        RowBody::YouTube(m) => (m.user.id.as_str(), ""),
+        RowBody::X(m) => (m.user.id.as_str(), m.user.login.as_str()),
+        _ => return false,
+    };
+    (!me.id.is_empty() && id == me.id) || (!me.login.is_empty() && login.to_lowercase() == me.login.to_lowercase())
+}
+
+/// Does a Twitch line name the account (or a Kick line, see `kick_mentions`): drawn red on every screen.
+pub fn row_mentions_me(r: &Row, me_login_lower: &str, kick_me: &[String]) -> bool {
+    match &r.body {
+        RowBody::Msg(m) => text_mentions_login(&m.text, me_login_lower),
+        RowBody::Kick(m) => kick_mentions(m, kick_me),
+        _ => false,
+    }
+}
 
 /// How many mentions the panel keeps for the session (the oldest go first).
 pub const MAX_MENTIONS: usize = 200;

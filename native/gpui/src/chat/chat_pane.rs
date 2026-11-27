@@ -681,14 +681,11 @@ impl ChatPane {
 
     /// The logged-in Kick account's username and slug, lowercased (empty when logged out): what a Kick mention names.
     pub(super) fn kick_me(&self) -> Vec<String> {
-        let Some(u) = self.accounts.get(&Platform::Kick).and_then(|a| a.user.as_ref()) else { return Vec::new() };
-        let mut v: Vec<String> = [&u.name, &u.login].iter().map(|s| s.to_lowercase()).filter(|s| !s.is_empty()).collect();
-        v.dedup();
-        v
+        super::mentions::kick_me(&self.accounts)
     }
 
     pub(super) fn me_login_lower(&self) -> String {
-        self.accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.login.to_lowercase()).unwrap_or_default()
+        super::mentions::me_login_lower(&self.accounts)
     }
 
     fn me_id(&self) -> String {
@@ -1743,32 +1740,7 @@ impl ChatPane {
 
     /// Rows after the event toggles, deleted-message hiding, ignores and search.
     fn compute_shown(&mut self) -> Vec<RowRef> {
-        let rs = &self.settings;
-        let rows = self.store.rows();
-        let mut bombs: HashSet<String> = HashSet::new();
-        for r in rows {
-            if let RowBody::Notice(n) = &r.body {
-                if let Some(g) = n.gift_id.as_ref().filter(|g| !g.is_empty()) {
-                    let id = n.source_msg_id.clone().filter(|s| !s.is_empty()).unwrap_or(n.msg_id.clone());
-                    if id.ends_with("submysterygift") {
-                        bombs.insert(g.clone());
-                    }
-                }
-            }
-        }
-        let visible: Vec<RowRef> = rows
-            .iter()
-            .filter(|r| match &r.body {
-                RowBody::Notice(n) => n.seventv.is_some() || notice_visible(&n.msg_id, n.source_msg_id.as_deref(), n.gift_id.as_deref(), &bombs),
-                RowBody::ModFeed(_) => rs.show_mod_actions,
-                RowBody::Automod(_) => rs.show_automod,
-                RowBody::Msg(m) => !(m.deleted && rs.deleted_messages == "hide"),
-                RowBody::Rumble(m) => !(m.deleted && rs.deleted_messages == "hide"),
-                RowBody::Kick(m) => !(m.deleted && rs.deleted_messages == "hide") && kick_event_visible(m.notice.as_deref()),
-                _ => true,
-            })
-            .cloned()
-            .collect();
+        let visible = agu_chat_model::shown::visible_rows(self.store.rows(), &self.settings);
         let mut shown = filter_ignored(&visible, &self.ignores, &mut self.ignore_cache);
         if self.search_open {
             let q = parse_search(&self.query);
@@ -1849,16 +1821,7 @@ impl ChatPane {
     }
 
     pub(super) fn is_own(&self, r: &Row) -> bool {
-        let Some(me) = self.accounts.get(&r.platform).and_then(|a| a.user.as_ref()) else { return false };
-        let (id, login) = match &r.body {
-            RowBody::Msg(m) => (m.user.id.as_str(), m.user.login.as_str()),
-            RowBody::Rumble(m) => (m.user.id.as_str(), m.user.login.as_str()),
-            RowBody::Kick(m) => (m.user.id.as_str(), m.user.login.as_str()),
-            RowBody::YouTube(m) => (m.user.id.as_str(), ""),
-            RowBody::X(m) => (m.user.id.as_str(), m.user.login.as_str()),
-            _ => return false,
-        };
-        (!me.id.is_empty() && id == me.id) || (!me.login.is_empty() && login.to_lowercase() == me.login.to_lowercase())
+        super::mentions::is_own(r, &self.accounts)
     }
 
     pub(super) fn rule_of(&mut self, r: &RowRef) -> Option<HighlightRule> {

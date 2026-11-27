@@ -6,7 +6,10 @@ import android.os.Bundle
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import androidx.activity.SystemBarStyle
 import androidx.activity.ComponentActivity
@@ -41,10 +44,26 @@ class MainActivity : ComponentActivity() {
             delay(1500)
             val items = runCatching { Core.json.parseToJsonElement(java.io.File(filesDir, name).readText()).jsonArray }.getOrNull() ?: return@launch
             for (it in items) {
-                runCatching { Core.call("dev.frame", it.jsonObject) }
+                // `{call, args}` runs any call (e.g. settings.set with highlight rules, dev.me); `{sk, frame}` feeds a frame
+                val o = it.jsonObject
+                o["wait"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()?.let { delay(it) }
+                val call = o["call"]?.jsonPrimitive?.contentOrNull
+                if (call == null && o["sk"] == null) continue
+                runCatching { if (call != null) Core.call(call, o["args"]?.jsonObject ?: JsonObject(emptyMap())) else Core.call("dev.frame", o) }
+                    .onFailure { e -> android.util.Log.w("devFrames", "${call ?: "frame"}: ${e.message}") }
                 delay(120)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        vm.setActive(true)
+    }
+
+    override fun onPause() {
+        vm.setActive(false)
+        super.onPause()
     }
 
     override fun onNewIntent(intent: android.content.Intent) {

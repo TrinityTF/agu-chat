@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -51,9 +52,10 @@ private val timeFmt = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.syste
 private const val EmoteDp = 28f
 private const val BadgeDp = 16f
 private const val GifDp = 120f
+private const val MarkDp = 15f
 
 /** What an inline placeholder shows; the placeholder size is resolved at composition time from [aspects]. */
-private class InlineSpec(val url: String, val overlays: List<String>, val heightDp: Float)
+private class InlineSpec(val url: String, val overlays: List<String>, val heightDp: Float, val mark: String? = null)
 
 private class Built(val text: AnnotatedString, val inline: Map<String, InlineSpec>)
 
@@ -61,13 +63,19 @@ fun parseColor(hex: String?): Color? = hex?.let {
     runCatching { Color(android.graphics.Color.parseColor(it)) }.getOrNull()
 }
 
-private fun build(row: Row): Built {
+private fun build(row: Row, showMark: Boolean): Built {
     val inline = LinkedHashMap<String, InlineSpec>()
     val nameColor = parseColor(row.user?.color) ?: AguColors.Text
     val name = row.user?.name?.takeIf { it.isNotEmpty() } ?: row.user?.login
     var n = 0
     val text = buildAnnotatedString {
         withStyle(SpanStyle(color = AguColors.Muted, fontSize = 11.sp)) { append(timeFmt.format(Instant.ofEpochMilli(row.ts))); append(" ") }
+        // in a merged tab every line says which platform it came from
+        if (showMark && row.platform.isNotEmpty()) {
+            inline["p"] = InlineSpec("", emptyList(), MarkDp, mark = row.platform)
+            appendInlineContent("p", "•")
+            append(" ")
+        }
         for (b in row.badges) {
             val id = "b${n++}"
             inline[id] = InlineSpec(b.url, emptyList(), BadgeDp)
@@ -125,6 +133,10 @@ private fun build(row: Row): Built {
 /** Resolves the placeholders against the current aspect cache; reading it here subscribes the row to changes. */
 private fun inlineContent(spec: Map<String, InlineSpec>, density: Density): Map<String, InlineTextContent> =
     spec.mapValues { (_, s) ->
+        if (s.mark != null) {
+            val side = with(density) { s.heightDp.dp.toSp() }
+            return@mapValues InlineTextContent(Placeholder(side, side, PlaceholderVerticalAlign.TextCenter)) { PlatformMark(s.mark) }
+        }
         val aspect = (aspects[s.url] ?: 1f).coerceIn(0.2f, 8f)
         val h = with(density) { s.heightDp.dp.toSp() }
         val w = with(density) { (s.heightDp * aspect).dp.toSp() }
@@ -149,22 +161,29 @@ private fun inlineContent(spec: Map<String, InlineSpec>, density: Density): Map<
 private val bodyStyle = TextStyle(color = AguColors.Text, fontSize = 15.sp)
 
 @Composable
-fun MessageRow(row: Row, onLongPress: (Row) -> Unit, modifier: Modifier = Modifier) {
-    val built = remember(row) { build(row) }
+fun MessageRow(row: Row, onLongPress: (Row) -> Unit, modifier: Modifier = Modifier, showMark: Boolean = false, flash: Boolean = false, onTap: (() -> Unit)? = null) {
+    val built = remember(row, showMark) { build(row, showMark) }
     val density = LocalDensity.current
     val longPress by rememberUpdatedState(onLongPress)
 
-    val barColor = when (row.kind) {
-        "notice" -> AguColors.Purple
-        "automod" -> AguColors.Amber
-        else -> null
+    // a line naming you is red, ahead of a highlight rule's colour (the desktop's order)
+    val rule = row.highlight?.let { h -> parseColor(h.color)?.let { it to h.alpha } }
+    val barColor = when {
+        row.mention -> MentionRed
+        row.kind == "notice" -> AguColors.Purple
+        row.kind == "automod" -> AguColors.Amber
+        else -> rule?.first
     }
     var m = modifier
         .fillMaxWidth()
-        .pointerInput(row.key) { detectTapGestures(onLongPress = { longPress(row) }) }
+        .pointerInput(row.key) { detectTapGestures(onTap = onTap?.let { t -> { _ -> t() } }, onLongPress = { longPress(row) }) }
     if (row.firstMsg) m = m.background(AguColors.Green.copy(alpha = 0.10f))
+    if (row.mention) m = m.background(MentionRed.copy(alpha = 0.12f))
+    else if (rule != null && row.kind != "notice" && row.kind != "automod") m = m.background(rule.first.copy(alpha = rule.second))
+    if (flash) m = m.background(AguColors.Amber.copy(alpha = 0.30f))
     if (barColor != null) m = m.drawBehind { drawRect(barColor, size = Size(3.dp.toPx(), size.height)) }
     Column(m.padding(start = if (barColor != null) 11.dp else 8.dp, end = 8.dp, top = 3.dp, bottom = 3.dp)) {
+        if (row.mention) Text("MENTIONS YOU", color = MentionLabel, fontSize = 10.sp, fontWeight = FontWeight.Bold)
         row.reply?.let { r ->
             Text(
                 "Replying to @${r.user.orEmpty()}: ${r.text.orEmpty()}",
@@ -188,5 +207,21 @@ fun MessageRow(row: Row, onLongPress: (Row) -> Unit, modifier: Modifier = Modifi
         if (row.parts.isNotEmpty() || row.kind == "msg" && row.system.isNullOrEmpty()) {
             Text(built.text, inlineContent = inlineContent(built.inline, density), style = bodyStyle)
         }
+    }
+}
+
+private val MentionRed = Color(0xFFFF3B3B)
+private val MentionLabel = Color(0xFFFCA5A5)
+
+/** The small platform-coloured mark in front of a line of a merged tab. */
+@Composable
+fun PlatformMark(platform: String, modifier: Modifier = Modifier) {
+    val letter = when (platform) { "twitch" -> "T"; "kick" -> "K"; "youtube" -> "Y"; "rumble" -> "R"; "x" -> "X"; else -> "?" }
+    val dark = platform == "kick" || platform == "rumble" || platform == "x"
+    Box(
+        modifier.fillMaxSize().clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp)).background(platformColor(platform)),
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        Text(letter, color = if (dark) Color.Black else Color.White, fontSize = 9.sp, fontWeight = FontWeight.Black, lineHeight = 9.sp)
     }
 }

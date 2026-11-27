@@ -41,6 +41,10 @@ fun Composer(
     onSend: () -> Unit,
     onLogin: () -> Unit,
     modifier: Modifier = Modifier,
+    /** In a merged tab: who the message goes to ("All" or a channel); null hides the picker. */
+    target: SendTargetChip? = null,
+    onTarget: () -> Unit = {},
+    placeholder: String = "Send a message",
 ) {
     Column(modifier.fillMaxWidth().background(AguColors.Bg)) {
         if (replyingTo != null) {
@@ -60,6 +64,18 @@ fun Composer(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (target != null) {
+                Row(
+                    Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(22.dp)).background(AguColors.Surface2)
+                        .clickable(onClick = onTarget).padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (target.platform != null) Box(Modifier.size(15.dp)) { PlatformMark(target.platform) }
+                    Text(target.label, color = AguColors.Text, fontSize = 13.sp, maxLines = 1)
+                    Text("▾", color = AguColors.Muted, fontSize = 11.sp)
+                }
+            }
             Box(
                 Modifier.weight(1f).heightIn(min = 44.dp).clip(RoundedCornerShape(22.dp)).background(AguColors.Surface2)
                     .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -68,7 +84,7 @@ fun Composer(
                 if (!canSend) {
                     Text(readOnlyReason?.takeIf { it.isNotBlank() } ?: "Chat is read-only", color = AguColors.Muted, fontSize = 15.sp, maxLines = 1)
                 } else {
-                    if (text.isEmpty()) Text("Send a message", color = AguColors.Muted, fontSize = 15.sp)
+                    if (text.isEmpty()) Text(placeholder, color = AguColors.Muted, fontSize = 15.sp)
                     BasicTextField(
                         value = text,
                         onValueChange = onText,
@@ -97,3 +113,6 @@ fun Composer(
         }
     }
 }
+
+/** What the send target button shows: a channel (with its platform mark) or "All". */
+data class SendTargetChip(val label: String, val platform: String?)

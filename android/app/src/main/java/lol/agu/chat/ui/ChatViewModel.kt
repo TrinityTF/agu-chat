@@ -26,10 +26,22 @@ import kotlinx.serialization.json.put
 import lol.agu.chat.Core
 import lol.agu.chat.CoreError
 
-/** State holder for the whole app: tabs, per-chat rows, connection states and accounts. Main-thread state only. */
+/** State holder for the whole app: tabs, per-tab rows, connection states and accounts. Main-thread state only. */
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val tabs = mutableStateListOf<Tab>()
+    /** Connection state per channel (source key). */
     val conns = mutableStateMapOf<String, Conn>()
+    /** What happened in a tab you are not looking at: new messages, or a mention / highlight. */
+    val unread = mutableStateMapOf<String, Dot>()
+    /** The bell's count: unread mentions and highlights in any open chat. */
+    var mentionsUnread by mutableStateOf(0)
+        private set
+    var mentionEntries by mutableStateOf<List<MentionEntry>>(emptyList())
+        private set
+    var mentionsOpen by mutableStateOf(false)
+        private set
+    var jump by mutableStateOf<Jump?>(null)
+        private set
     var accounts by mutableStateOf<Map<String, AccountState>>(emptyMap())
         private set
     var appVersion by mutableStateOf("")
@@ -42,10 +54,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Platforms with a login call in flight (Rumble's password or code is being checked). */
     val loginBusy = mutableStateMapOf<String, Boolean>()
 
-    private val rowLists = HashMap<String, SnapshotStateList<Row>>()
-    private val rowIndex = HashMap<String, HashMap<String, Int>>() // sk -> row key -> position
+    private val alerts = Alerts(app)
+    private var selectedId: String? = null
 
-    fun rowsFor(sk: String): SnapshotStateList<Row> = rowLists.getOrPut(sk) { mutableStateListOf() }
+    private val rowLists = HashMap<String, SnapshotStateList<Row>>()
+    private val rowIndex = HashMap<String, HashMap<String, Int>>() // view key -> row key -> position
+
+    fun rowsFor(vk: String): SnapshotStateList<Row> = rowLists.getOrPut(vk) { mutableStateListOf() }
 
     init {
         // Collect the core's events first so nothing is missed while the saved tabs reopen.
@@ -54,6 +69,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 when (e.kind) {
                     "rows" -> onRows(e.data)
                     "conn" -> onConn(e.data)
+                    "activity" -> onActivity(e.data)
+                    "alert" -> alerts.fire(e.data)
+                    "mentions" -> onMentions(e.data)
                     "accounts" -> parseAccounts(e.data)?.let { withContext(Dispatchers.Main) { accounts = it } }
                     "login.webview", "login.show" -> onLoginRequest(e.kind, e.data)
                     "login.close", "login.forget" -> {
@@ -67,6 +85,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
+            alerts.prepare()
             restoreTabs()
             refreshAccounts()
             runCatching { Core.call("app.info").jsonObject["version"]?.jsonPrimitive?.contentOrNull }
@@ -78,19 +97,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun onRows(data: JsonElement) {
         val o = data as? JsonObject ?: return
-        val sk = o["sk"]?.jsonPrimitive?.contentOrNull ?: return
+        val vk = o["vk"]?.jsonPrimitive?.contentOrNull ?: return
         val reset = o["reset"]?.jsonPrimitive?.contentOrNull == "true"
         // Decode off the main thread; a malformed row is skipped rather than dropping the batch.
         val upsert = (o["upsert"] as? JsonArray)?.mapNotNull {
             runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull()
         } ?: emptyList()
         val remove = (o["remove"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
-        withContext(Dispatchers.Main) { applyRows(sk, reset, upsert, remove) }
+        withContext(Dispatchers.Main) { if (tabs.any { it.id == vk }) applyRows(vk, reset, upsert, remove) }
     }
 
-    private fun applyRows(sk: String, reset: Boolean, upsert: List<Row>, remove: List<String>) {
-        val list = rowsFor(sk)
-        val index = rowIndex.getOrPut(sk) { HashMap() }
+    private fun applyRows(vk: String, reset: Boolean, upsert: List<Row>, remove: List<String>) {
+        val list = rowsFor(vk)
+        val index = rowIndex.getOrPut(vk) { HashMap() }
         if (reset) {
             list.clear()
             index.clear()
@@ -123,6 +142,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) { conns[sk] = conn }
     }
 
+    private suspend fun onActivity(data: JsonElement) {
+        val o = data as? JsonObject ?: return
+        val vk = o["vk"]?.jsonPrimitive?.contentOrNull ?: return
+        val dot = if (o["kind"]?.jsonPrimitive?.contentOrNull == "highlight") Dot.Highlight else Dot.Message
+        withContext(Dispatchers.Main) {
+            // the tab you are looking at has seen its messages
+            if (vk == selectedId || tabs.none { it.id == vk }) return@withContext
+            val had = unread[vk]
+            if (had == null || had < dot) unread[vk] = dot
+        }
+    }
+
+    private suspend fun onMentions(data: JsonElement) {
+        val n = (data as? JsonObject)?.get("unread")?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: return
+        withContext(Dispatchers.Main) { mentionsUnread = n }
+        if (mentionsOpen) loadMentions()
+    }
+
     private fun parseAccounts(data: JsonElement): Map<String, AccountState>? {
         val o = data as? JsonObject ?: return null
         return o.mapNotNull { (k, v) ->
@@ -132,62 +169,158 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- tabs ----------------------------------------------------------------------------------
 
+    private fun newId() = "t" + java.util.UUID.randomUUID().toString().take(8)
+
+    /** The tab you are looking at: it has seen its new messages and mentions. */
+    fun select(id: String?) {
+        selectedId = id
+        if (id != null) unread.remove(id)
+    }
+
     private suspend fun restoreTabs() {
         val saved = runCatching {
             Core.json.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(SavedTab.serializer()), Core.call("tabs.get"))
         }.getOrElse { emptyList() }
-        // Show the tabs immediately with a guessed source key, then open each chat.
-        tabs.addAll(saved.map { Tab(it.platform, it.channel, "${it.platform}:${it.channel.lowercase()}") })
-        for (s in saved) {
-            viewModelScope.launch {
-                val sk = openChat(s.platform, s.channel) ?: return@launch
-                val i = tabs.indexOfFirst { it.platform == s.platform && it.channel == s.channel }
-                if (i >= 0) tabs[i] = tabs[i].copy(sk = sk)
-            }
-        }
+        // Show the tabs immediately, then open each one (a channel that fails shows its error as its status).
+        val restored = saved.filter { it.channels.isNotEmpty() }.map { Tab(newId(), it.name, it.channels) }
+        tabs.addAll(restored)
+        for (t in restored) viewModelScope.launch { openView(t, lenient = true) }
     }
 
-    private suspend fun openChat(platform: String, channel: String): String? = runCatching {
-        Core.call("chat.open", buildJsonObject { put("platform", platform); put("channel", channel) })
-            .jsonObject["sk"]?.jsonPrimitive?.contentOrNull
-    }.getOrNull()
+    private suspend fun openView(tab: Tab, lenient: Boolean = false): String? = try {
+        Core.call("view.open", buildJsonObject {
+            put("vk", tab.id)
+            put("channels", channelsJson(tab.channels))
+            if (lenient) put("lenient", true)
+        })
+        null
+    } catch (e: CoreError) {
+        e.message ?: "Could not open the chat"
+    }
 
-    /** Opens a chat and adds its tab; returns an error message to show, or null on success. */
+    private fun channelsJson(channels: List<ChannelRef>) =
+        JsonArray(channels.map { buildJsonObject { put("platform", it.platform); put("channel", it.channel) } })
+
+    private fun clean(channelRaw: String) = channelRaw.trim().trimStart('#', '@')
+
+    /** Opens a chat in a new tab; returns an error message to show, or null on success. */
     suspend fun addTab(platform: String, channelRaw: String): String? {
-        val channel = channelRaw.trim().trimStart('#', '@')
+        val channel = clean(channelRaw)
         if (channel.isEmpty()) return "Enter a channel name"
-        val existing = tabs.firstOrNull { it.platform == platform && it.channel.equals(channel, true) }
-        if (existing != null) return null
-        return try {
-            val sk = Core.call("chat.open", buildJsonObject { put("platform", platform); put("channel", channel) })
-                .jsonObject["sk"]?.jsonPrimitive?.contentOrNull ?: "$platform:${channel.lowercase()}"
-            tabs.add(Tab(platform, channel, sk))
-            saveTabs()
-            null
+        val tab = Tab(newId(), "", listOf(ChannelRef(platform, channel)))
+        openView(tab)?.let { return it }
+        tabs.add(tab)
+        saveTabs()
+        return null
+    }
+
+    /** Adds a channel to a tab (merged into its list); returns an error message to show, or null on success. */
+    suspend fun addChannel(tab: Tab, platform: String, channelRaw: String): String? {
+        val channel = clean(channelRaw)
+        if (channel.isEmpty()) return "Enter a channel name"
+        val ref = ChannelRef(platform, channel)
+        if (tab.channels.any { it.sk() == ref.sk() }) return "That channel is already in this tab"
+        return changeChannels(tab, tab.channels + ref)
+    }
+
+    fun removeChannel(tab: Tab, ref: ChannelRef) {
+        val rest = tab.channels.filter { it != ref }
+        if (rest.isEmpty()) { closeTab(tab); return }
+        viewModelScope.launch { changeChannels(tab, rest) }
+    }
+
+    private suspend fun changeChannels(tab: Tab, channels: List<ChannelRef>): String? {
+        try {
+            Core.call("view.set", buildJsonObject { put("vk", tab.id); put("channels", channelsJson(channels)) })
         } catch (e: CoreError) {
-            e.message ?: "Could not open the chat"
+            return e.message ?: "Could not open the chat"
         }
+        val i = tabs.indexOfFirst { it.id == tab.id }
+        if (i >= 0) tabs[i] = tabs[i].copy(channels = channels)
+        conns.keys.filter { sk -> tabs.none { sk in it.sks } }.forEach { conns.remove(it) }
+        saveTabs()
+        return null
+    }
+
+    fun renameTab(tab: Tab, name: String) {
+        val i = tabs.indexOfFirst { it.id == tab.id }
+        if (i < 0) return
+        tabs[i] = tabs[i].copy(name = name.trim())
+        viewModelScope.launch { saveTabs() }
     }
 
     fun closeTab(tab: Tab) {
-        tabs.remove(tab)
+        tabs.removeAll { it.id == tab.id }
+        unread.remove(tab.id)
         viewModelScope.launch {
-            runCatching { Core.call("chat.close", buildJsonObject { put("sk", tab.sk) }) }
-            rowLists.remove(tab.sk)
-            rowIndex.remove(tab.sk)
-            conns.remove(tab.sk)
+            runCatching { Core.call("view.close", buildJsonObject { put("vk", tab.id) }) }
+            rowLists.remove(tab.id)
+            rowIndex.remove(tab.id)
+            tab.sks.filter { sk -> tabs.none { sk in it.sks } }.forEach { conns.remove(it) }
             saveTabs()
         }
     }
 
     private suspend fun saveTabs() {
-        val arr = JsonArray(tabs.map { buildJsonObject { put("platform", it.platform); put("channel", it.channel) } })
+        val arr = JsonArray(tabs.map { buildJsonObject { put("name", it.name); put("channels", channelsJson(it.channels)) } })
         runCatching { Core.call("tabs.set", buildJsonObject { put("tabs", arr) }) }
+    }
+
+    // ---- mentions ------------------------------------------------------------------------------
+
+    /** The bell: opening the list marks everything read (a red tab dot goes grey: seen here). */
+    fun openMentions() {
+        mentionsOpen = true
+        for (k in unread.keys.toList()) if (unread[k] == Dot.Highlight) unread[k] = Dot.Message
+        viewModelScope.launch {
+            runCatching { Core.call("mentions.open", buildJsonObject { put("open", true) }) }
+            loadMentions()
+        }
+    }
+
+    fun closeMentions() {
+        mentionsOpen = false
+        viewModelScope.launch { runCatching { Core.call("mentions.open", buildJsonObject { put("open", false) }) } }
+    }
+
+    private suspend fun loadMentions() {
+        val list = runCatching { Core.call("mentions.list") as JsonArray }.getOrNull() ?: return
+        val parsed = withContext(Dispatchers.Default) {
+            list.mapNotNull { e ->
+                runCatching {
+                    val o = e.jsonObject
+                    fun s(k: String) = o[k]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    MentionEntry(
+                        s("id"), s("vk"), s("sk"), s("channel"), s("platform"), s("ts").toLongOrNull() ?: 0,
+                        s("read") == "true", s("whisper") == "true",
+                        Core.json.decodeFromJsonElement(Row.serializer(), o["row"]!!),
+                    )
+                }.getOrNull()
+            }
+        }
+        mentionEntries = parsed
+    }
+
+    /** Takes you to a mention in its chat; false when that chat is no longer open anywhere. */
+    fun jumpToMention(e: MentionEntry): Boolean {
+        val tab = tabs.firstOrNull { it.id == e.vk && e.sk in it.sks } ?: tabs.firstOrNull { e.sk in it.sks } ?: return false
+        closeMentions()
+        jump = Jump(tab.id, e.row.key, System.nanoTime())
+        return true
+    }
+
+    fun jumpDone(j: Jump) {
+        if (jump == j) jump = null
+    }
+
+    /** The app is on screen or not: a highlight vibrates only in the background. */
+    fun setActive(active: Boolean) {
+        viewModelScope.launch { runCatching { Core.call("app.active", buildJsonObject { put("active", active) }) } }
     }
 
     // ---- sending -------------------------------------------------------------------------------
 
-    /** Sends a message; returns the error text to show, or null when it went out. */
+    /** Sends a message to one chat; returns the error text to show, or null when it went out. */
     suspend fun send(sk: String, text: String, replyTo: String?): String? = try {
         Core.call("chat.send", buildJsonObject {
             put("sk", sk)

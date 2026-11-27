@@ -35,6 +35,11 @@ data class Part(
 @Immutable
 data class ReplyRef(val user: String? = null, val text: String? = null, val parentId: JsonPrimitive? = null)
 
+/** A matched highlight rule: the row's colour, and how strong its tint is. */
+@Serializable
+@Immutable
+data class Highlight(val color: String, val alpha: Float = 0.14f)
+
 @Serializable
 @Immutable
 data class Row(
@@ -56,6 +61,10 @@ data class Row(
     val system: String? = null,
     val bits: Double? = null,
     val status: String? = null,
+    /** a highlight rule matched this line */
+    val highlight: Highlight? = null,
+    /** the line names you (drawn red) */
+    val mention: Boolean = false,
 ) {
     /** The text of the message as plain text, for copying. */
     fun plainText(): String = parts.joinToString("") {
@@ -98,15 +107,44 @@ data class AccountState(
     val unsupported: Boolean = false,
 )
 
+/** One channel of a tab. */
 @Serializable
 @Immutable
-data class SavedTab(val platform: String, val channel: String)
+data class ChannelRef(val platform: String, val channel: String)
 
-/** An open channel tab; [sk] is the core's source key for its chat. */
+@Serializable
 @Immutable
-data class Tab(val platform: String, val channel: String, val sk: String) {
-    val id get() = "$platform:${channel.lowercase()}"
+data class SavedTab(val name: String = "", val channels: List<ChannelRef> = emptyList())
+
+/** The core's source key of a channel (Twitch and Kick names are kept lowercase). */
+fun ChannelRef.sk(): String = "$platform:${if (platform == "twitch" || platform == "kick") channel.lowercase() else channel}"
+
+/**
+ * An open tab: one or more channels from any platforms merged into one list. [id] is the core's view key; [name] is
+ * the user's own title ("" shows the channels' names).
+ */
+@Immutable
+data class Tab(val id: String, val name: String, val channels: List<ChannelRef>) {
+    val sks get() = channels.map { it.sk() }
+
+    /** The title in the tab strip: the name, else the first channel (and "…" when there are more). */
+    fun title(full: Boolean = false): String = when {
+        name.isNotBlank() -> name
+        full || channels.size < 2 -> channels.joinToString(", ") { it.channel }
+        else -> channels.first().channel + ", …"
+    }
 }
+
+/** What a tab's small circle says; a mention beats live, live beats new messages. */
+enum class Dot { Message, Live, Highlight }
+
+/** One line of the Mentions screen. */
+@Immutable
+data class MentionEntry(val id: String, val vk: String, val sk: String, val channel: String, val platform: String, val ts: Long, val read: Boolean, val whisper: Boolean, val row: Row)
+
+/** Show this row of this tab (a tapped mention), once. */
+@Immutable
+data class Jump(val vk: String, val key: String, val nonce: Long)
 
 /** The core wants a sign-in screen: a WebView on [url]. [show] means "point the open window here" (Twitch's authorise page). */
 @Immutable
