@@ -1,0 +1,18 @@
+[package]
+name = "agu-chat-model"
+version = "0.3.11"
+edition = "2021"
+description = "Agu Chat's UI-independent chat logic (rows, emotes, badges, moderation), shared by the desktop and Android apps"
+
+[dependencies]
+agu-chat-core = { path = "../core" }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1"
+emojis = "0.9"
+fancy-regex = "0.14"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip"] }
+smallvec = "1"

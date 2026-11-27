@@ -74,6 +74,7 @@ name = "agu-chat-gpui"
 version = "0.3.11"
 dependencies = [
  "agu-chat-core",
+ "agu-chat-model",
  "chrono",
  "core-foundation 0.10.0",
  "core-graphics 0.24.0",
@@ -99,6 +100,23 @@ dependencies = [
  "windows 0.58.0",
  "windows-core 0.61.2",
  "wry",
+]
+
+[[package]]
+name = "agu-chat-model"
+version = "0.3.11"
+dependencies = [
+ "agu-chat-core",
+ "chrono",
+ "emojis",
+ "fancy-regex",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]

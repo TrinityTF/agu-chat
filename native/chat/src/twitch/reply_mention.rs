@@ -45,7 +45,7 @@ pub fn drop_reply_mention(parts: Vec<MsgPart>, parent: &str) -> Vec<MsgPart> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::twitch::parts::EmoteSource;
+    use crate::twitch::parts::EmoteSource;
 
     fn text(t: &str) -> MsgPart {
         MsgPart::Text(t.into())

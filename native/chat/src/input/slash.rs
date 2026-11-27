@@ -9,9 +9,9 @@ use std::sync::Arc;
 use agu_chat_core::protocol::{AguBridge, SourceRef};
 use serde_json::{json, Map, Value};
 
-use crate::chat::mod_actions::ToastMsg;
-use crate::chat::mod_buttons::parse_duration;
-use crate::chat::mod_caps::{relay_api, ModCaps, RelayResponse};
+use crate::mod_actions::ToastMsg;
+use crate::mod_buttons::parse_duration;
+use crate::mod_caps::{relay_api, ModCaps, RelayResponse};
 
 /// `capKey` names a field of `ModCaps`; the dropdown dims a command the account can't use.
 #[derive(Clone, Copy, Debug)]

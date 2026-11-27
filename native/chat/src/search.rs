@@ -83,7 +83,7 @@ pub fn search_rows(rows: &[Row], query: &str) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::types::*;
+    use crate::types::*;
     use agu_chat_core::protocol::Platform;
 
     fn row(key: String, platform: Platform, sk: &str, body: RowBody) -> Row {

@@ -331,7 +331,7 @@ pub struct IgnoreCache(HashMap<usize, (RowRef, Option<RowRef>)>);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::types::*;
+    use crate::types::*;
 
     fn row(key: &str, platform: Platform, body: RowBody) -> RowRef {
         Arc::new(Row { key: key.into(), ts: 1, sk: format!("{}:chan", platform.as_str()), platform, ord: 0, backlog: false, body })

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use super::emoji::{split_emoji, Seg};
 use super::emotes::{EmoteLookup, EmoteProvider, EmoteSets};
-use crate::chat::chat_text::{as_link, mention_word};
+use crate::chat_text::{as_link, mention_word};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TwitchEmoteRange {

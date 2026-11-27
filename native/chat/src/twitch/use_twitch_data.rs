@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::badges::{build_badge_map, BadgeMap};
 use super::emotes::{bttv_sets, fetch_seven_tv_on, ffz_sets, flush_cache, seven_tv_sets, seven_tv_sets_on, twitch_sets_cached, twitch_sets_fresh, CacheMode, ProviderScopedMap, SevenTvIds, SevenTvPlatform, TwitchEmotesResp};
-use crate::chat::mod_caps::{relay_api, ModCaps};
+use crate::mod_caps::{relay_api, ModCaps};
 
 #[derive(Clone, Default)]
 pub struct ProviderSets {

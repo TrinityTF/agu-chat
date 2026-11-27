@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::emotes::{flush_cache, read_cache, write_cache, EMOTE_CHANNEL_TTL_MS};
 use super::parts::{split_keep_ws, MsgPart};
-use crate::chat::mod_caps::relay_api;
+use crate::mod_caps::relay_api;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tier {

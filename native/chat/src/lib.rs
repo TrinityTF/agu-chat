@@ -1,0 +1,15 @@
+//! Agu Chat's chat logic without any UI: the row store, message parts (emotes, mentions, links), badges, emote sets,
+//! highlights, ignores, moderation commands. The desktop (GPUI) app and the Android app both draw from these.
+pub mod chat_text;
+pub mod highlights;
+pub mod ignores;
+pub mod input;
+pub mod mod_actions;
+pub mod mod_buttons;
+pub mod mod_caps;
+pub mod net;
+pub mod search;
+pub mod store;
+pub mod thread;
+pub mod twitch;
+pub mod types;

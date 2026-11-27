@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 agu-chat-core = { path = "../core" }
+agu-chat-model = { path = "../chat" }
 gpui = "=0.2.2"
 futures = "0.3"
 rust-embed = { version = "8", features = ["debug-embed"] }

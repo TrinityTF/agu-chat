@@ -746,7 +746,7 @@ pub async fn fetch_twitch_picker_emotes(bridge: &Arc<dyn agu_chat_core::protocol
     let key = format!("emotes:twitch:channel:{channel_id}");
     cache_ready().await;
     let got = cached_or(&key, EMOTE_GLOBAL_TTL_MS, fresh, async {
-        let r = crate::chat::mod_caps::relay_api(bridge, source, "/api/chat/twitch-emotes", None, None).await;
+        let r = crate::mod_caps::relay_api(bridge, source, "/api/chat/twitch-emotes", None, None).await;
         r.ok.then(|| picker_json(&TwitchEmotesResp { channel: picker_list(r.body.get("channel")), global: picker_list(r.body.get("global")), other: picker_list(r.body.get("other")) }))
     })
     .await;

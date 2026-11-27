@@ -2,4 +2,4 @@
 pub mod autocomplete;
 pub mod inventory;
 pub mod send_box;
-pub mod slash;
+pub use agu_chat_model::input::slash;

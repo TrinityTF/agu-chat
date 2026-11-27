@@ -1,5 +1,5 @@
 //! Port of src/renderer/chat/twitch/colors.ts: fallback name colours and the "readable colors" lift.
-use crate::chat::types::ChatUser;
+use crate::types::ChatUser;
 
 const NAME_COLORS: [&str; 15] = [
     "#FF0000", "#0000FF", "#008000", "#B22222", "#FF7F50", "#9ACD32", "#FF4500", "#2E8B57", "#DAA520", "#D2691E", "#5F9EA0", "#1E90FF", "#FF69B4", "#8A2BE2", "#00FF7F",
