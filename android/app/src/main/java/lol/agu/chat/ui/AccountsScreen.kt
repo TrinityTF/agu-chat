@@ -101,7 +101,7 @@ private fun AccountCard(platform: String, state: AccountState, vm: ChatViewModel
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(platformColor(platform)))
+            PlatformLogo(platform, 18.dp)
             Text(platformLabel(platform), color = AguColors.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         }
         val loginLabel = if (needsRelogin(state)) "Log in again" else "Log in"

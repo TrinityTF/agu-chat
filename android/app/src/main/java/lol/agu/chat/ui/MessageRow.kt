@@ -755,12 +755,7 @@ private fun LinkCard(link: LinkRef, d: Display) {
 /** The small platform-coloured mark in front of a line of a merged tab. */
 @Composable
 fun PlatformMark(platform: String, modifier: Modifier = Modifier) {
-    val letter = when (platform) { "twitch" -> "T"; "kick" -> "K"; "youtube" -> "Y"; "rumble" -> "R"; "x" -> "X"; else -> "?" }
-    val dark = platform == "kick" || platform == "rumble" || platform == "x"
-    Box(
-        modifier.fillMaxSize().clip(RoundedCornerShape(3.dp)).background(platformColor(platform)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(letter, color = if (dark) Color.Black else Color.White, fontSize = 9.sp, fontWeight = FontWeight.Black, lineHeight = 9.sp)
-    }
+    val v = platformVector(platform)
+    if (v != null) androidx.compose.material3.Icon(v, contentDescription = platformLabel(platform), tint = platformColor(platform), modifier = modifier.fillMaxSize())
+    else Box(modifier.fillMaxSize().clip(RoundedCornerShape(3.dp)).background(platformColor(platform)))
 }

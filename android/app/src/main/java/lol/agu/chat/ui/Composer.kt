@@ -135,10 +135,11 @@ fun Composer(
                     Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(22.dp)).background(AguColors.Surface2)
                         .clickable(onClick = onTarget).padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (target.platform != null) Box(Modifier.size(15.dp)) { PlatformMark(target.platform) }
-                    Text(target.label, color = AguColors.Text, fontSize = 13.sp, maxLines = 1, modifier = Modifier.widthIn(max = 90.dp), overflow = TextOverflow.Ellipsis)
+                    val shown = if (target.platform != null) listOf(target.platform) else target.platforms.distinct().take(3)
+                    if (shown.isEmpty()) Text(target.label, color = AguColors.Text, fontSize = 13.sp, maxLines = 1)
+                    for (p in shown) PlatformLogo(p, 18.dp)
                     Text("▾", color = AguColors.Muted, fontSize = 11.sp)
                 }
             }
@@ -234,4 +235,5 @@ private fun SmileIcon(color: Color) {
 }
 
 /** What the send target button shows: a channel (with its platform mark) or "All". */
-data class SendTargetChip(val label: String, val platform: String?)
+/** What the box writes to: one chat ([platform]) or every chat ([platforms], the platforms of "All"). Shown as logos. */
+data class SendTargetChip(val label: String, val platform: String?, val platforms: List<String> = emptyList())

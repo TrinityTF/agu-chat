@@ -2,6 +2,7 @@ package lol.agu.chat.ui
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
@@ -26,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -95,42 +97,73 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
     var title by remember { mutableStateOf(spec.title) }
     // Twitch: the cookie came back, the screen waits for the authorise page
     var handedOver by remember { mutableStateOf(false) }
+    // A window the page opened (X's "Sign in with Google" is a popup that reports back to x.com and closes itself);
+    // without one the Google page has no opener to answer and stays white.
+    var popup by remember { mutableStateOf<WebView?>(null) }
     val web = remember {
-        WebView(ctx).apply {
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.mediaPlaybackRequiresUserGesture = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
-            val wv = this
+        fun setUp(w: WebView, main: Boolean) {
+            w.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            w.settings.javaScriptEnabled = true
+            w.settings.domStorageEnabled = true
+            w.settings.mediaPlaybackRequiresUserGesture = true
+            w.settings.cacheMode = WebSettings.LOAD_DEFAULT
+            w.settings.setSupportMultipleWindows(true)
+            w.settings.javaScriptCanOpenWindowsAutomatically = true
             CookieManager.getInstance().apply {
                 setAcceptCookie(true)
-                setAcceptThirdPartyCookies(wv, true)
+                setAcceptThirdPartyCookies(w, true)
             }
-            webViewClient = object : WebViewClient() {
+            w.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, r: WebResourceRequest): Boolean {
-                    // sign-in pages stay in the WebView; app links (intent:, market:, twitch:) go nowhere
+                    // sign-in pages stay in the WebView; app links (intent:, market:, twitch:, vnd.youtube:) go nowhere
                     val s = r.url.scheme
                     return s != "https" && s != "http" && s != "about"
                 }
 
-                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) { progress = 10 }
-                override fun onPageFinished(view: WebView, url: String?) { progress = 100 }
+                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) { if (main) progress = 10 }
+                override fun onPageFinished(view: WebView, url: String?) { if (main) progress = 100 }
             }
-            webChromeClient = object : android.webkit.WebChromeClient() {
-                override fun onProgressChanged(view: WebView, newProgress: Int) { progress = newProgress }
+            w.webChromeClient = object : android.webkit.WebChromeClient() {
+                override fun onProgressChanged(view: WebView, newProgress: Int) { if (main) progress = newProgress }
+
+                override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
+                    popup?.destroy()
+                    val child = WebView(view.context)
+                    setUp(child, main = false)
+                    popup = child
+                    (resultMsg.obj as WebView.WebViewTransport).webView = child
+                    resultMsg.sendToTarget()
+                    return true
+                }
+
+                override fun onCloseWindow(window: WebView) {
+                    if (popup === window) {
+                        popup = null
+                        window.destroy()
+                    }
+                }
             }
         }
+        WebView(ctx).apply { setUp(this, main = true) }
     }
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
+            popup?.destroy()
             web.stopLoading()
             web.loadUrl("about:blank")
             web.destroy()
         }
     }
     val cancel = { vm.loginAnswer(request) }
-    BackHandler { if (!request.show && !handedOver && web.canGoBack()) web.goBack() else cancel() }
+    val closePopup = { popup?.let { p -> popup = null; p.destroy() } }
+    BackHandler {
+        val p = popup
+        when {
+            p != null -> if (p.canGoBack()) p.goBack() else closePopup()
+            !request.show && !handedOver && web.canGoBack() -> web.goBack()
+            else -> cancel()
+        }
+    }
 
     LaunchedEffect(request.id) {
         handedOver = false
@@ -161,6 +194,7 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
         if (progress in 1..99) LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth(), color = AguColors.Accent)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             AndroidView(factory = { web }, modifier = Modifier.fillMaxSize())
+            popup?.let { p -> key(p) { AndroidView(factory = { p }, modifier = Modifier.fillMaxSize()) } }
             if (handedOver && !request.show) {
                 Box(Modifier.fillMaxSize().background(AguColors.Bg), contentAlignment = Alignment.Center) {
                     Text("Signing in…", color = AguColors.Muted, fontSize = 15.sp)

@@ -31,6 +31,9 @@ import lol.agu.chat.CoreError
 import lol.agu.chat.Notifier
 import lol.agu.chat.Prefs
 
+/** Tabs shown next to the one you are on: four panes in all. */
+const val MAX_SPLIT = 3
+
 /** State holder for the whole app: tabs, per-tab rows, connection states and accounts. Main-thread state only. */
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val tabs = mutableStateListOf<Tab>()
@@ -51,9 +54,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** The tab to bring forward (one you just added); the screen scrolls to it and calls [focusDone]. A tab a whisper opens never gets it. */
     var focusTab by mutableStateOf<String?>(null)
 
-    /** The tab shown in the right pane of a wide screen (null: one pane). Kept with the tabs. */
-    var splitId by mutableStateOf<String?>(null)
-        private set
+    /** The tabs shown next to the one you are on (beside it on a wide screen, under it on a phone), in order. Kept with the tabs. */
+    val splitIds = mutableStateListOf<String>()
     /** Keep the chats connected while the app is in the background (a foreground service with a notification). */
     var stayConnected by mutableStateOf(Prefs.stayConnected(app))
         private set
@@ -302,7 +304,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // Show the tabs immediately, then open each one (a channel that fails shows its error as its status).
         val keep = saved.filter { it.channels.isNotEmpty() }
         val restored = keep.map { Tab(newId(), it.name, it.channels) }
-        restored.forEachIndexed { i, t -> if (keep[i].modMode) modMode[t.id] = true; if (keep[i].split) splitId = t.id }
+        restored.forEachIndexed { i, t -> if (keep[i].modMode) modMode[t.id] = true; if (keep[i].split && t.id !in splitIds) splitIds.add(t.id) }
         tabs.addAll(restored)
         for (t in restored) viewModelScope.launch { openView(t, lenient = true) }
     }
@@ -335,7 +337,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Opens a chat in a new tab; returns an error message to show, or null on success. [platform] "whisper" starts a whisper. */
     suspend fun addTab(platform: String, channelRaw: String): String? {
         if (clean(channelRaw).isEmpty()) return emptyName(platform)
-        val tab = Tab(newId(), "", listOf(refOf(platform, channelRaw)))
+        return addTabWith(listOf(refOf(platform, channelRaw)))
+    }
+
+    /** A new tab with all of [channels] merged in it (several platforms at once). Null on success, else what to show. */
+    suspend fun addTabWith(channels: List<ChannelRef>): String? {
+        if (channels.isEmpty()) return "Add at least one channel"
+        if (channels.any { it.isWhisper() } && channels.any { !it.isWhisper() }) return "A whisper can't share a split with channels."
+        val tab = Tab(newId(), "", channels.distinctBy { it.sk() })
         openView(tab)?.let { return it }
         tabs.add(tab)
         focusTab = tab.id
@@ -431,9 +440,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveOrder() { viewModelScope.launch { saveTabs() } }
 
-    /** Puts a tab in the right pane of a wide screen, or (null) goes back to one pane. Kept with the tabs. */
-    fun setSplit(id: String?) {
-        splitId = id
+    /** Puts a tab next to the one you are on (at most [MAX_SPLIT] of them). Kept with the tabs. */
+    fun addSplit(id: String) {
+        if (id in splitIds || splitIds.size >= MAX_SPLIT) return
+        splitIds.add(id)
+        viewModelScope.launch { saveTabs() }
+    }
+
+    fun removeSplit(id: String) {
+        if (splitIds.remove(id)) viewModelScope.launch { saveTabs() }
+    }
+
+    /** Back to one pane. */
+    fun clearSplit() {
+        if (splitIds.isEmpty()) return
+        splitIds.clear()
+        viewModelScope.launch { saveTabs() }
+    }
+
+    /** The tab you moved to was in the split: the one you came from takes its place there. */
+    fun swapSplit(from: String, to: String) {
+        val i = splitIds.indexOf(from)
+        if (i < 0) return
+        if (to in splitIds) splitIds.removeAt(i) else splitIds[i] = to
         viewModelScope.launch { saveTabs() }
     }
 
@@ -446,6 +475,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun closeTab(tab: Tab) {
         tabs.removeAll { it.id == tab.id }
+        splitIds.remove(tab.id)
         unread.remove(tab.id)
         viewModelScope.launch {
             runCatching { Core.call("view.close", buildJsonObject { put("vk", tab.id) }) }
@@ -458,7 +488,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun saveTabs() {
-        val arr = JsonArray(tabs.map { t -> buildJsonObject { put("name", t.name); put("channels", channelsJson(t.channels)); if (modMode[t.id] == true) put("modMode", true); if (splitId == t.id) put("split", true) } })
+        val arr = JsonArray(tabs.map { t -> buildJsonObject { put("name", t.name); put("channels", channelsJson(t.channels)); if (modMode[t.id] == true) put("modMode", true); if (t.id in splitIds) put("split", true) } })
         runCatching { Core.call("tabs.set", buildJsonObject { put("tabs", arr) }) }
     }
 

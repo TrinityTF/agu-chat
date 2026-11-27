@@ -282,8 +282,28 @@ fn unreachable(e: &net::FetchError, what: &str) -> String {
 }
 
 pub async fn claim(base: &str, verifier: &str, code: &str) -> Result<Claim, String> {
-    let (s, v) = json_post(&format!("{base}/kick/app/claim"), &[], &json!({"verifier": verifier, "code": code})).await.map_err(|e| unreachable(&e, "the Kick login service"))?;
-    parse_claim(s, &v)
+    claim_retrying(base, verifier, code, CLAIM_RETRY_FOR, CLAIM_RETRY_EVERY).await
+}
+
+/// How long a claim that can't reach the broker keeps trying, and how often. The broker keeps a code for 5 minutes.
+///
+/// On Android the code arrives while the browser is in front, and Android cuts a backgrounded app off the network (its
+/// DNS lookups fail with "No address associated with hostname"; debuggable builds are exempt). The claim then goes
+/// through as soon as the person is back in the app, instead of failing with "Could not reach".
+const CLAIM_RETRY_FOR: Duration = Duration::from_secs(240);
+const CLAIM_RETRY_EVERY: Duration = Duration::from_secs(2);
+
+async fn claim_retrying(base: &str, verifier: &str, code: &str, retry_for: Duration, every: Duration) -> Result<Claim, String> {
+    let until = tokio::time::Instant::now() + retry_for;
+    loop {
+        match json_post(&format!("{base}/kick/app/claim"), &[], &json!({"verifier": verifier, "code": code})).await {
+            Ok((s, v)) => return parse_claim(s, &v),
+            // a timed-out POST may have landed (and the broker deletes the code on first claim), so only a request that
+            // never got anywhere is repeated
+            Err(e) if !e.timed_out && tokio::time::Instant::now() + every < until => tokio::time::sleep(every).await,
+            Err(e) => return Err(unreachable(&e, "the Kick login service")),
+        }
+    }
 }
 
 pub async fn refresh_tokens(base: &str, refresh_token: &str) -> Result<Tokens, RefreshError> {
@@ -902,6 +922,35 @@ mod tests {
         let e = handle.await.unwrap().unwrap_err();
         assert!(e.contains("not found"), "{e}");
         assert!(seen.lock().unwrap()[0].contains("\"code\":\"wrong\""));
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_cannot_reach_the_broker_keeps_trying_until_it_can() {
+        // Android cuts a backgrounded app off the network; the broker becomes reachable once the person is back
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free); // nothing listens yet: every attempt is refused
+        let claim_json = json!({"access_token": "A", "refresh_token": "R", "expires_in": 7200, "scope": "", "user": {"id": 7, "slug": "u", "name": "U"}}).to_string();
+        let base = format!("http://127.0.0.1:{port}");
+        let attempt = tokio::spawn(async move { claim_retrying(&base, "v", "c", Duration::from_secs(10), Duration::from_millis(100)).await });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = s.read(&mut buf).await;
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{claim_json}", claim_json.len());
+        s.write_all(resp.as_bytes()).await.unwrap();
+        let _ = s.shutdown().await;
+        assert_eq!(attempt.await.unwrap().unwrap().user.slug, "u");
+    }
+
+    #[tokio::test]
+    async fn a_claim_gives_up_when_the_broker_stays_unreachable() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", free.local_addr().unwrap().port());
+        drop(free);
+        let e = claim_retrying(&base, "v", "c", Duration::from_millis(500), Duration::from_millis(100)).await.unwrap_err();
+        assert_eq!(e, "Could not reach the Kick login service");
     }
 
     #[tokio::test]

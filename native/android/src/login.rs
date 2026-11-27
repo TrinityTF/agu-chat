@@ -157,7 +157,10 @@ impl LoginBridge {
 }
 
 pub const X_LOGIN_URL: &str = "https://x.com/i/flow/login";
-pub const YOUTUBE_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
+/// Google signs in, then youtube.com/signin sets the session cookies and redirects to `continue`. That is a plain text
+/// file rather than YouTube's front page: the page's scripts can hand a phone over to the YouTube app, which then took
+/// the sign-in out of Agu Chat, and the cookies are all the app needs.
+pub const YOUTUBE_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2Frobots.txt";
 pub const TWITCH_LOGIN_URL: &str = "https://www.twitch.tv/login";
 
 fn get<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {

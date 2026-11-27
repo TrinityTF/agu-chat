@@ -189,7 +189,7 @@ fun ComposerHost(
         focus = focus,
         modifier = modifier,
         target = if (merged && canSend) {
-            if (chosen == ALL) SendTargetChip("All", null) else chosenOpt?.let { SendTargetChip(it.channel, it.platform) }
+            if (chosen == ALL) SendTargetChip("All", null, broadcast.map { it.substringBefore(':') }) else chosenOpt?.let { SendTargetChip(it.channel, it.platform) }
         } else null,
         onTarget = { picking = true },
     )
