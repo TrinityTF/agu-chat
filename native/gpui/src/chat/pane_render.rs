@@ -637,6 +637,9 @@ impl ChatPane {
         t.count = built.len();
         let (scroll, focus, sending) = (t.scroll.clone(), t.focus.clone(), t.sending);
         let input = if self.thread_can_reply() { self.thread_input(window, cx) } else { None };
+        if input.is_some() {
+            self.thread_sync_images(cx);
+        }
         if first_frame {
             match &input {
                 Some(i) => i.read(cx).focus(window),
@@ -644,6 +647,52 @@ impl ChatPane {
             }
         }
         let replies = built.len().saturating_sub(if has_root { 1 } else { 0 });
+
+        // the reply box, with the message box's emote list and "@" list over it
+        let reply_box = input.map(|i| {
+            let mut row = div()
+                .relative()
+                .flex_none()
+                .px(px(8.))
+                .py(px(6.))
+                .border_t_1()
+                .border_color(c(theme::LINE))
+                .when(sending, |d| d.opacity(0.6))
+                .child(div().capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| this.thread_key(ev, w, cx))).child(i));
+            let entity = cx.entity();
+            if let Some(t) = self.thread.as_mut() {
+                if t.auto.is_none() {
+                    t.auto_at = None;
+                }
+                if t.mentions.state.is_none() {
+                    t.mention_at = None;
+                }
+                if let Some(a) = &t.auto {
+                    if t.auto_at != Some((a.start, a.idx)) {
+                        t.auto_at = Some((a.start, a.idx));
+                        t.auto_scroll.scroll_to_item(a.idx);
+                    }
+                    let e = entity.clone();
+                    let pick = move |i: usize, w: &mut Window, cx: &mut gpui::App| e.update(cx, |p, cx| p.thread_pick_auto(Some(i), w, cx));
+                    row = row.child(deferred(super::input::autocomplete::autocomplete_dropdown(a, &t.auto_scroll, pick)).with_priority(1));
+                }
+                if let Some(m) = &t.mentions.state {
+                    if t.mention_at != Some((m.start, m.idx)) {
+                        t.mention_at = Some((m.start, m.idx));
+                        t.mention_scroll.scroll_to_item(m.idx);
+                    }
+                    let e = entity.clone();
+                    let pick = move |i: usize, w: &mut Window, cx: &mut gpui::App| {
+                        e.update(cx, |p, cx| {
+                            let name = p.thread.as_ref().and_then(|t| t.mentions.state.as_ref()).and_then(|s| s.matches.get(i).cloned());
+                            p.thread_pick_mention(name, w, cx);
+                        })
+                    };
+                    row = row.child(deferred(super::input::autocomplete::mention_dropdown(m, &t.mention_scroll, pick)).with_priority(1));
+                }
+            }
+            row
+        });
 
         let mut list = div().id("thread-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).flex().flex_col().pt(px(14.)).pb(px(4.));
         if !has_root {
@@ -710,10 +759,8 @@ impl ChatPane {
             }))
             .child(header)
             .child(list)
-            .when_some(input, |d, i| {
-                // a reply to the thread's first message, so Twitch keeps it in this thread
-                d.child(div().flex_none().px(px(8.)).py(px(6.)).border_t_1().border_color(c(theme::LINE)).when(sending, |d| d.opacity(0.6)).child(i))
-            })
+            // a reply to the thread's first message, so Twitch keeps it in this thread
+            .when_some(reply_box, |d, b| d.child(b))
             // after the rows: it hit-tests against the flows they drew
             .child(super::select::sel_layer(self.sel_thread.clone()));
 

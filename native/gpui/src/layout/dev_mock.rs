@@ -177,7 +177,7 @@ fn harness_log(platform: Platform) -> Value {
                 msg(2, &b, "this is a fairly long message that is going to wrap onto a second line so we can see how the dense layout and the line height behave when text wraps in a narrow split", json!({ "badges": "subscriber/12,moderator/1", "badgeInfo": "subscriber/70" })),
                 msg(3, &c, "first time here!", json!({ "firstMsg": true })),
                 msg(4, &m, "@a_g_u__ you are mentioned, check https://example.com/page.", json!({ "badges": "moderator/1" })),
-                msg(5, &b, "replying to you", json!({ "reply": { "user": "a_g_u__", "text": "hello chat Kappa 7TV test" } })),
+                msg(5, &b, "replying to you", json!({ "reply": { "user": "a_g_u__", "text": "hello chat Kappa 7TV test", "login": "a_g_u__", "parentId": "m1", "threadId": "m1" } })),
                 msg(6, &c, "this one will be deleted", json!({ "deleted": true })),
                 msg(7, &b, "Cheer100 told you, ogre mound", json!({ "bits": 100 })),
                 msg(12, &c, "cheer1 bibleTHUMP5000 Cheer100x plus Kappa1000 gg", json!({ "bits": 6101 })),

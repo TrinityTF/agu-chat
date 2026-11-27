@@ -137,6 +137,26 @@ pub(super) struct Confirm {
     pub run: Option<RowAction>,
 }
 
+/// The chatter a Twitch suspicious-user frame is about (`suspicious` or `suspicioususer`), if it names one.
+fn suspicious_user_of(f: &Value) -> Option<String> {
+    let id = match f.get("type").and_then(|t| t.as_str())? {
+        "suspicious" => f.get("user").and_then(|u| u.get("id")),
+        "suspicioususer" => f.get("userId"),
+        _ => None,
+    }?;
+    id.as_str().filter(|s| !s.is_empty()).map(|s| s.to_string())
+}
+
+/// Who wrote a Twitch line (a message, a notice with a message, a held AutoMod message).
+fn row_user_id(r: &Row) -> Option<&str> {
+    match &r.body {
+        RowBody::Msg(m) => Some(m.user.id.as_str()),
+        RowBody::Notice(n) => Some(n.user.id.as_str()),
+        RowBody::Automod(h) => Some(h.user.id.as_str()),
+        _ => None,
+    }
+}
+
 /// An open reply thread: which chat, its first message's id, the list's scroll, how many lines it showed last
 /// frame (a new one scrolls it down) and the focus that Esc closes it from.
 pub(super) struct ThreadOpen {
@@ -148,6 +168,18 @@ pub(super) struct ThreadOpen {
     /// the "Reply in thread" box (made on the first frame, which has the window) and its event subscription
     pub input: Option<(Entity<TextInput>, Subscription)>,
     pub sending: bool,
+    /// the reply box's emote / Tab autocomplete and "@" list, like the message box's
+    pub auto: Option<super::input::autocomplete::AutoState>,
+    pub mentions: super::input::autocomplete::Mentions,
+    pub auto_scroll: gpui::ScrollHandle,
+    pub mention_scroll: gpui::ScrollHandle,
+    /// the selection the lists last scrolled to (start of the word, row): only a move scrolls
+    pub auto_at: Option<(usize, usize)>,
+    pub mention_at: Option<(usize, usize)>,
+    /// text the box was given by a pick, not typed: its Changed event opens no list
+    pub skip_changed: u32,
+    /// the inventory the box's emote images were built from
+    pub images_inv: Option<*const super::input::inventory::Inventory>,
 }
 
 pub struct ChatPane {
@@ -670,7 +702,17 @@ impl ChatPane {
             return;
         }
         self.thread_built.borrow_mut().clear();
-        self.thread = Some(ThreadOpen { sk: sk.to_string(), root, scroll: gpui::ScrollHandle::new(), count: 0, focus: cx.focus_handle(), input: None, sending: false });
+        self.thread = Some(ThreadOpen { sk: sk.to_string(), root, scroll: gpui::ScrollHandle::new(), count: 0, focus: cx.focus_handle(), input: None,
+            sending: false,
+            auto: None,
+            mentions: Default::default(),
+            auto_scroll: gpui::ScrollHandle::new(),
+            mention_scroll: gpui::ScrollHandle::new(),
+            auto_at: None,
+            mention_at: None,
+            skip_changed: 0,
+            images_inv: None,
+        });
         cx.notify();
     }
 
@@ -688,17 +730,186 @@ impl ChatPane {
             return Some(i.clone());
         }
         let input = cx.new(|cx| {
-            let mut i = TextInput::new(window, cx, "Reply in thread", InputStyle::Chat);
+            let mut i = TextInput::new(window, cx, "Reply in thread", InputStyle::Area);
             i.set_max_chars(Some(500));
             i
         });
         let sub = cx.subscribe(&input, |this, _, ev: &TextInputEvent, cx| match ev {
+            TextInputEvent::Changed => this.thread_changed(cx),
             TextInputEvent::Enter => this.send_thread_reply(cx),
             TextInputEvent::Escape => this.close_thread(cx),
             _ => {}
         });
         t.input = Some((input.clone(), sub));
         Some(input)
+    }
+
+    /// The open thread's chat's emote inventory: what the message box completes from for that chat.
+    fn thread_inventory(&self) -> Arc<super::input::inventory::Inventory> {
+        let st = self.thread.as_ref().and_then(|t| self.store.source(&t.sk));
+        st.map(|st| self.source_inventory(st)).unwrap_or_default()
+    }
+
+    /// Hand the reply box the emote images of its chat (rebuilt only when that inventory changed).
+    pub(super) fn thread_sync_images(&mut self, cx: &mut Context<Self>) {
+        let inv = self.thread_inventory();
+        let Some(t) = self.thread.as_mut() else { return };
+        let Some((input, _)) = &t.input else { return };
+        let ptr = Arc::as_ptr(&inv);
+        if t.images_inv == Some(ptr) {
+            return;
+        }
+        t.images_inv = Some(ptr);
+        let lookup = super::input::send_box::emote_image_lookup(&inv.inventory);
+        input.update(cx, |i, cx| i.set_inline_images(Some(lookup), cx));
+    }
+
+    /// The reply box's text changed: open, follow or close the emote list and the "@" list (the message box's rules;
+    /// "/" starts nothing here, commands go in the box below).
+    fn thread_changed(&mut self, cx: &mut Context<Self>) {
+        use super::input::autocomplete::{auto_for_change, ChangeCtx};
+        let Some(t) = self.thread.as_mut() else { return };
+        if t.skip_changed > 0 {
+            t.skip_changed -= 1;
+            cx.notify();
+            return;
+        }
+        let Some((input, _)) = &t.input else { return };
+        let (val, pos) = {
+            let i = input.read(cx);
+            (i.text(), i.caret())
+        };
+        let sks = vec![t.sk.clone()];
+        let mut mentions = std::mem::take(&mut t.mentions);
+        let prev = t.auto.take();
+        let inv = self.thread_inventory();
+        let cache: std::cell::OnceCell<Vec<String>> = std::cell::OnceCell::new();
+        let names = || cache.get_or_init(|| self.chatters(&sks)).clone();
+        mentions.refresh(&val, pos, &names);
+        let ctx = ChangeCtx { inventory: &inv.inventory, slash_ok: false, twitch_caps: None, names: &names };
+        let auto = auto_for_change(&val, pos, prev.as_ref(), &ctx);
+        if let Some(t) = self.thread.as_mut() {
+            t.mentions = mentions;
+            t.auto = auto;
+        }
+        cx.notify();
+    }
+
+    /// Write the reply box's text from a pick (no list re-opens from it).
+    fn thread_put(&mut self, text: &str, caret: usize, cx: &mut Context<Self>) {
+        let Some(t) = self.thread.as_mut() else { return };
+        let Some((input, _)) = &t.input else { return };
+        t.skip_changed += 1;
+        let input = input.clone();
+        input.update(cx, |i, cx| i.replace_all(text, caret, cx));
+    }
+
+    fn thread_text(&self, cx: &gpui::App) -> (String, usize) {
+        self.thread.as_ref().and_then(|t| t.input.as_ref()).map(|(i, _)| (i.read(cx).text(), i.read(cx).caret())).unwrap_or_default()
+    }
+
+    fn thread_focus_input(&self, window: &mut Window, cx: &gpui::App) {
+        if let Some((i, _)) = self.thread.as_ref().and_then(|t| t.input.as_ref()) {
+            i.read(cx).focus(window);
+        }
+    }
+
+    /// Put the emote list's pick (or its selected row) into the reply box.
+    pub(super) fn thread_pick_auto(&mut self, choice: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(auto) = self.thread.as_mut().and_then(|t| t.auto.take()) else { return };
+        let (text, _) = self.thread_text(cx);
+        let pick = choice.and_then(|i| auto.matches.get(i).cloned());
+        if let Some((t, caret)) = super::input::autocomplete::commit_auto(&text, &auto, pick.as_ref()) {
+            self.thread_put(&t, caret, cx);
+        }
+        self.thread_focus_input(window, cx);
+        cx.notify();
+    }
+
+    /// Put the "@" list's pick (or its selected name) into the reply box.
+    pub(super) fn thread_pick_mention(&mut self, choice: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, _) = self.thread_text(cx);
+        let applied = self.thread.as_mut().and_then(|t| t.mentions.apply(&text, choice.as_deref()));
+        if let Some((t, caret)) = applied {
+            self.thread_put(&t, caret, cx);
+        }
+        self.thread_focus_input(window, cx);
+        cx.notify();
+    }
+
+    /// The reply box's keys the lists own (before the text field sees them): Tab completes an emote or name,
+    /// arrows move through an open list, Enter / Tab take its row, Esc closes it.
+    pub(super) fn thread_key(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use super::input::autocomplete::{auto_for_tab, preview_auto, AutoMode, ChangeCtx};
+        let key = ev.keystroke.key.as_str();
+        if crate::text_input::is_shortcut_mod(&ev.keystroke.modifiers) {
+            return;
+        }
+        let Some(t) = self.thread.as_ref() else { return };
+        if t.mentions.state.is_some() {
+            match key {
+                "tab" | "enter" => self.thread_pick_mention(None, window, cx),
+                "up" | "down" => {
+                    if let Some(t) = self.thread.as_mut() {
+                        t.mentions.mv(if key == "up" { -1 } else { 1 });
+                    }
+                }
+                "escape" => {
+                    if let Some(t) = self.thread.as_mut() {
+                        t.mentions.close();
+                    }
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if let Some(auto) = t.auto.clone() {
+            match key {
+                "tab" | "enter" => self.thread_pick_auto(None, window, cx),
+                "up" | "down" => {
+                    let n = auto.matches.len();
+                    let idx = (auto.idx + n + if key == "up" { n - 1 } else { 1 }) % n;
+                    if auto.mode == AutoMode::Cmd {
+                        if let Some(a) = self.thread.as_mut().and_then(|t| t.auto.as_mut()) {
+                            a.idx = idx;
+                        }
+                    } else {
+                        let (text, _) = self.thread_text(cx);
+                        if let Some((txt, pos, next)) = preview_auto(&text, &auto, idx) {
+                            self.thread_put(&txt, pos, cx);
+                            if let Some(t) = self.thread.as_mut() {
+                                t.auto = Some(next);
+                            }
+                        }
+                    }
+                }
+                "escape" => {
+                    if let Some(t) = self.thread.as_mut() {
+                        t.auto = None;
+                    }
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if key == "tab" {
+            let (text, pos) = self.thread_text(cx);
+            let sks = vec![t.sk.clone()];
+            let inv = self.thread_inventory();
+            let cache: std::cell::OnceCell<Vec<String>> = std::cell::OnceCell::new();
+            let names = || cache.get_or_init(|| self.chatters(&sks)).clone();
+            let ctx = ChangeCtx { inventory: &inv.inventory, slash_ok: false, twitch_caps: None, names: &names };
+            let auto = auto_for_tab(&text, pos, &ctx);
+            if let (Some(a), Some(t)) = (auto, self.thread.as_mut()) {
+                t.auto = Some(a);
+            }
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     /// Send what is in the thread's box as a reply to the thread's first message (Twitch keeps every reply to it
@@ -1204,40 +1415,43 @@ impl ChatPane {
         (last, self.store.source(sk).and_then(|s| s.pinned.as_ref().map(|p| p.id.clone())))
     }
 
-    /// The send box view of each source: can it post, caps, and its emote inventory (cached per data generation).
-    pub(super) fn send_sources(&self) -> Vec<super::input::send_box::SendSource> {
+    /// A source's emote inventory for the send boxes' picker and autocomplete (cached per data generation).
+    pub(super) fn source_inventory(&self, st: &super::store::SourceState) -> Arc<super::input::inventory::Inventory> {
         use super::input::inventory::*;
         let rs = &self.settings;
+        let mut cache = self.inv_cache.borrow_mut();
+        match cache.get(&st.sk) {
+            Some((g, i)) if *g == self.gen => i.clone(),
+            _ => {
+                let i = Arc::new(match st.source.platform {
+                    Platform::Twitch => {
+                        let d = self.twitch.get(&st.sk).cloned().unwrap_or_default();
+                        let empty = ProviderScopedMap::default();
+                        let sets = d.provider_sets.as_ref().map(|ps| ProviderSets {
+                            seven: if rs.seven_tv { ps.seven.clone() } else { empty.clone() },
+                            bttv: if rs.bttv { ps.bttv.clone() } else { empty.clone() },
+                            ffz: if rs.ffz { ps.ffz.clone() } else { empty.clone() },
+                            ..Default::default()
+                        });
+                        build_twitch_inventory(sets.as_ref(), &d.twitch_emotes, &self.personal)
+                    }
+                    Platform::Rumble => build_rumble_inventory(&st.rumble_emotes),
+                    Platform::Kick => build_kick_inventory(&st.kick_emotes),
+                    Platform::Youtube => build_youtube_inventory(&st.youtube_emotes),
+                    _ => Inventory::default(),
+                });
+                cache.insert(st.sk.clone(), (self.gen, i.clone()));
+                i
+            }
+        }
+    }
+
+    /// The send box view of each source: can it post, caps, and its emote inventory (cached per data generation).
+    pub(super) fn send_sources(&self) -> Vec<super::input::send_box::SendSource> {
         let mut out = Vec::new();
         for st in &self.store.sources {
             let conn = st.conn.as_ref();
-            let inv = {
-                let mut cache = self.inv_cache.borrow_mut();
-                match cache.get(&st.sk) {
-                    Some((g, i)) if *g == self.gen => i.clone(),
-                    _ => {
-                        let i = Arc::new(match st.source.platform {
-                            Platform::Twitch => {
-                                let d = self.twitch.get(&st.sk).cloned().unwrap_or_default();
-                                let empty = ProviderScopedMap::default();
-                                let sets = d.provider_sets.as_ref().map(|ps| ProviderSets {
-                                    seven: if rs.seven_tv { ps.seven.clone() } else { empty.clone() },
-                                    bttv: if rs.bttv { ps.bttv.clone() } else { empty.clone() },
-                                    ffz: if rs.ffz { ps.ffz.clone() } else { empty.clone() },
-                                    ..Default::default()
-                                });
-                                build_twitch_inventory(sets.as_ref(), &d.twitch_emotes, &self.personal)
-                            }
-                            Platform::Rumble => build_rumble_inventory(&st.rumble_emotes),
-                            Platform::Kick => build_kick_inventory(&st.kick_emotes),
-                            Platform::Youtube => build_youtube_inventory(&st.youtube_emotes),
-                            _ => Inventory::default(),
-                        });
-                        cache.insert(st.sk.clone(), (self.gen, i.clone()));
-                        i
-                    }
-                }
-            };
+            let inv = self.source_inventory(st);
             out.push(super::input::send_box::SendSource {
                 sk: st.sk.clone(),
                 source: st.source.clone(),
@@ -1491,7 +1705,14 @@ impl ChatPane {
                     if super::hype_train::contributes(&f) {
                         self.hype_poke(&sk);
                     }
+                    let susp_user = suspicious_user_of(&f);
                     self.store.apply(&sk, &f);
+                    // Twitch names a monitored / restricted chatter just AFTER their line came in over IRC: the lines
+                    // already drawn get the label (or lose it) now
+                    if let Some(uid) = susp_user {
+                        self.invalidate_rows(|r| r.sk == sk && row_user_id(r) == Some(uid.as_str()));
+                        self.thread_built.borrow_mut().clear();
+                    }
                 }
                 Inbox::SubError(sk, msg) => {
                     self.store.apply(&sk, &json!({"type": "conn", "state": "error", "detail": msg, "canSend": false, "readOnlyReason": msg}));
@@ -1975,6 +2196,16 @@ impl ChatPane {
                         self.run_action(RowAction::Popover { sk, msg: Box::new(m), kind: if kind == "warn" { "warn" } else { "ban" } }, cx);
                     }
                 }
+            }
+        }
+        // `AGU_SHOT=thread`: open the reply thread of the newest reply, as a click on its "replying to" line would
+        if std::env::var("AGU_SHOT").is_ok_and(|s| s == "thread") {
+            let target = self.store.rows().iter().rev().find_map(|r| {
+                let l = super::thread::reply_link(r)?;
+                (!l.parent.is_empty()).then(|| (r.sk.clone(), l.parent.to_string(), l.thread.to_string()))
+            });
+            if let Some((sk, parent, thread)) = target {
+                self.open_thread(&sk, &parent, &thread, cx);
             }
         }
         if std::env::var("AGU_TIP").is_ok() {
@@ -2674,6 +2905,15 @@ pub(super) fn sel_flows(b: &BuiltRow) -> super::select::RowFlows {
 #[cfg(test)]
 mod unpin_tests {
     use super::unpin_secs;
+
+    #[test]
+    fn a_suspicious_frame_names_its_chatter() {
+        use serde_json::json;
+        assert_eq!(super::suspicious_user_of(&json!({"type": "suspicious", "user": {"id": "42"}, "msg": null})).as_deref(), Some("42"));
+        assert_eq!(super::suspicious_user_of(&json!({"type": "suspicioususer", "user": null, "userId": "42"})).as_deref(), Some("42"));
+        assert_eq!(super::suspicious_user_of(&json!({"type": "suspicious", "user": null})), None);
+        assert_eq!(super::suspicious_user_of(&json!({"type": "chat", "userId": "42"})), None);
+    }
 
     #[test]
     fn unpin_after_takes_30_seconds_to_30_minutes() {
