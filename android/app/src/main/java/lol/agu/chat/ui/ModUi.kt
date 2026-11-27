@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
@@ -66,6 +67,8 @@ sealed interface ModDialog {
     class Ban(val sk: String, val t: ModTarget, val name: String) : ModDialog
     class Warn(val sk: String, val t: ModTarget, val name: String) : ModDialog
     class Timeout(val sk: String, val t: ModTarget, val name: String, val platform: String, val choices: List<Pair<String, Int>>) : ModDialog
+    /** Rumble: mute for 5 minutes, this livestream or forever ((label, action, seconds)). */
+    class Mute(val sk: String, val t: ModTarget, val name: String, val choices: List<Triple<String, String, Int>>) : ModDialog
     /** Kick, Rumble and YouTube ask before a ban; a command may ask too (`/clear`, `/raid`). */
     class Ask(val text: String, val yes: String, val run: () -> Unit) : ModDialog
 }
@@ -114,6 +117,18 @@ class ModController(private val vm: ChatViewModel, private val scope: CoroutineS
     }
 
     fun delete(sk: String, t: ModTarget) = act(sk, "delete", t)
+
+    /** Rumble: the mute choices of a line's person. */
+    fun mute(sk: String, m: ModInfo) {
+        val choices = muteChoicesOf(m.muteChoices)
+        if (choices.isNotEmpty()) dialog = ModDialog.Mute(sk, m.t, nameOf(m.t), choices)
+    }
+
+    /** Rumble: pin a line, or unpin the pinned one. */
+    fun pin(sk: String, t: ModTarget, unpin: Boolean = false) = act(sk, if (unpin) "unpin" else "pin", t)
+
+    /** The id of the line pinned in a Rumble chat. */
+    fun pinnedId(sk: String): String? = vm.pins[sk]?.row?.id?.content
 
     /** A mod-mode button on [row]: ban and warn open their step, a timeout and a delete go at once (like the desktop's). */
     fun button(vk: String, row: Row, b: ModButtonCfg) {
@@ -285,6 +300,20 @@ fun ModDialogs(ctrl: ModController) {
             confirmButton = { TextButton(onClick = { ctrl.dialog = null; d.run() }) { Text(d.yes, color = AguColors.Danger) } },
             dismissButton = { TextButton(onClick = { ctrl.dialog = null }) { Text("Cancel", color = AguColors.Muted) } },
         )
+        is ModDialog.Mute -> ModalBottomSheet(onDismissRequest = { ctrl.dialog = null }, containerColor = AguColors.Surface) {
+            Column(Modifier.navigationBarsPadding().padding(start = 20.dp, end = 20.dp, bottom = 16.dp)) {
+                Text("Mute ${d.name}", color = AguColors.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for ((label, action, secs) in d.choices) {
+                        Text(
+                            label, color = if (action == "ban") AguColors.Danger else AguColors.Text, fontSize = 15.sp,
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp)).border(1.dp, AguColors.Surface2, RoundedCornerShape(8.dp))
+                                .clickable { ctrl.dialog = null; ctrl.act(d.sk, action, d.t, seconds = secs.takeIf { it > 0 }) }.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+            }
+        }
         is ModDialog.Timeout -> ModalBottomSheet(onDismissRequest = { ctrl.dialog = null }, containerColor = AguColors.Surface) {
             Column(Modifier.navigationBarsPadding().padding(start = 20.dp, end = 20.dp, bottom = 16.dp)) {
                 Text("Timeout ${d.name}", color = AguColors.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 8.dp))
@@ -338,19 +367,27 @@ private fun WarnDialog(ctrl: ModController, d: ModDialog.Warn) {
 fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCopy: () -> Unit, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = AguColors.Surface) {
         Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
-            Text(
-                "${row.user?.name ?: row.user?.login ?: ""}: ${row.plainText()}".take(120),
-                color = AguColors.Muted, fontSize = 13.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
+            // the line itself, drawn as in chat (emotes as pictures), without mod buttons and not tappable
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp).heightIn(max = 120.dp).clip(RoundedCornerShape(6.dp))) {
+                androidx.compose.runtime.CompositionLocalProvider(LocalModMode provides false, LocalMod provides null) {
+                    MessageRow(row, onLongPress = {})
+                }
+            }
             if (onReply != null) SheetRow("Reply", onClick = onReply)
             SheetRow("Copy text", onClick = onCopy)
             if (ctrl != null && row.user != null && row.kind != "modfeed") SheetRow("Open user card") { onDismiss(); ctrl.openCard(row) }
             val m = row.mod
             if (ctrl != null && m != null) {
-                if (m.timeout) SheetRow("Timeout…") { onDismiss(); ctrl.timeout(row.sk, row.platform, m) }
+                if (m.timeout && m.muteChoices.isNotEmpty()) SheetRow("Mute user…") { onDismiss(); ctrl.mute(row.sk, m) }
+                else if (m.timeout) SheetRow("Timeout…") { onDismiss(); ctrl.timeout(row.sk, row.platform, m) }
+                if (m.pin) {
+                    val pinned = row.id?.content == ctrl.pinnedId(row.sk)
+                    SheetRow(if (pinned) "Unpin this message" else "Pin this message") { onDismiss(); ctrl.pin(row.sk, m.t, unpin = pinned) }
+                }
                 if (m.delete) SheetRow("Delete message", AguColors.Danger) { onDismiss(); ctrl.delete(row.sk, m.t) }
                 if (m.warn) SheetRow("Warn…") { onDismiss(); ctrl.warn(row.sk, m.t) }
-                if (m.ban) SheetRow("Ban…", AguColors.Danger) { onDismiss(); ctrl.ban(row.sk, row.platform, m.t) }
+                // on Rumble the mute choices' "Forever" is the ban, as in Rumble's own menu
+                if (m.ban && m.muteChoices.isEmpty()) SheetRow("Ban…", AguColors.Danger) { onDismiss(); ctrl.ban(row.sk, row.platform, m.t) }
             }
         }
     }

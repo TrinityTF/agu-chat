@@ -1137,16 +1137,8 @@ impl Render for UserCardView {
         let last = ctx.recent.first().cloned();
         if self.platform == Platform::Rumble && ctx.co_can_moderate {
             // Rumble's own mod menu: Mute user (for 5 minutes / for this livestream / forever), Pin, Delete, Manage.
-            let newest = ctx.recent.iter().find_map(|r| if let RowBody::Rumble(m) = &r.body { Some(m.clone()) } else { None });
-            let live_msg = ctx.recent.iter().find_map(|r| match &r.body {
-                RowBody::Rumble(m) if !m.deleted => Some(m.clone()),
-                _ => None,
-            });
-            let can_mute = newest.as_ref().map_or(false, |m| {
-                let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
-                let badges: Vec<&str> = m.badges.iter().map(|b| b.as_str()).collect();
-                super::mod_caps::co_reach(Platform::Rumble, &ctx.co_login, &ctx.source.channel, target, &badges).ban
-            });
+            let tools = agu_chat_model::user_card::rumble_card_tools(ctx.recent.iter().map(|r| &**r), &ctx.co_login, &ctx.source.channel, ctx.pinned_id.as_deref());
+            let (newest, live_msg, can_mute) = (tools.mute.clone(), tools.live.clone(), tools.mute.is_some());
             let me_names: Vec<String> = [self.user.login.as_str(), self.user.name.as_str()].iter().filter(|n| !n.is_empty()).map(|n| n.to_lowercase()).collect();
             let muted_now = self.muted.as_ref().and_then(|l| l.iter().find(|u| me_names.contains(&u.name.to_lowercase())).cloned());
             let mut section = div().flex().flex_col().gap(px(8.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
@@ -1166,7 +1158,7 @@ impl Render for UserCardView {
                 section = section.child(div().child(Self::heading("Mute user")).child(row));
             }
             if let Some(m) = live_msg {
-                let pinned = ctx.pinned_id.as_deref() == Some(m.id.as_str());
+                let pinned = tools.pinned;
                 let (sk1, m1, sk2, m2) = (self.sk.clone(), m.clone(), self.sk.clone(), m.clone());
                 let (pin_label, pin_action) = if pinned { ("Unpin this message", "unpin") } else { ("Pin this message", "pin") };
                 section = section

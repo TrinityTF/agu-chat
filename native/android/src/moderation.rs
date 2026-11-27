@@ -258,6 +258,31 @@ impl Session {
         Ok(json!({"rules": rules}))
     }
 
+    // ---- Rumble: the muted users ------------------------------------------------------------------
+
+    /// `{sk}` -> `{ok, muted: [{name, id, scope}]}` (Rumble's "Muted users": a moderator's own read, nothing changes), or
+    /// `{ok: false, toast}`.
+    pub(super) async fn rumble_muted(&self, args: &Value) -> Result<Value, String> {
+        let source = self.source_of(str_arg(args, "sk")?)?;
+        let r = self.relay(&source, agu_chat_model::mod_actions::RUMBLE_MUTED_PATH, Some("GET"), None).await;
+        Ok(match agu_chat_model::mod_actions::muted_result(&r) {
+            Ok(list) => json!({"ok": true, "muted": list.iter().map(|u| json!({"name": u.name, "id": u.id, "scope": u.scope})).collect::<Vec<_>>()}),
+            Err(e) => json!({"ok": false, "toast": e}),
+        })
+    }
+
+    /// `{sk, name, id?, scope?}`: lift one mute from the list. Answers `{ok, toast, warn}`.
+    pub(super) async fn rumble_unmute(&self, args: &Value) -> Result<Value, String> {
+        let source = self.source_of(str_arg(args, "sk")?)?;
+        let u = agu_chat_model::mod_actions::MutedUser { name: s_arg(args, "name").to_string(), id: s_arg(args, "id").to_string(), scope: s_arg(args, "scope").to_string() };
+        let r = self.relay(&source, "/api/rumble/action", Some("POST"), Some(agu_chat_model::mod_actions::unmute_body(&u))).await;
+        let (ok, toast) = agu_chat_model::mod_actions::unmute_result(&r, &u);
+        Ok(match toast {
+            Some((t, warn)) => json!({"ok": ok, "toast": t, "warn": warn}),
+            None => json!({"ok": ok}),
+        })
+    }
+
     // ---- the user card ---------------------------------------------------------------------------
 
     /// `{sk, user: {id, login, name, avatar}}` -> the card (see `card.rs`), with the person's lines in this chat.
@@ -280,7 +305,7 @@ impl Session {
             total: usize,
             ignore: Option<bool>,
             target: Option<ModTarget>,
-            last_rumble: bool,
+            rumble: Option<agu_chat_model::user_card::RumbleCardTools>,
         }
         let k = {
             let st = self.inner.st.lock().unwrap();
@@ -363,7 +388,7 @@ impl Session {
                 total,
                 ignore: can_ignore.then(|| is_user_ignored(&st.rules.settings.ignored_users, platform, &login)),
                 target: latest.as_ref().and_then(|r| row_mod(r, &env)).map(|m| m.target),
-                last_rumble: latest.as_ref().map(|r| matches!(r.body, RowBody::Rumble(_))).unwrap_or(false),
+                rumble: (platform == Platform::Rumble).then(|| agu_chat_model::user_card::rumble_card_tools(recent_rows.iter().map(|r| &**r), &env.viewer_login, &source.channel, store.and_then(|s| s.source(&sk)).and_then(|s| s.rumble_pinned.as_ref()).map(|p| p.id.as_str()))),
             }
         };
 
@@ -444,7 +469,7 @@ impl Session {
             recent_total: k.total,
             ignore: k.ignore,
             target: k.target.as_ref(),
-            last_is_rumble: k.last_rumble,
+            rumble: k.rumble.clone(),
         };
         let mut v = card_json(&c);
         v["recent"] = Value::Array(k.recent);

@@ -125,11 +125,13 @@ struct View {
     /// a whisper opened this tab: its conversation comes in as a snapshot (never news by itself), whose newest line
     /// is the mention
     whisper_pending: bool,
+    /// the pinned-message bars the app was last sent (Rumble)
+    pins_sent: Vec<Value>,
 }
 
 impl View {
     fn new() -> Self {
-        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new(), whisper_pending: false }
+        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new(), whisper_pending: false, pins_sent: Vec::new() }
     }
 
     /// The rows event since the last one, or None when nothing changed.
@@ -163,10 +165,35 @@ impl View {
         }
         self.sent = now.iter().cloned().collect();
         self.sent_order = now.into_iter().map(|(k, _)| k).collect();
-        if !full && upsert.is_empty() && removed.is_empty() {
+        let pins = self.pins(cx);
+        let pins_changed = pins != self.pins_sent;
+        if !full && upsert.is_empty() && removed.is_empty() && !pins_changed {
             return None;
         }
-        Some(json!({"vk": vk, "reset": full, "upsert": upsert, "remove": if full { vec![] } else { removed }}))
+        let mut ev = json!({"vk": vk, "reset": full, "upsert": upsert, "remove": if full { vec![] } else { removed }});
+        if pins_changed {
+            ev["pins"] = Value::Array(pins.clone());
+            self.pins_sent = pins;
+        }
+        Some(ev)
+    }
+
+    /// Rumble's pinned message of each Rumble channel here, drawn like a chat line (`{sk, row, canMod}`; `row` is null
+    /// when nothing is pinned). `canMod`: the account may unpin it.
+    fn pins(&self, cx: &Ctx) -> Vec<Value> {
+        self.store
+            .sources
+            .iter()
+            .filter(|s| s.source.platform == Platform::Rumble)
+            .map(|s| {
+                let env = env_of(&s.sk, cx, Some(&self.store));
+                let row = s.rumble_pinned.as_ref().map(|m| {
+                    let r = agu_chat_model::types::Row { key: format!("{}|pin", s.sk), ts: m.ts, sk: s.sk.clone(), platform: Platform::Rumble, ord: 0, backlog: true, body: RowBody::Rumble(m.clone()) };
+                    row_json(&r, &env)
+                });
+                json!({"sk": s.sk, "row": row, "canMod": env.mods.as_ref().map(|m| m.can_moderate()).unwrap_or(false)})
+            })
+            .collect()
     }
 }
 
@@ -1832,6 +1859,8 @@ impl Session {
                 "card.comment" => s.card_comment(&args, false).await,
                 "card.comment.delete" => s.card_comment(&args, true).await,
                 "card.ignore" => s.card_ignore(&args).await,
+                "rumble.muted" => s.rumble_muted(&args).await,
+                "rumble.unmute" => s.rumble_unmute(&args).await,
                 "modes.get" => s.modes_get(&args).await,
                 "modes.patch" => s.modes_patch(&args).await,
                 "modes.shield" => s.modes_shield(&args).await,
@@ -2016,6 +2045,36 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn a_rumble_pin_becomes_a_bar_with_the_chats_emotes_and_goes_away_again() {
+        let mut st = State::new();
+        let r = SourceRef { platform: Platform::Rumble, channel: "agu".into() };
+        st.hub.set_view("v", &[r.clone()]);
+        let mut v = View::new();
+        v.store.sync(&[r]);
+        st.views.insert("v".into(), v);
+        let log = |pinned: Value| json!({"type": "chatlog", "messages": [], "pinned": pinned, "emotes": {"r+thisisfine": {"file": "https://e/fine.png"}}});
+        let m = json!({"id": "9", "ts": 3, "user": {"id": "1", "login": "bob", "name": "Bob", "color": ""}, "text": "read :r+thisisfine:", "badges": []});
+        feed(&mut st, "rumble:agu", &log(m));
+        let ev = |st: &mut State| {
+            let State { views, rules, src, defs, book, .. } = st;
+            let cx = Ctx { src, rules, defs: defs.clone(), book };
+            views.get_mut("v").unwrap().diff("v", &cx)
+        };
+        let e = ev(&mut st).unwrap();
+        let pin = &e["pins"][0];
+        assert_eq!(pin["sk"], "rumble:agu");
+        assert_eq!(pin["row"]["id"], "9");
+        assert!(pin["row"]["parts"].as_array().unwrap().iter().any(|p| p["t"] == "emote" && p["url"] == "https://e/fine.png"), "the pinned line draws the chat's emotes");
+        assert_eq!(pin["canMod"], false);
+        // nothing changed: no new pins
+        st.views.get_mut("v").unwrap().dirty = true;
+        assert!(ev(&mut st).is_none());
+        // a pin frame replaces it, an empty one clears it
+        feed(&mut st, "rumble:agu", &json!({"type": "pin", "msg": null}));
+        assert!(ev(&mut st).unwrap()["pins"][0]["row"].is_null());
+    }
     #[test]
     fn closing_a_view_leaves_the_other_one_its_rows() {
         let mut st = state_with_two_views();

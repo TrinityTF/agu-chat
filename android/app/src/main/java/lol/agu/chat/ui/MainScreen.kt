@@ -521,6 +521,7 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
         // the hype train bars (a tap opens one's details, drawn over the list below)
         var hypeOpen by remember { mutableStateOf<String?>(null) }
         HypeBars(tab, vm.hype, setOfNotNull(hypeOpen)) { sk -> hypeOpen = if (hypeOpen == sk) null else sk }
+        PinnedBars(tab, vm.pins, LocalMod.current)
         // channels that are not connected say so (named by platform when several are merged)
         val lines = tab.channels.mapNotNull { ch ->
             val conn = vm.conns[ch.sk()] ?: return@mapNotNull null

@@ -9,6 +9,7 @@ use agu_chat_core::protocol::{AccountsState, HighlightRule, Settings};
 use agu_chat_model::chat_text::{as_link, split_rumble_emotes, sub_split, RumblePart};
 use agu_chat_model::highlights::{compile_highlights, match_input_of, rule_row_style, Highlighter};
 use agu_chat_model::ignores::{apply_ignores, compile_ignores, filter_ignored, CompiledIgnores, IgnoreCache};
+use agu_chat_model::mod_actions::RUMBLE_MUTE_CHOICES;
 use agu_chat_model::mod_row::{row_mod, timeout_ladder, ModEnv};
 use agu_chat_model::mentions::{is_own, kick_me, me_login_lower, row_mentions_me};
 use agu_chat_model::search::{match_row, SearchQuery};
@@ -833,7 +834,12 @@ pub fn row_json(r: &Row, env: &Env) -> Value {
     if let Some(me) = &env.mods {
         if let Some(m) = row_mod(r, me) {
             let t = &m.target;
-            o.insert("mod".into(), json!({"t": {"id": t.id, "uid": t.user_id, "login": t.login, "name": t.name, "menu": t.menu}, "ban": m.ban, "timeout": m.timeout, "warn": m.warn, "delete": m.delete, "unban": m.unban, "cmd": m.cmd, "ladder": timeout_ladder(r.platform).iter().map(|(l, s)| json!([l, s])).collect::<Vec<_>>()}));
+            let mut mj = json!({"t": {"id": t.id, "uid": t.user_id, "login": t.login, "name": t.name, "menu": t.menu}, "ban": m.ban, "timeout": m.timeout, "warn": m.warn, "delete": m.delete, "unban": m.unban, "pin": m.pin, "cmd": m.cmd, "ladder": timeout_ladder(r.platform).iter().map(|(l, s)| json!([l, s])).collect::<Vec<_>>()});
+            // Rumble mutes by "for 5 minutes / this livestream / forever" (the desktop's choices), not by a ladder of lengths
+            if r.platform == agu_chat_core::protocol::Platform::Rumble {
+                mj["muteChoices"] = json!(RUMBLE_MUTE_CHOICES.iter().map(|(l, a, s)| json!([l, a, s])).collect::<Vec<_>>());
+            }
+            o.insert("mod".into(), mj);
         }
         if matches!(r.body, RowBody::Automod(_)) {
             o.insert("canResolve".into(), json!(me.twitch.automod));
@@ -1329,5 +1335,21 @@ mod tests {
         let (mut st, sk) = store_for(Platform::Kick, "agu");
         st.apply(&sk, &json!({"type": "chat", "msg": {"id": "k1", "ts": 1, "text": "hi", "user": {"id": "3", "login": "kim", "name": "Kim", "color": "", "avatar": "https://a/kim.png"}}}));
         assert_eq!(json_of(&st, &Env::default())["user"]["avatar"], "https://a/kim.png");
+    }
+
+    #[test]
+    fn a_rumble_moderator_may_delete_and_pin_any_line_and_mutes_by_the_desktops_choices() {
+        let (mut st, sk) = store_for(Platform::Rumble, "agu");
+        let chat = |id: &str, login: &str| json!({"type": "chat", "msg": {"id": id, "ts": 1, "user": {"id": id, "login": login, "name": login, "color": ""}, "text": "hi", "badges": []}});
+        st.apply(&sk, &chat("1", "modguy"));
+        st.apply(&sk, &chat("2", "bob"));
+        let env = Env { mods: Some(ModEnv { platform: Some(Platform::Rumble), co: agu_chat_model::mod_caps::CoCaps { connected: true, can_moderate: true, can_delete: true }, viewer_login: "modguy".into(), channel: "agu".into(), ..Default::default() }), ..Env::default() };
+        let rows: Vec<Value> = st.rows().iter().map(|r| row_json(r, &env)).collect();
+        // my own line: delete and pin, but no mute
+        assert_eq!((rows[0]["mod"]["delete"].clone(), rows[0]["mod"]["pin"].clone(), rows[0]["mod"]["ban"].clone()), (json!(true), json!(true), json!(false)));
+        // someone else's: everything, and the three mute choices
+        assert_eq!((rows[1]["mod"]["delete"].clone(), rows[1]["mod"]["pin"].clone(), rows[1]["mod"]["ban"].clone()), (json!(true), json!(true), json!(true)));
+        assert_eq!(rows[1]["mod"]["muteChoices"], json!([["For 5 minutes", "timeout", 300], ["For this livestream", "mutestream", 0], ["Forever", "ban", 0]]));
+        assert!(rows[1]["mod"]["ladder"].is_array());
     }
 }

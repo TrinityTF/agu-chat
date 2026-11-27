@@ -91,9 +91,27 @@ fun UserCardSheet(vm: ChatViewModel, ctrl: ModController, req: CardRequest, onDi
     var comment by remember(req) { mutableStateOf("") }
     var ignored by remember(req) { mutableStateOf<Boolean?>(null) }
     var signing by remember(req) { mutableStateOf(false) }
+    var muted by remember(req) { mutableStateOf<List<MutedUser>?>(null) }
+    var mutedErr by remember(req) { mutableStateOf<String?>(null) }
+    var mutedOpen by remember(req) { mutableStateOf(false) }
     val uri = LocalUriHandler.current
 
     fun parseRecent(o: JsonObject) = o.list("recent").mapNotNull { runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull() }
+
+    /** Rumble: who is muted in this chat (a moderator's own read; nothing changes). */
+    suspend fun loadMuted() {
+        val (list, err) = vm.rumbleMuted(req.sk)
+        if (list != null) { muted = list; mutedErr = null } else mutedErr = err
+    }
+
+    /** Rumble: lift one mute, then read the list again. */
+    fun unmute(u: MutedUser) {
+        scope.launch {
+            val r = vm.rumbleUnmute(req.sk, u)
+            ctrl.toast(r.toast)
+            if (r.ok) { muted = muted?.filter { !it.name.equals(u.name, ignoreCase = true) }; loadMuted() }
+        }
+    }
 
     suspend fun load() {
         val o = vm.cardInfo(req.sk, req.user)
@@ -103,6 +121,7 @@ fun UserCardSheet(vm: ChatViewModel, ctrl: ModController, req: CardRequest, onDi
         comments.clear(); comments.addAll(o.list("comments"))
         ignored = (o["ignore"] as? JsonPrimitive)?.contentOrNull?.let { it == "true" }
         if (tab !in o.list("tabs").map { it.str("id") }) tab = "messages"
+        if ((o["mod"] as? JsonObject)?.str("kind") == "rumble") loadMuted()
     }
 
     suspend fun loadLog(reset: Boolean) {
@@ -128,7 +147,7 @@ fun UserCardSheet(vm: ChatViewModel, ctrl: ModController, req: CardRequest, onDi
     LaunchedEffect(ctrl.actionTick) {
         if (ctrl.actionTick != seenTick) {
             seenTick = ctrl.actionTick
-            if (req.platform == "kick") delay(1500)
+            if (req.platform == "kick" || req.platform == "rumble") delay(1500)
             load()
         }
     }
@@ -207,6 +226,31 @@ fun UserCardSheet(vm: ChatViewModel, ctrl: ModController, req: CardRequest, onDi
                         )
                     }
                 }
+                if (mod.str("kind") == "rumble") {
+                    // Rumble's own mod menu (the desktop's): mute for 5 minutes / this livestream / forever, pin, delete
+                    val tgt = { o: JsonObject -> ModTarget(id = o.str("id"), uid = o.str("uid"), login = o.str("login"), name = o.str("name")) }
+                    val me = listOf(login, name).filter { it.isNotEmpty() }.map { it.lowercase() }
+                    val mutedNow = muted?.firstOrNull { it.name.lowercase() in me }
+                    (mod["mute"] as? JsonObject)?.let { m ->
+                        val t = tgt(m["t"] as JsonObject)
+                        Text("Mute user", color = FaintText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for ((label, action, secs) in muteChoicesOf((m["choices"] as? JsonArray).orEmpty().map { (it as JsonArray).map { p -> p.jsonPrimitive } })) {
+                                Pill(label, if (action == "ban") AguColors.Danger else AguColors.Text) { ctrl.act(req.sk, action, t, seconds = secs.takeIf { it > 0 }) }
+                            }
+                            mutedNow?.let { u -> Pill("Unmute", AguColors.Text) { unmute(u) } }
+                        }
+                    }
+                    (mod["live"] as? JsonObject)?.let { l ->
+                        val t = tgt(l["t"] as JsonObject)
+                        val pinned = l.flag("pinned")
+                        Text("Pin", color = FaintText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        LayoutRow { Pill(if (pinned) "Unpin this message" else "Pin this message", AguColors.Text) { ctrl.pin(req.sk, t, unpin = pinned) } }
+                        Text("Delete", color = FaintText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        LayoutRow { Pill("Delete this message", AguColors.Danger) { ctrl.delete(req.sk, t) } }
+                    }
+                    Text("Manage", color = FaintText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     when (mod.str("kind")) {
                         "twitch" -> {
@@ -215,8 +259,7 @@ fun UserCardSheet(vm: ChatViewModel, ctrl: ModController, req: CardRequest, onDi
                             if (mod.flag("ban")) Pill("Ban", AguColors.Danger) { ctrl.ban(req.sk, "twitch", targetOf()) }
                         }
                         "rumble" -> {
-                            Pill("Timeout 5m", AguColors.Text) { ctrl.act(req.sk, "timeout", targetOf(), seconds = 300) }
-                            Pill("Ban", AguColors.Danger) { ctrl.ban(req.sk, "rumble", targetOf()) }
+                            Pill(if (mutedOpen) "Hide muted users" else "Muted users", AguColors.Text) { mutedOpen = !mutedOpen; if (mutedOpen) scope.launch { loadMuted() } }
                         }
                         "kick" -> {
                             mod.str("unban").takeIf { it.isNotEmpty() && it != "null" }?.let { l -> Pill(l, AguColors.Text) { ctrl.act(req.sk, "unban", targetOf()) } }
@@ -224,6 +267,21 @@ fun UserCardSheet(vm: ChatViewModel, ctrl: ModController, req: CardRequest, onDi
                         }
                     }
                     ignored?.let { ig -> Pill(if (ig) "Unignore user" else "Ignore user", AguColors.Text) { scope.launch { ctrl.toast(vm.cardIgnore(req.platform, login.ifEmpty { name }, !ig)); ignored = !ig } } }
+                }
+                if (mod.str("kind") == "rumble" && mutedOpen) {
+                    Text("Muted users", color = FaintText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    val list = muted
+                    when {
+                        list != null && list.isEmpty() -> Text("No muted users.", color = FaintText, fontSize = 12.sp)
+                        list != null -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (u in list) LayoutRow(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(if (u.scope == "video") "${u.name} (this livestream)" else u.name, color = AguColors.Text, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                Pill("Unmute", AguColors.Text) { unmute(u) }
+                            }
+                        }
+                        mutedErr != null -> Text(mutedErr.orEmpty(), color = AmberText, fontSize = 12.sp)
+                        else -> Text("Loading…", color = FaintText, fontSize = 12.sp)
+                    }
                 }
             } else ignored?.let { ig ->
                 LayoutRow(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {

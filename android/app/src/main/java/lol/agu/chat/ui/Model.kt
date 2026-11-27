@@ -139,10 +139,14 @@ data class ModInfo(
     val warn: Boolean = false,
     val delete: Boolean = false,
     val unban: Boolean = false,
+    /** Rumble: "Pin this message" */
+    val pin: Boolean = false,
     /** a command button (`/announce ...`) may run */
     val cmd: Boolean = false,
     /** (label, seconds) */
     val ladder: List<List<kotlinx.serialization.json.JsonPrimitive>> = emptyList(),
+    /** Rumble's mute choices: (label, action, seconds) */
+    val muteChoices: List<List<kotlinx.serialization.json.JsonPrimitive>> = emptyList(),
 ) {
     val choices: List<Pair<String, Int>> get() = ladder.mapNotNull { l -> if (l.size == 2) l[0].content to (l[1].content.toIntOrNull() ?: return@mapNotNull null) else null }
 }
@@ -332,3 +336,15 @@ data class LoginRequest(val id: Long, val platform: String, val url: String, val
 /** The answer to a moderation call: [toast] is what to say (a warning when [warn]); [confirm] is a question to ask before a ban. */
 @Immutable
 data class ModResult(val ok: Boolean, val toast: String? = null, val warn: Boolean = false, val confirm: String? = null)
+
+/** Rumble's mute choices as (label, action, seconds), from the core's `[[label, action, seconds]]`. */
+fun muteChoicesOf(raw: List<List<JsonPrimitive>>): List<Triple<String, String, Int>> =
+    raw.mapNotNull { l -> if (l.size == 3) Triple(l[0].content, l[1].content, l[2].content.toIntOrNull() ?: 0) else null }
+
+/** A Rumble chat's pinned message, drawn as a bar at the top of the chat ([canMod]: the account may unpin it). */
+@Immutable
+class RumblePin(val row: Row, val canMod: Boolean)
+
+/** One entry of Rumble's muted list; [scope] is "video" (this livestream) or "total". */
+@Immutable
+data class MutedUser(val name: String, val id: String = "", val scope: String = "")

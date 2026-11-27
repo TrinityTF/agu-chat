@@ -3,11 +3,11 @@
 //! into the card's sections: header, badges, info lines, mod tools, tabs, history, comments.
 use agu_chat_core::protocol::Platform;
 use agu_chat_model::card_web::{show_signin_prompt, sub_line, tabs_for, ts_ms, Logs, MsgPage, Tab, WebCard, WebStatus};
-use agu_chat_model::mod_actions::ModTarget;
+use agu_chat_model::mod_actions::{ModTarget, RUMBLE_MUTE_CHOICES};
 use agu_chat_model::mod_caps::{ModCaps, ModReach, TIMEOUT_LADDER};
 use agu_chat_model::mod_row::timeout_ladder;
 use agu_chat_model::types::SuspiciousUser;
-use agu_chat_model::user_card::{fmt_stamp, kick_default_avatar, local_time, long_date, profile_url, suspicious_details, ModUser, SubInfo};
+use agu_chat_model::user_card::{RumbleCardTools, fmt_stamp, kick_default_avatar, local_time, long_date, profile_url, suspicious_details, ModUser, SubInfo};
 use serde_json::{json, Value};
 
 pub struct CardUser {
@@ -40,8 +40,8 @@ pub struct CardIn<'a> {
     pub ignore: Option<bool>,
     /// what Kick / Rumble actions act on: the person's newest line here
     pub target: Option<&'a ModTarget>,
-    /// the person's newest line here is a Rumble line
-    pub last_is_rumble: bool,
+    /// Rumble: what the moderator card offers for this person (see `rumble_card_tools`)
+    pub rumble: Option<RumbleCardTools>,
 }
 
 fn note(text: impl Into<String>, tone: &str) -> Value {
@@ -148,8 +148,15 @@ pub fn card_json(c: &CardIn) -> Value {
             None => (None, can_ban),
         };
         mod_json = json!({"kind": "twitch", "ladder": ladder, "warn": reach.warn && caps.warn, "ban": ban, "unban": unban});
-    } else if c.platform == Platform::Rumble && c.co_can_moderate && c.reach.ban && c.last_is_rumble && c.target.is_some() {
-        mod_json = json!({"kind": "rumble", "timeoutSeconds": 300});
+    } else if c.platform == Platform::Rumble && c.co_can_moderate {
+        // Rumble's own mod menu: mute (for 5 minutes / this livestream / forever), pin, delete, and the muted list
+        let t = |m: &agu_chat_model::types::RumbleMsg| json!({"id": m.id, "uid": m.user.id, "login": m.user.login, "name": m.user.name, "menu": null});
+        let tools = c.rumble.clone().unwrap_or_default();
+        mod_json = json!({
+            "kind": "rumble",
+            "mute": tools.mute.as_ref().map(|m| json!({"t": t(m), "choices": RUMBLE_MUTE_CHOICES.iter().map(|(l, a, s)| json!([l, a, s])).collect::<Vec<_>>()})),
+            "live": tools.live.as_ref().map(|m| json!({"t": t(m), "pinned": tools.pinned})),
+        });
     } else if c.platform == Platform::Kick && c.co_can_moderate && c.reach.ban && !c.user.id.is_empty() && c.target.is_some() {
         // banned: Some(true), timed out: Some(false), free (or unknown): None
         let state = c.data.and_then(|d| d.ban.as_ref().map(|b| b.0));
@@ -204,7 +211,7 @@ pub fn card_json(c: &CardIn) -> Value {
         "commentTarget": c.web.map(|w| w.user_id.clone()).filter(|i| !i.is_empty()).unwrap_or_else(|| c.user.id.clone()),
         "ignore": c.ignore,
         // the trash button beside each of their own lines in this chat (Twitch)
-        "canDelete": is_twitch && !c.whisper && caps.delete && reach.delete,
+        "canDelete": (is_twitch && !c.whisper && caps.delete && reach.delete) || (c.platform == Platform::Rumble && c.co_can_moderate),
     })
 }
 
@@ -255,7 +262,7 @@ mod tests {
     }
 
     fn input<'a>(u: &'a CardUser, w: Option<&'a WebCard>, caps: &'a ModCaps, reach: ModReach) -> CardIn<'a> {
-        CardIn { platform: Platform::Twitch, whisper: false, user: u, web: w, web_status: WebStatus::SignedIn, web_error: None, data: None, relogin: false, loading: false, caps, reach, suspicious: None, co_can_moderate: false, sub: None, recent_total: 3, ignore: Some(false), target: None, last_is_rumble: false }
+        CardIn { platform: Platform::Twitch, whisper: false, user: u, web: w, web_status: WebStatus::SignedIn, web_error: None, data: None, relogin: false, loading: false, caps, reach, suspicious: None, co_can_moderate: false, sub: None, recent_total: 3, ignore: Some(false), target: None, rumble: None }
     }
 
     #[test]
@@ -363,18 +370,25 @@ mod tests {
     }
 
     #[test]
-    fn rumble_has_one_timeout_and_a_ban_when_there_is_a_line_to_act_on() {
+    fn rumble_offers_mute_pin_and_delete_for_a_moderator() {
+        use agu_chat_model::types::RumbleMsg;
         let u = CardUser { id: "7".into(), login: "r".into(), name: "R".into(), avatar: String::new() };
         let caps = ModCaps::default();
-        let t = ModTarget { id: "m".into(), login: "r".into(), ..Default::default() };
         let mut c = input(&u, None, &caps, agu_chat_model::mod_caps::REACH_ALL);
         c.platform = Platform::Rumble;
+        assert!(card_json(&c)["mod"].is_null(), "not a moderator here");
         c.co_can_moderate = true;
-        c.last_is_rumble = true;
-        c.target = Some(&t);
-        assert_eq!(card_json(&c)["mod"]["kind"], "rumble");
-        c.last_is_rumble = false;
-        assert!(card_json(&c)["mod"].is_null());
+        let v = card_json(&c);
+        assert_eq!(v["mod"]["kind"], "rumble");
+        assert!(v["mod"]["mute"].is_null() && v["mod"]["live"].is_null(), "no line of theirs: only the muted list");
+        assert_eq!(v["canDelete"], true);
+        let m = RumbleMsg { id: "m9".into(), user: agu_chat_model::types::RumbleUser { id: "7".into(), login: "r".into(), name: "R".into(), ..Default::default() }, ..Default::default() };
+        c.rumble = Some(RumbleCardTools { mute: Some(m.clone()), live: Some(m), pinned: true });
+        let v = card_json(&c);
+        assert_eq!(v["mod"]["mute"]["t"]["login"], "r");
+        let choices: Vec<(String, String, u64)> = v["mod"]["mute"]["choices"].as_array().unwrap().iter().map(|x| (x[0].as_str().unwrap().into(), x[1].as_str().unwrap().into(), x[2].as_u64().unwrap())).collect();
+        assert_eq!(choices, vec![("For 5 minutes".to_string(), "timeout".to_string(), 300), ("For this livestream".into(), "mutestream".into(), 0), ("Forever".into(), "ban".into(), 0)]);
+        assert_eq!((v["mod"]["live"]["t"]["id"].clone(), v["mod"]["live"]["pinned"].clone()), (json!("m9"), json!(true)));
     }
 
     #[test]

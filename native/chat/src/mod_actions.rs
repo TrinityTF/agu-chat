@@ -343,22 +343,31 @@ pub fn unmute_body(u: &MutedUser) -> Value {
     b
 }
 
-/// Rumble's "Muted users": (ok, the list or the toast saying why not).
-pub async fn rumble_muted_users(bridge: &Arc<dyn AguBridge>, source: &SourceRef) -> Result<Vec<MutedUser>, String> {
-    let r = relay_api(bridge, source, RUMBLE_MUTED_PATH, Some("GET"), None).await;
+/// What the relay's answer to the muted-list request means: the list, or the toast saying why not.
+pub fn muted_result(r: &RelayResponse) -> Result<Vec<MutedUser>, String> {
     if !r.ok {
-        return Err(fail_text(&r, "Couldn't read the muted users"));
+        return Err(fail_text(r, "Couldn't read the muted users"));
     }
     Ok(parse_muted(&r.body))
+}
+
+/// What the relay's answer to lifting one mute means: (worked, the toast).
+pub fn unmute_result(r: &RelayResponse, u: &MutedUser) -> (bool, ToastMsg) {
+    if !r.ok {
+        return (false, warn(fail_text(r, "Rumble rejected the action")));
+    }
+    (true, ok_toast(format!("unmuted {} on Rumble", u.name)))
+}
+
+/// Rumble's "Muted users": (ok, the list or the toast saying why not).
+pub async fn rumble_muted_users(bridge: &Arc<dyn AguBridge>, source: &SourceRef) -> Result<Vec<MutedUser>, String> {
+    muted_result(&relay_api(bridge, source, RUMBLE_MUTED_PATH, Some("GET"), None).await)
 }
 
 /// Lifts one mute from the list.
 pub async fn rumble_unmute(bridge: &Arc<dyn AguBridge>, source: &SourceRef, u: &MutedUser) -> (bool, ToastMsg) {
     let r = relay_api(bridge, source, "/api/rumble/action", Some("POST"), Some(unmute_body(u))).await;
-    if !r.ok {
-        return (false, warn(fail_text(&r, "Rumble rejected the action")));
-    }
-    (true, ok_toast(format!("unmuted {} on Rumble", u.name)))
+    unmute_result(&r, u)
 }
 
 pub async fn rumble_mod_action(bridge: &Arc<dyn AguBridge>, source: &SourceRef, action: &str, msg: &RumbleMsg, seconds: u32) -> ToastMsg {

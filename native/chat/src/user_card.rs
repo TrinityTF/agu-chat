@@ -7,7 +7,8 @@ use serde_json::Value;
 use super::chat_text::{split_rumble_emotes, RumblePart};
 use super::twitch::emotes::EmoteSets;
 use super::twitch::parts::{build_kick_parts, build_parts, MsgPart};
-use super::types::{RowBody, RumbleEmotes, SuspiciousUser};
+use super::mod_caps::co_reach;
+use super::types::{Row, RowBody, RumbleEmotes, RumbleMsg, SuspiciousUser};
 
 /// One badge for the card's grid: a picture when the platform gives one, else a glyph chip.
 #[derive(Clone, Debug)]
@@ -195,6 +196,36 @@ pub fn card_pieces(body: &RowBody, emotes: Option<&EmoteSets>, rumble: &RumbleEm
     }
 }
 
+
+/// What a moderator's Rumble card offers for a person, from their lines in this chat (newest first): the line a
+/// mute acts on, the line Pin / Delete act on, and whether that line is the pinned one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RumbleCardTools {
+    /// "Mute user": their newest line, only when the account may mute them (nobody mutes the owner, a fellow
+    /// moderator or themselves)
+    pub mute: Option<RumbleMsg>,
+    /// "Pin this message" / "Delete this message": their newest line that is still there (any line of any person)
+    pub live: Option<RumbleMsg>,
+    /// `live` is the pinned message
+    pub pinned: bool,
+}
+
+pub fn rumble_card_tools<'a>(recent: impl IntoIterator<Item = &'a Row>, viewer_login: &str, channel: &str, pinned_id: Option<&str>) -> RumbleCardTools {
+    let lines: Vec<&RumbleMsg> = recent
+        .into_iter()
+        .filter_map(|r| match &r.body {
+            RowBody::Rumble(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    let mute = lines.first().filter(|m| {
+        let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
+        let badges: Vec<&str> = m.badges.iter().map(|b| b.as_str()).collect();
+        co_reach(Platform::Rumble, viewer_login, channel, target, &badges).ban
+    });
+    let live = lines.iter().find(|m| !m.deleted);
+    RumbleCardTools { mute: mute.map(|m| (*m).clone()), pinned: live.is_some_and(|m| pinned_id == Some(m.id.as_str())), live: live.map(|m| (*m).clone()) }
+}
 #[cfg(test)]
 mod card_piece_tests {
     use super::*;
@@ -236,5 +267,33 @@ mod card_piece_tests {
         assert_eq!(card_pieces(&body, None, &Default::default()), vec![CardPiece::Text("hey ".into()), CardPiece::Image { url: "https://y/e.png".into(), alt: ":smile:".into(), label: "YouTube".into() }]);
         let plain = RowBody::YouTube(YouTubeMsg { text: "just text".into(), ..Default::default() });
         assert_eq!(card_pieces(&plain, None, &Default::default()), vec![CardPiece::Text("just text".into())]);
+    }
+
+    fn rumble_row(id: &str, login: &str, badges: &[&str], deleted: bool) -> Row {
+        let m = RumbleMsg { id: id.into(), user: crate::types::RumbleUser { login: login.into(), ..Default::default() }, badges: badges.iter().map(|b| b.to_string()).collect(), deleted, ..Default::default() };
+        Row { key: id.into(), ts: 0, sk: "rumble:agu".into(), platform: Platform::Rumble, ord: 0, backlog: false, body: RowBody::Rumble(m) }
+    }
+
+    #[test]
+    fn the_rumble_card_mutes_the_newest_line_and_pins_or_deletes_the_newest_live_one() {
+        let rows = [rumble_row("3", "bob", &[], true), rumble_row("2", "bob", &[], false), rumble_row("1", "bob", &[], false)];
+        let t = rumble_card_tools(rows.iter(), "agu", "agu", Some("2"));
+        assert_eq!(t.mute.as_ref().map(|m| m.id.as_str()), Some("3"));
+        assert_eq!(t.live.as_ref().map(|m| m.id.as_str()), Some("2"));
+        assert!(t.pinned);
+        assert!(!rumble_card_tools(rows.iter(), "agu", "agu", Some("9")).pinned);
+        assert!(!rumble_card_tools(rows.iter(), "agu", "agu", None).pinned);
+    }
+
+    #[test]
+    fn the_owner_and_yourself_cannot_be_muted_but_their_lines_can_be_deleted() {
+        let owner = [rumble_row("1", "agu", &[], false)];
+        let t = rumble_card_tools(owner.iter(), "mod", "agu", None);
+        assert!(t.mute.is_none() && t.live.is_some(), "deleting and pinning reach the owner's line");
+        let mine = [rumble_row("1", "mod", &[], false)];
+        let t = rumble_card_tools(mine.iter(), "mod", "agu", None);
+        assert!(t.mute.is_none() && t.live.is_some());
+        let none: [Row; 0] = [];
+        assert_eq!(rumble_card_tools(none.iter(), "mod", "agu", None), RumbleCardTools::default());
     }
 }

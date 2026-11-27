@@ -42,6 +42,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val modMode = mutableStateMapOf<String, Boolean>()
     /** Hype trains going on, by Twitch channel (source key): the bar at the top of that chat. */
     val hype = mutableStateMapOf<String, HypeTrain>()
+    /** Rumble pinned messages by channel (source key): the bar at the top of that chat. */
+    val pins = mutableStateMapOf<String, RumblePin>()
     /** The tab to bring forward (one you just added); the screen scrolls to it and calls [focusDone]. A tab a whisper opens never gets it. */
     var focusTab by mutableStateOf<String?>(null)
         private set
@@ -152,6 +154,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull()
         } ?: emptyList()
         val remove = (o["remove"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+        // Rumble's pinned messages of the channels in this tab (every Rumble channel is listed; a null row = none pinned)
+        val pins = (o["pins"] as? JsonArray)?.mapNotNull { p ->
+            val po = p as? JsonObject ?: return@mapNotNull null
+            val sk = po["sk"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val row = (po["row"] as? JsonObject)?.let { runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull() }
+            Triple(sk, row, po["canMod"]?.jsonPrimitive?.contentOrNull == "true")
+        }
+        withContext(Dispatchers.Main) {
+            pins?.forEach { (sk, row, can) -> if (row == null) this@ChatViewModel.pins.remove(sk) else this@ChatViewModel.pins[sk] = RumblePin(row, can) }
+        }
         withContext(Dispatchers.Main) { if (tabs.any { it.id == vk }) applyRows(vk, reset, upsert, remove) }
     }
 
@@ -641,6 +653,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Ignore or stop ignoring a person; the toast to show. */
     suspend fun cardIgnore(platform: String, login: String, on: Boolean): String? =
         callObj("card.ignore") { put("platform", platform); put("login", login); put("on", on) }?.get("toast")?.jsonPrimitive?.contentOrNull
+
+    /** Rumble's "Muted users" of a channel: the list, or null with the toast saying why not. */
+    suspend fun rumbleMuted(sk: String): Pair<List<MutedUser>?, String?> {
+        val o = callObj("rumble.muted") { put("sk", sk) } ?: return null to "Couldn't read the muted users"
+        val s = { k: String -> { e: JsonElement -> (e as? JsonObject)?.get(k)?.jsonPrimitive?.contentOrNull.orEmpty() } }
+        if (o["ok"]?.jsonPrimitive?.contentOrNull != "true") return null to (o["toast"]?.jsonPrimitive?.contentOrNull ?: "Couldn't read the muted users")
+        val list = (o["muted"] as? JsonArray).orEmpty().map { MutedUser(s("name")(it), s("id")(it), s("scope")(it)) }
+        return list to null
+    }
+
+    /** Lift one mute from that list; the answer says what to toast. */
+    suspend fun rumbleUnmute(sk: String, u: MutedUser): ModResult =
+        parseMod(callObj("rumble.unmute") { put("sk", sk); put("name", u.name); put("id", u.id); put("scope", u.scope) })
 
     suspend fun modesGet(sk: String, fresh: Boolean): JsonObject? = callObj("modes.get") { put("sk", sk); put("fresh", fresh) }
     suspend fun modesPatch(sk: String, body: JsonObject): JsonObject? = callObj("modes.patch") { put("sk", sk); put("body", body) }
