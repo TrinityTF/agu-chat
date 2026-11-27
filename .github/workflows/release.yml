@@ -7,8 +7,11 @@
 #     a full release (>= 1.0.0, no suffix) is published as "latest"
 #   * assets: Agu-Chat-Setup-<version>-x64.exe + .sha256 (Windows), Agu-Chat-<version>-mac.zip + .sha256 (macOS,
 #     Apple Silicon); title "Agu Chat <version>"
-#   * jobs: version -> windows + mac (in parallel, artifacts only) -> publish (draft, upload, check, publish), so the
-#     app never sees a release with only some of its files
+#   * Android: Agu-Chat-<version>-android.apk + .sha256, signed with the release key from the repository secrets
+#     AGU_ANDROID_KEYSTORE_B64 (base64 .jks), AGU_ANDROID_KEYSTORE_PASSWORD, AGU_ANDROID_KEY_ALIAS, AGU_ANDROID_KEY_PASSWORD;
+#     without them the job builds nothing and the release has no APK
+#   * jobs: version -> windows + mac + android (in parallel, artifacts only) -> publish (draft, upload, check, publish),
+#     so the app never sees a release with only some of its files
 # Versions are set by hand in Cargo.toml. Update rules (native/core/src/updater.rs): docs/GPUI-PORT.md "Installer and updates".
 name: Build and release
 
@@ -79,7 +82,7 @@ jobs:
 
       - name: Test
         working-directory: native
-        run: cargo test -p agu-chat-core -p agu-chat-gpui
+        run: cargo test -p agu-chat-core -p agu-chat-model -p agu-chat-gpui
 
       - name: Build
         working-directory: native
@@ -134,7 +137,7 @@ jobs:
 
       - name: Test
         working-directory: native
-        run: cargo test -p agu-chat-core -p agu-chat-gpui
+        run: cargo test -p agu-chat-core -p agu-chat-model -p agu-chat-gpui
 
       - name: Build
         working-directory: native
@@ -158,8 +161,96 @@ jobs:
             native/dist/Agu-Chat-${{ needs.version.outputs.version }}-mac.zip.sha256
           if-no-files-found: error
 
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      # native/rust-toolchain.toml pins the Windows MSVC host; here plain stable with the Android targets
+      RUSTUP_TOOLCHAIN: stable
+      NDK_VERSION: 28.2.13676358
+      HAS_KEY: ${{ secrets.AGU_ANDROID_KEYSTORE_B64 != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Signing key
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then echo "::warning::No Android signing key in the repository secrets: this release has no APK."; fi
+
+      - uses: actions/setup-java@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK and NDK
+        if: env.HAS_KEY == 'true'
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.1" "build-tools;36.0.0" "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Rust
+        if: env.HAS_KEY == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-linux-android,x86_64-linux-android
+          cargo install cargo-ndk --locked
+
+      - name: Cache cargo
+        if: env.HAS_KEY == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: native-android-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: native-android-
+
+      - name: Test
+        if: env.HAS_KEY == 'true'
+        working-directory: native
+        run: cargo test -p agu-chat-model -p agu-chat-android
+
+      - name: Build the Rust library
+        if: env.HAS_KEY == 'true'
+        working-directory: native
+        env:
+          AGU_BUILD_VERSION: ${{ needs.version.outputs.version }}
+        run: cargo ndk -t arm64-v8a -t x86_64 -P 28 -o ../android/app/src/main/jniLibs build --release -p agu-chat-android
+
+      - name: Build the APK
+        if: env.HAS_KEY == 'true'
+        working-directory: android
+        env:
+          KEY_B64: ${{ secrets.AGU_ANDROID_KEYSTORE_B64 }}
+          AGU_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AGU_ANDROID_KEYSTORE_PASSWORD }}
+          AGU_ANDROID_KEY_ALIAS: ${{ secrets.AGU_ANDROID_KEY_ALIAS }}
+          AGU_ANDROID_KEY_PASSWORD: ${{ secrets.AGU_ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/agu-release.jks"
+          export AGU_ANDROID_KEYSTORE="$RUNNER_TEMP/agu-release.jks"
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --console=plain
+          rm -f "$RUNNER_TEMP/agu-release.jks"
+          version="${{ needs.version.outputs.version }}"
+          mkdir -p ../native/dist
+          cp app/build/outputs/apk/release/app-release.apk "../native/dist/Agu-Chat-$version-android.apk"
+          cd ../native/dist
+          sha256sum "Agu-Chat-$version-android.apk" > "Agu-Chat-$version-android.apk.sha256"
+
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          name: android
+          path: |
+            native/dist/Agu-Chat-${{ needs.version.outputs.version }}-android.apk
+            native/dist/Agu-Chat-${{ needs.version.outputs.version }}-android.apk.sha256
+          if-no-files-found: error
+
   publish:
-    needs: [version, windows, mac]
+    needs: [version, windows, mac, android]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -190,6 +281,9 @@ jobs:
             printf '%s\n\n' "$notes"
             printf '**Windows 10 / 11:** download `Agu-Chat-Setup-%s-x64.exe` and run it.\n\n' "$VERSION"
             printf '**macOS 11+ (Apple Silicon):** download `Agu-Chat-%s-mac.zip`, open it and drag Agu Chat into Applications. The first time, right-click the app and choose **Open** (it is not signed by Apple yet).\n' "$VERSION"
+            if [ -f "dist/Agu-Chat-$VERSION-android.apk" ]; then
+              printf '\n**Android 9+:** download `Agu-Chat-%s-android.apk` on your phone and open it (allow installing apps from your browser when Android asks).\n' "$VERSION"
+            fi
           } > release-notes.md
           cat release-notes.md
 
@@ -210,12 +304,17 @@ jobs:
           gh release upload "$TAG" \
             "dist/Agu-Chat-Setup-$VERSION-x64.exe" "dist/Agu-Chat-Setup-$VERSION-x64.exe.sha256" \
             "dist/Agu-Chat-$VERSION-mac.zip" "dist/Agu-Chat-$VERSION-mac.zip.sha256"
+          if [ -f "dist/Agu-Chat-$VERSION-android.apk" ]; then
+            gh release upload "$TAG" "dist/Agu-Chat-$VERSION-android.apk" "dist/Agu-Chat-$VERSION-android.apk.sha256"
+          fi
 
       - name: Check the assets are there
         run: |
           assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
           echo "$assets"
-          for f in "Agu-Chat-Setup-$VERSION-x64.exe" "Agu-Chat-Setup-$VERSION-x64.exe.sha256" "Agu-Chat-$VERSION-mac.zip" "Agu-Chat-$VERSION-mac.zip.sha256"; do
+          want="Agu-Chat-Setup-$VERSION-x64.exe Agu-Chat-Setup-$VERSION-x64.exe.sha256 Agu-Chat-$VERSION-mac.zip Agu-Chat-$VERSION-mac.zip.sha256"
+          if [ -f "dist/Agu-Chat-$VERSION-android.apk" ]; then want="$want Agu-Chat-$VERSION-android.apk Agu-Chat-$VERSION-android.apk.sha256"; fi
+          for f in $want; do
             echo "$assets" | grep -qx "$f"
           done
 

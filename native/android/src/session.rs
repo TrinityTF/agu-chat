@@ -423,6 +423,14 @@ impl Session {
                     let r = relay_api(b, &source, str_arg(&args, "path")?, args.get("method").and_then(|m| m.as_str()), args.get("body").cloned()).await;
                     Ok(json!({"ok": r.ok, "status": r.status, "body": r.body}))
                 }
+                // debuggable builds only (the app checks): feed a frame to an open chat as if the platform sent it,
+                // to see real rows without a busy channel
+                "dev.frame" => {
+                    let sk = str_arg(&args, "sk")?.to_string();
+                    let frame = args.get("frame").cloned().ok_or("missing frame")?;
+                    let _ = s.inner.inbox.send(Inbox::Frame(sk, frame));
+                    Ok(Value::Null)
+                }
                 "open.url" => {
                     b.open_external(str_arg(&args, "url")?.to_string());
                     Ok(Value::Null)

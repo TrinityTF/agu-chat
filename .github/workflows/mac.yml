@@ -42,7 +42,7 @@ jobs:
 
       - name: Test
         working-directory: native
-        run: cargo test -p agu-chat-core -p agu-chat-gpui
+        run: cargo test -p agu-chat-core -p agu-chat-model -p agu-chat-gpui
 
       - name: Build
         working-directory: native
