@@ -74,6 +74,9 @@ import kotlin.math.sin
 /** Image url -> width/height, filled in when Coil has decoded it so emote placeholders get the right width. */
 private val aspects = mutableStateMapOf<String, Float>()
 
+/** Badge pictures that would not load: their place closes up, so the badges and the name sit together. */
+private val failedBadges = mutableStateMapOf<String, Boolean>()
+
 private const val GifDp = 120f
 private const val MarkDp = 15f
 
@@ -103,7 +106,7 @@ class Tip(val name: String, val label: String, val img: String? = null, val glyp
 
 /** What an inline placeholder shows; the placeholder size is resolved at composition time. */
 private sealed interface Inl {
-    class Img(val url: String, val overlays: List<String>, val heightDp: Float, val tip: Tip?) : Inl
+    class Img(val url: String, val overlays: List<String>, val heightDp: Float, val tip: Tip?, val badge: Boolean = false) : Inl
     class Mark(val platform: String) : Inl
     class Chip(val glyph: String, val color: Color, val tip: Tip?) : Inl
     class Emoji(val text: String, val overlays: List<String>, val tip: Tip?) : Inl
@@ -161,7 +164,7 @@ private fun AnnotatedString.Builder.badges(b: Bld, list: List<Badge>, d: Display
     if (!d.showBadges) return
     for (bd in list) {
         val tip = Tip(bd.title.orEmpty(), "Badge", bd.url)
-        val id = if (!bd.url.isNullOrEmpty()) b.add("b", Inl.Img(bd.url, emptyList(), d.badgeDp, tip))
+        val id = if (!bd.url.isNullOrEmpty()) b.add("b", Inl.Img(bd.url, emptyList(), d.badgeDp, tip, badge = true))
         else b.add("k", Inl.Chip(bd.glyph.orEmpty(), parseColor(bd.color) ?: AguColors.Muted, tip))
         appendInlineContent(id, "■")
         append(" ")
@@ -226,7 +229,7 @@ private fun paintBrush(p: Paint, w: Float, h: Float): Brush? {
 
 /** An image of an emote or badge; still (its first frame) when animated emotes are off. */
 @Composable
-private fun EmoteImage(url: String, animated: Boolean, modifier: Modifier = Modifier, onSuccess: ((Float) -> Unit)? = null) {
+internal fun EmoteImage(url: String, animated: Boolean, modifier: Modifier = Modifier, onSuccess: ((Float) -> Unit)? = null, onError: (() -> Unit)? = null) {
     val ctx = LocalContext.current
     val req = remember(url, animated) {
         ImageRequest.Builder(ctx).data(url).apply {
@@ -238,6 +241,7 @@ private fun EmoteImage(url: String, animated: Boolean, modifier: Modifier = Modi
     }
     AsyncImage(
         model = req, contentDescription = null, contentScale = ContentScale.Fit, modifier = modifier,
+        onError = { onError?.invoke() },
         onSuccess = { st -> val img = st.result.image; if (onSuccess != null && img.height > 0) onSuccess(img.width.toFloat() / img.height) },
     )
 }
@@ -255,10 +259,11 @@ private fun inlineContent(spec: Map<String, Inl>, density: Density, d: Display, 
             is Inl.Img -> {
                 val aspect = (aspects[s.url] ?: 1f).coerceIn(0.2f, 8f)
                 val h = with(density) { s.heightDp.dp.toSp() }
-                val w = with(density) { (s.heightDp * aspect).dp.toSp() }
+                // a badge whose picture failed takes no room
+                val w = if (s.badge && failedBadges[s.url] == true) with(density) { 1.dp.toSp() } else with(density) { (s.heightDp * aspect).dp.toSp() }
                 InlineTextContent(Placeholder(w, h, PlaceholderVerticalAlign.TextCenter)) {
                     Box(Modifier.fillMaxSize().tipOnLongPress(s.tip, onTip)) {
-                        EmoteImage(s.url, d.animatedEmotes, Modifier.fillMaxSize(), onSuccess = { aspects[s.url] = it })
+                        EmoteImage(s.url, d.animatedEmotes, Modifier.fillMaxSize(), onSuccess = { aspects[s.url] = it; failedBadges.remove(s.url) }, onError = if (s.badge) ({ failedBadges[s.url] = true }) else null)
                         // Zero-width emotes sit on top of the base emote.
                         for (o in s.overlays) EmoteImage(o, d.animatedEmotes, Modifier.fillMaxSize())
                     }

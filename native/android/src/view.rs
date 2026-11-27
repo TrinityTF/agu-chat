@@ -11,7 +11,7 @@ use agu_chat_model::highlights::{compile_highlights, match_input_of, rule_row_st
 use agu_chat_model::ignores::{apply_ignores, compile_ignores, filter_ignored, CompiledIgnores, IgnoreCache};
 use agu_chat_model::mentions::{is_own, kick_me, me_login_lower, row_mentions_me};
 use agu_chat_model::search::{match_row, SearchQuery};
-use agu_chat_model::shown::visible_rows_with;
+use agu_chat_model::shown::visible_rows;
 use agu_chat_model::twitch::badges::{parse_badge_list, BadgeMap};
 use agu_chat_model::twitch::cheermotes::{self, Cheermotes};
 use agu_chat_model::twitch::colors::{fallback_color, name_color, readable_color};
@@ -872,7 +872,7 @@ impl Rules {
     /// What a list shows of a store's rows: the event toggles, then ignores (hidden lines go, words are rewritten),
     /// then the tab's search.
     pub fn shown(&self, rows: &[RowRef], cache: &mut IgnoreCache, search: Option<&SearchQuery>) -> Vec<RowRef> {
-        let rows = filter_ignored(&visible_rows_with(rows, &self.settings, true), &self.ignores, cache);
+        let rows = filter_ignored(&visible_rows(rows, &self.settings), &self.ignores, cache);
         match search {
             Some(q) if !(q.from.is_empty() && q.words.is_empty()) => rows.into_iter().filter(|r| match_row(r, q)).collect(),
             _ => rows,

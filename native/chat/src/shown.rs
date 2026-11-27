@@ -12,8 +12,8 @@ pub fn visible_rows(rows: &[RowRef], rs: &Settings) -> Vec<RowRef> {
     visible_rows_with(rows, rs, false)
 }
 
-/// `announcements`: also show a streamer's announcements (the Android app does; the desktop's event toggles keep
-/// them off).
+/// `announcements`: also show a streamer's announcements (neither app does: the desktop's event toggles keep them
+/// off, and Android follows it).
 pub fn visible_rows_with(rows: &[RowRef], rs: &Settings, announcements: bool) -> Vec<RowRef> {
     let mut bombs: HashSet<String> = HashSet::new();
     for r in rows {

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::autocomplete::InvEntry;
-use crate::chat::twitch::emotes::{provider_emote_url, ProviderEmote, ProviderScopedMap, SizeOpt, TwitchEmotesResp, TwitchPickerEmote};
-use crate::chat::twitch::use_twitch_data::ProviderSets;
+use crate::twitch::emotes::{provider_emote_url, ProviderEmote, ProviderScopedMap, SizeOpt, TwitchEmotesResp, TwitchPickerEmote};
+use crate::twitch::use_twitch_data::ProviderSets;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PickerItem {
@@ -149,7 +149,7 @@ pub fn build_twitch_inventory(provider_sets: Option<&ProviderSets>, twitch_emote
 }
 
 fn provider_key(e: &ProviderEmote) -> &'static str {
-    use crate::chat::twitch::emotes::EmoteProvider::*;
+    use crate::twitch::emotes::EmoteProvider::*;
     match e.provider {
         SevenTv => "7tv",
         Bttv => "bttv",
@@ -263,7 +263,7 @@ pub fn merge_inventories(list: &[Inventory]) -> Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::twitch::emotes::EmoteProvider;
+    use crate::twitch::emotes::EmoteProvider;
     use serde_json::json;
 
     fn pe(provider: EmoteProvider, id: &str, name: &str, zero_width: bool) -> Arc<ProviderEmote> {

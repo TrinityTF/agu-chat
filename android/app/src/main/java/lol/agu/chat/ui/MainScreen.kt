@@ -57,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.key
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -114,12 +115,10 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
     var adding by remember { mutableStateOf<AddTo?>(null) }
     var tabMenu by remember { mutableStateOf<Tab?>(null) }
     var renaming by remember { mutableStateOf<Tab?>(null) }
-    var picking by remember { mutableStateOf(false) }
     var menuRow by remember { mutableStateOf<Row?>(null) }
     var replyTo by remember { mutableStateOf<Row?>(null) }
-    val drafts = remember { HashMap<String, String>() }
-    val targets = remember { HashMap<String, String>() } // tab id -> "*" (all chats) or a source key
-    var text by remember { mutableStateOf("") }
+    // a name for the message box (a Super Chat's Reply puts @name there)
+    var mention by remember { mutableStateOf<String?>(null) }
 
     val current = tabs.getOrNull(pager.currentPage)
 
@@ -130,18 +129,13 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
         prevCount = tabs.size
     }
     // Each tab keeps its own draft; replying is per tab too. The tab you look at has seen its messages.
-    LaunchedEffect(current?.id) { replyTo = null; text = drafts[current?.id].orEmpty(); vm.select(current?.id); query = queries[current?.id].orEmpty() }
+    LaunchedEffect(current?.id) { replyTo = null; vm.select(current?.id); query = queries[current?.id].orEmpty() }
     // A tapped mention: its tab comes forward (the list scrolls to the message itself)
     val jump = vm.jump
     LaunchedEffect(jump) {
         val i = tabs.indexOfFirst { it.id == jump?.vk }
         if (i >= 0 && i != pager.currentPage) pager.animateScrollToPage(i)
     }
-
-    val options = current?.let { sendOptions(it, vm.conns) }.orEmpty()
-    val merged = options.size > 1
-    val sendable = options.filter { it.canSend }
-    val chosen = chosenTarget(targets[current?.id], sendable.map { it.sk }, replyTo?.sk)
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val width: Dp = maxWidth
@@ -187,46 +181,19 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
                     ChatList(
                         vm, tab, jump?.takeIf { it.vk == tab.id }, onLongPress = { menuRow = it },
                         searching = searching && tab.id == current?.id && query.isNotBlank(),
-                        onReplyNotice = { r -> r.user?.let { u -> (u.name ?: u.login)?.let { n -> text = "@$n " + text; current?.let { c -> drafts[c.id] = text } } } },
+                        onReplyNotice = { r -> r.user?.let { u -> (u.name ?: u.login)?.let { n -> mention = n } } },
                     )
                 }
             }
-            val single = current?.sks?.firstOrNull()?.let { vm.conns[it] }
-            val first = options.firstOrNull()
-            val noneSendable = merged && sendable.isEmpty()
-            Composer(
-                text = text,
-                onText = { text = it; current?.let { t -> drafts[t.id] = it } },
-                canSend = if (merged) !noneSendable else single?.canSend != false,
-                readOnlyReason = if (merged) first?.let { readOnlyText(vm.conns[it.sk], it.platform) } else readOnlyText(single, current?.channels?.firstOrNull()?.platform),
-                showLogin = if (merged) options.any { vm.conns[it.sk]?.loggedOut == true } && noneSendable else single?.loggedOut == true,
-                replyingTo = replyTo?.let { it.user?.name ?: it.user?.login },
-                onCancelReply = { replyTo = null },
-                onSend = {
-                    val tab = current ?: return@Composer
-                    val msg = text.trim()
-                    if (msg.isEmpty()) return@Composer
-                    val sks = if (chosen == ALL) sendable.map { it.sk } else listOf(chosen.ifEmpty { options.firstOrNull()?.sk ?: return@Composer })
-                    val reply = replyTo
-                    scope.launch {
-                        val failed = ArrayList<String>()
-                        for (sk in sks) {
-                            val err = vm.send(sk, msg, reply?.id?.content?.takeIf { reply.sk == sk })
-                            if (err != null) failed.add(if (merged) "${platformLabel(sk.substringBefore(':'))}: $err" else err)
-                        }
-                        if (failed.size < sks.size) { text = ""; drafts[tab.id] = ""; replyTo = null }
-                        if (failed.isNotEmpty()) snackbar.showSnackbar(failed.joinToString("\n"))
-                    }
-                },
-                onLogin = onAccounts,
-                modifier = Modifier.navigationBarsPadding(),
-                target = if (merged && !noneSendable) {
-                    if (chosen == ALL) SendTargetChip("All", null)
-                    else options.firstOrNull { it.sk == chosen }?.let { SendTargetChip(it.channel, it.platform) }
-                } else null,
-                onTarget = { picking = true },
-                placeholder = if (merged) (if (chosen == ALL) "Message all chats" else "Message ${options.firstOrNull { it.sk == chosen }?.channel.orEmpty()}") else "Send a message",
-            )
+            current?.let { tab ->
+                key(tab.id) {
+                    ComposerHost(
+                        vm, tab, replyTo, onClearReply = { replyTo = null },
+                        mention = mention, onMentionUsed = { mention = null },
+                        snackbar = snackbar, onLogin = onAccounts, modifier = Modifier.navigationBarsPadding(),
+                    )
+                }
+            }
         }
         SnackbarHost(snackbar)
     }
@@ -270,22 +237,6 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
         )
     }
 
-    if (picking && current != null) {
-        ModalBottomSheet(onDismissRequest = { picking = false }, containerColor = AguColors.Surface) {
-            Column(Modifier.navigationBarsPadding().padding(bottom = 12.dp)) {
-                Text("Send to", color = AguColors.Muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-                for (o in options) {
-                    TargetRow(o.channel, o.platform, o.reason, selected = chosen == o.sk, enabled = o.canSend) {
-                        targets[current.id] = o.sk; picking = false
-                    }
-                }
-                if (sendable.size > 1) TargetRow("All chats", null, null, selected = chosen == ALL, enabled = true) {
-                    targets[current.id] = ALL; picking = false
-                }
-            }
-        }
-    }
-
     menuRow?.let { row ->
         ModalBottomSheet(onDismissRequest = { menuRow = null }, containerColor = AguColors.Surface) {
             Column(Modifier.navigationBarsPadding().padding(bottom = 12.dp)) {
@@ -306,7 +257,7 @@ private fun SheetItem(label: String, color: Color = AguColors.Text, onClick: () 
 }
 
 @Composable
-private fun TargetRow(label: String, platform: String?, reason: String?, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+internal fun TargetRow(label: String, platform: String?, reason: String?, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -503,12 +454,7 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
         } else vm.jumpDone(jump)
     }
 
-    Box(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize(), state) {
-            items(rows, key = { it.key }) { row ->
-                MessageRow(row, onLongPress, showMark = merged && LocalDisplay.current.showPlatformMarks, flash = row.key == flashKey, onReplyNotice = onReplyNotice)
-            }
-        }
+    Column(Modifier.fillMaxSize()) {
         // channels that are not connected say so (named by platform when several are merged)
         val lines = tab.channels.mapNotNull { ch ->
             val conn = vm.conns[ch.sk()] ?: return@mapNotNull null
@@ -523,11 +469,17 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
             Triple(if (merged) "${platformLabel(ch.platform)}: $label" else label, conn.detail, ch.sk())
         }
         if (lines.isNotEmpty()) {
-            Column(Modifier.fillMaxWidth().background(AguColors.Surface.copy(alpha = 0.95f)).padding(horizontal = 14.dp, vertical = 6.dp)) {
+            Column(Modifier.fillMaxWidth().background(AguColors.Surface).padding(horizontal = 14.dp, vertical = 6.dp)) {
                 for ((label, detail, _) in lines) {
                     Text(label, color = AguColors.Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     if (!detail.isNullOrBlank()) Text(detail, color = AguColors.Muted, fontSize = 12.sp)
                 }
+            }
+        }
+    Box(Modifier.weight(1f).fillMaxWidth()) {
+        LazyColumn(Modifier.fillMaxSize(), state) {
+            items(rows, key = { it.key }) { row ->
+                MessageRow(row, onLongPress, showMark = merged && LocalDisplay.current.showPlatformMarks, flash = row.key == flashKey, onReplyNotice = onReplyNotice)
             }
         }
         if (!stuck && !atBottom && rows.isNotEmpty()) {
@@ -540,6 +492,7 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }
+    }
     }
 }
 

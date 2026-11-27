@@ -27,14 +27,21 @@ use agu_chat_core::{AppMeta, Backend};
 use agu_chat_model::alerts::ping_samples;
 use agu_chat_model::ignores::IgnoreCache;
 use agu_chat_model::mentions::{classify, mention_id, row_deleted, Alert, Mentions};
-use agu_chat_model::mod_caps::relay_api;
+use agu_chat_core::chat_rules::{chat_gate, GateLevel};
+use agu_chat_core::protocol::ConnFrame;
+use agu_chat_model::input::autocomplete::{chatters, suggest, ChangeCtx};
+use agu_chat_model::input::gate::twitch_viewer;
+use agu_chat_model::input::inventory::{build_kick_inventory, build_rumble_inventory, build_twitch_inventory, build_youtube_inventory, merge_inventories, Inventory};
+use agu_chat_model::input::slash::{confirmed_command, post_json, Confirmed};
+use agu_chat_model::mod_caps::{fetch_mod_caps, relay_api, ModCaps};
+use agu_chat_model::types::RowBody;
 use agu_chat_model::net::Net;
 use agu_chat_model::search::{parse_search, SearchQuery};
 use agu_chat_model::store::{source_key, ChatStore};
 use agu_chat_model::twitch::badges::BadgeMap;
 use agu_chat_model::twitch::cheermotes::{load_cheermotes, Cheermotes};
 use agu_chat_model::twitch::cosmetics::{defs_from_raw, fetch_chatter_style, fetch_seven_tv_defs, retry_delay, SevenTvDefs, StyleBook};
-use agu_chat_model::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, init_cache, merge_emote_sets, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
+use agu_chat_model::twitch::emotes::{fetch_seven_tv_personal, fetch_twitch_picker_emotes, ProviderEmote, TwitchEmotesResp, TwitchPickerEmote, fetch_seven_tv_set, flush_cache, forget_cache, init_cache, merge_emote_sets, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
 use agu_chat_model::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, SevenSocket, EMOTE_SET_UPDATE, USER_UPDATE};
 use agu_chat_model::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets};
 use futures::future::BoxFuture;
@@ -42,6 +49,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::alerts::{Alerter, Wants};
+use crate::compose::{byte_of, picker_json, plan_send, send_failures, suggestions_json, SendPlan, Target};
 use crate::hub::{Added, Hub};
 use crate::view::{row_json, style_key, Env, Rules};
 
@@ -66,6 +74,11 @@ struct SrcData {
     seven_ids: Option<SevenTvIds>,
     /// the last `conn` frame, to tell a view that opens on a channel that is already connected
     conn: Option<Value>,
+    /// the account's own Twitch emotes (what the picker and ":" offer), and what the account may do here
+    twitch_emotes: TwitchEmotesResp,
+    caps: ModCaps,
+    /// the emote inventory built for this generation of the emote data
+    inv: Option<(u64, Arc<Inventory>)>,
 }
 
 /// What a row is drawn against, besides its own channel's data.
@@ -187,13 +200,18 @@ struct State {
     /// link preview cards: one cache for every tab, at most 4 requests at a time
     previews: PreviewCache,
     seven_seq: u64,
+    /// the logged-in account's 7TV personal emotes (the picker and ":" offer them), and whose they are
+    personal: Vec<Arc<ProviderEmote>>,
+    personal_requested: HashSet<String>,
+    /// counts every change of emote data: an inventory built for an older count is built again
+    inv_gen: u64,
 }
 
 type Out = Vec<(&'static str, Value)>;
 
 impl State {
     fn new() -> State {
-        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0 }
+        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0, personal: Vec::new(), personal_requested: HashSet::new(), inv_gen: 0 }
     }
 
     /// Everything shown depends on these (settings, accounts): draw all rows again.
@@ -206,6 +224,7 @@ impl State {
     }
 
     fn touch_sk(&mut self, sk: &str) {
+        self.inv_gen += 1;
         for vk in self.hub.views_of(sk) {
             if let Some(v) = self.views.get_mut(&vk) {
                 v.dirty = true;
@@ -224,6 +243,7 @@ impl State {
             }
         }
         self.previews.set_enabled(s.link_previews);
+        self.inv_gen += 1;
         self.redraw_all();
     }
 
@@ -277,6 +297,94 @@ impl State {
         }
     }
 
+    /// The emotes a chat's message box offers (the picker and ":"): Twitch's own, the providers the settings switch
+    /// on, the account's 7TV personal set; Kick's, Rumble's and YouTube's come with the chat.
+    fn inventory(&mut self, sk: &str) -> Arc<Inventory> {
+        let Some(platform) = self.hub.source(sk).map(|s| s.platform) else { return Arc::default() };
+        if platform == Platform::Twitch {
+            if let Some((g, i)) = self.src.get(sk).and_then(|d| d.inv.clone()) {
+                if g == self.inv_gen {
+                    return i;
+                }
+            }
+            let rs = &self.rules.settings;
+            let d = self.src.get(sk);
+            let empty = ProviderScopedMap::default();
+            let sets = d.and_then(|d| d.sets.as_ref()).map(|ps| ProviderSets {
+                seven: if rs.seven_tv { ps.seven.clone() } else { empty.clone() },
+                bttv: if rs.bttv { ps.bttv.clone() } else { empty.clone() },
+                ffz: if rs.ffz { ps.ffz.clone() } else { empty.clone() },
+                ..Default::default()
+            });
+            let none = TwitchEmotesResp::default();
+            let inv = Arc::new(build_twitch_inventory(sets.as_ref(), d.map(|d| &d.twitch_emotes).unwrap_or(&none), &self.personal));
+            let gen = self.inv_gen;
+            if let Some(d) = self.src.get_mut(sk) {
+                d.inv = Some((gen, inv.clone()));
+            }
+            return inv;
+        }
+        let st = self.hub.views_of(sk).iter().find_map(|vk| self.views.get(vk).and_then(|v| v.store.source(sk)));
+        Arc::new(match (platform, st) {
+            (Platform::Rumble, Some(st)) => build_rumble_inventory(&st.rumble_emotes),
+            (Platform::Kick, Some(st)) => build_kick_inventory(&st.kick_emotes),
+            (Platform::Youtube, Some(st)) => build_youtube_inventory(&st.youtube_emotes),
+            _ => Inventory::default(),
+        })
+    }
+
+    /// The emotes of the chats a message goes to, merged (one chat: its own).
+    fn merged_inventory(&mut self, sks: &[String]) -> Arc<Inventory> {
+        let list: Vec<Arc<Inventory>> = sks.iter().map(|sk| self.inventory(sk)).collect();
+        match list.len() {
+            1 => list[0].clone(),
+            _ => Arc::new(merge_inventories(&list.iter().map(|i| (**i).clone()).collect::<Vec<_>>())),
+        }
+    }
+
+    /// (newest message id, pinned message id) of a chat, for `/pin` and `/unpin`.
+    fn message_ids(&self, vk: &str, sk: &str) -> (Option<String>, Option<String>) {
+        let Some(store) = self.views.get(vk).map(|v| &v.store) else { return (None, None) };
+        let last = store.rows().iter().rev().find_map(|r| match &r.body {
+            RowBody::Msg(m) if r.sk == sk => Some(m.id.clone()),
+            _ => None,
+        });
+        (last, store.source(sk).and_then(|s| s.pinned.as_ref().map(|p| p.id.clone())))
+    }
+
+    fn me_twitch_id(&self) -> String {
+        self.rules.accounts.get(&Platform::Twitch).and_then(|a| a.user.as_ref()).map(|u| u.id.clone()).unwrap_or_default()
+    }
+
+    /// How the channel's chat modes apply to the logged-in account (the desktop's `chat_gate`): Kick says who the
+    /// account is there; on Twitch it is pieced together from the mod rights and the badges on the account's own
+    /// latest line.
+    fn gate_of(&self, sk: &str) -> Option<Value> {
+        let source = self.hub.source(sk)?;
+        let d = self.src.get(sk)?;
+        let conn: ConnFrame = serde_json::from_value(d.conn.clone()?).ok()?;
+        let modes = conn.chat_modes.as_ref()?;
+        let gated = modes.subs_only || modes.members_only || modes.followers_min.is_some() || modes.account_age_min.is_some();
+        let viewer = match source.platform {
+            Platform::Twitch if gated => {
+                let me_login = self.rules.me_login().to_lowercase();
+                let broadcaster = d.caps.is_broadcaster.unwrap_or(!me_login.is_empty() && source.channel.to_lowercase().trim_start_matches('#') == me_login);
+                let me = self.me_twitch_id();
+                let own = self.hub.views_of(sk).iter().find_map(|vk| self.views.get(vk)).and_then(|v| {
+                    v.store.rows().iter().rev().find_map(|r| match &r.body {
+                        RowBody::Msg(m) if r.sk == sk && !me.is_empty() && m.user.id == me => Some(m.badges.clone()),
+                        _ => None,
+                    })
+                });
+                twitch_viewer(broadcaster, d.caps.is_mod == Some(true), own.as_deref())
+            }
+            _ => conn.chat_viewer.clone().unwrap_or_default(),
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        let g = chat_gate(modes, &viewer, now)?;
+        Some(json!({"level": match g.level { GateLevel::Blocked => "blocked", GateLevel::Restricted => "restricted", GateLevel::Info => "info" }, "text": g.text}))
+    }
+
     /// A `mentions` event when the bell's numbers changed.
     fn mentions_event(&mut self, out: &mut Out) {
         let now = (self.mentions.unread(), self.mentions.len());
@@ -324,6 +432,11 @@ pub struct Session {
 
 fn platform_of(v: &Value) -> Result<Platform, String> {
     serde_json::from_value(v.get("platform").cloned().unwrap_or(Value::Null)).map_err(|_| "unknown platform".to_string())
+}
+
+/// `sks: [source key]`
+fn sks_arg(v: &Value) -> Vec<String> {
+    v.get("sks").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect()).unwrap_or_default()
 }
 
 fn str_arg<'a>(v: &'a Value, k: &str) -> Result<&'a str, String> {
@@ -415,7 +528,7 @@ impl Session {
             // a login brings the cheermotes (they need the account's token)
             let session = Session { inner: i2.clone() };
             let rt = i2.net.rt.handle().clone();
-            rt.spawn(async move { session.load_cheermotes_all().await });
+            rt.spawn(async move { session.refresh_account_data().await });
             s2(&"accounts", &serde_json::to_value(a).unwrap_or(Value::Null))
         })));
         let (i3, s3) = (inner.clone(), sink.clone());
@@ -442,7 +555,7 @@ impl Session {
                 st.rules = Rules::new(settings, a);
                 st.settings_changed();
             }
-            s.load_cheermotes_all().await;
+            s.refresh_account_data().await;
         });
         session
     }
@@ -608,6 +721,59 @@ impl Session {
                 }
             }
         });
+    }
+
+    // ---- what the message box needs ------------------------------------------------------------
+
+    /// A login (or the start) brings what needs the account: cheermotes, what it may do in each chat, its own emotes.
+    async fn refresh_account_data(&self) {
+        self.load_cheermotes_all().await;
+        let todo: Vec<(String, SourceRef, Option<String>)> = {
+            let st = self.inner.st.lock().unwrap();
+            st.src.iter().filter_map(|(sk, d)| st.hub.source(sk).filter(|s| s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_none()).map(|s| (sk.clone(), s, d.channel_id.clone()))).collect()
+        };
+        for (sk, source, cid) in todo {
+            self.load_caps(sk.clone(), source).await;
+            // Twitch's emotes of the account are not those of a logged-out visitor
+            if let Some(cid) = cid {
+                self.load_picker(sk, cid, true).await;
+            }
+        }
+        self.load_personal(false).await;
+    }
+
+    async fn load_caps(&self, sk: String, source: SourceRef) {
+        let caps = fetch_mod_caps(&self.inner.bridge, &source).await;
+        if let Some(d) = self.inner.st.lock().unwrap().src.get_mut(&sk) {
+            d.caps = caps;
+        }
+    }
+
+    /// Twitch's own emotes for the picker and ":" (`fresh`: past the cache).
+    async fn load_picker(&self, sk: String, channel_id: String, fresh: bool) {
+        let Some(source) = self.inner.st.lock().unwrap().hub.source(&sk).filter(|s| s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_none()) else { return };
+        let r = fetch_twitch_picker_emotes(&self.inner.bridge, &source, &channel_id, fresh).await;
+        let mut st = self.inner.st.lock().unwrap();
+        st.inv_gen += 1;
+        if let Some(d) = st.src.get_mut(&sk) {
+            d.twitch_emotes = r;
+        }
+    }
+
+    /// The account's 7TV personal emotes, once per account.
+    async fn load_personal(&self, reload: bool) {
+        let id = {
+            let mut st = self.inner.st.lock().unwrap();
+            let id = st.me_twitch_id();
+            if id.is_empty() || (!st.personal_requested.insert(id.clone()) && !reload) {
+                return;
+            }
+            id
+        };
+        let list = fetch_seven_tv_personal(&self.inner.net.client, &id, reload).await;
+        let mut st = self.inner.st.lock().unwrap();
+        st.personal = list;
+        st.inv_gen += 1;
     }
 
     // ---- cheermotes ----------------------------------------------------------------------------
@@ -884,6 +1050,9 @@ impl Session {
                 let (sk2, src2) = (sk.clone(), source.clone());
                 self.inner.net.rt.spawn(async move { s.load_cheermotes(sk2, src2).await });
             }
+            let s = self.clone();
+            let (sk2, src2) = (sk.clone(), source.clone());
+            self.inner.net.rt.spawn(async move { s.load_caps(sk2, src2).await });
         }
         if let Some(cid) = start_emotes {
             self.load_emotes(sk, cid, false).await;
@@ -908,6 +1077,11 @@ impl Session {
     /// 7TV / BTTV / FFZ for a Twitch channel: the cached sets at once, then fresh ones.
     async fn load_emotes(&self, sk: String, channel_id: String, reload: bool) {
         let client = self.inner.net.client.clone();
+        {
+            let s = self.clone();
+            let (sk2, cid2) = (sk.clone(), channel_id.clone());
+            self.inner.net.rt.spawn(async move { s.load_picker(sk2, cid2, reload).await });
+        }
         if !reload {
             if let Some(sets) = load_cached_provider_sets(client.clone(), channel_id.clone()).await {
                 self.apply_sets(&sk, &sets);
@@ -1110,6 +1284,108 @@ impl Session {
         })
     }
 
+    // ---- the message box -----------------------------------------------------------------------
+
+    /// `{vk, sks, text, caret}` (caret in UTF-16 units) -> the strip's suggestions, or null.
+    fn compose_suggest(&self, args: &Value) -> Result<Value, String> {
+        let (vk, sks) = (str_arg(args, "vk")?, sks_arg(args));
+        let text = str_arg(args, "text")?;
+        let caret = byte_of(text, args.get("caret").and_then(|c| c.as_u64()).unwrap_or(text.encode_utf16().count() as u64) as usize);
+        let mut guard = self.inner.st.lock().unwrap();
+        let st = &mut *guard;
+        let inv = st.merged_inventory(&sks);
+        let single = (sks.len() == 1).then(|| st.hub.source(&sks[0])).flatten();
+        let slash_ok = single.as_ref().is_some_and(|s| s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_none());
+        let caps = if slash_ok { st.src.get(&sks[0]).map(|d| d.caps.clone()) } else { None };
+        let rows = st.views.get(vk).map(|v| v.store.rows());
+        let names = || rows.map(|r| chatters(r, &sks)).unwrap_or_default();
+        let cx = ChangeCtx { inventory: &inv.inventory, slash_ok, twitch_caps: caps.as_ref(), names: &names };
+        Ok(suggest(text, caret, &cx).map(|r| suggestions_json(text, &r)).unwrap_or(Value::Null))
+    }
+
+    /// `{sks, tab?, q?}` -> the emote picker: `{tabs, sections}`.
+    fn compose_picker(&self, args: &Value) -> Result<Value, String> {
+        let sks = sks_arg(args);
+        let inv = self.inner.st.lock().unwrap().merged_inventory(&sks);
+        Ok(picker_json(&inv, args.get("tab").and_then(|t| t.as_str()).unwrap_or(""), args.get("q").and_then(|t| t.as_str()).unwrap_or("")))
+    }
+
+    /// `{vk, sks}` -> `{sk: {level, text}}` for the chats whose modes concern this account.
+    fn compose_gates(&self, args: &Value) -> Value {
+        let st = self.inner.st.lock().unwrap();
+        let mut out = serde_json::Map::new();
+        for sk in sks_arg(args) {
+            if let Some(g) = st.gate_of(&sk) {
+                out.insert(sk, g);
+            }
+        }
+        Value::Object(out)
+    }
+
+    /// `{vk, sks, text, reply?: {sk, id}}`: what Send does. Answers `{clear, toast?, warn, confirm?}`: `clear` empties
+    /// the box, `confirm` asks first (`/clear`, `/raid`; answered with `compose.confirm`).
+    async fn compose_send(&self, args: &Value) -> Result<Value, String> {
+        let (vk, text) = (str_arg(args, "vk")?, str_arg(args, "text")?);
+        let sks = sks_arg(args);
+        let reply = args.get("reply").filter(|r| r.is_object()).and_then(|r| Some((r.get("sk")?.as_str()?.to_string(), r.get("id")?.as_str()?.to_string())));
+        let (targets, last, pinned) = {
+            let st = self.inner.st.lock().unwrap();
+            let mut targets = Vec::new();
+            for sk in &sks {
+                let src = st.hub.source(sk).ok_or("that chat is not open")?;
+                targets.push(Target { sk: sk.clone(), platform: src.platform, whisper: src.platform == Platform::Twitch && whisper::login_of(&src.channel).is_some() });
+            }
+            let (last, pinned) = if targets.len() == 1 { st.message_ids(vk, &targets[0].sk) } else { (None, None) };
+            (targets, last, pinned)
+        };
+        let toast = |t: String, warn: bool, clear: bool| json!({"clear": clear, "toast": t, "warn": warn});
+        match plan_send(text, &targets, last.as_deref(), pinned.as_deref()) {
+            SendPlan::Nothing => Ok(json!({"clear": false})),
+            SendPlan::Refuse(t) => Ok(toast(t, true, false)),
+            SendPlan::Confirm { target, what, text } => Ok(match what {
+                Confirmed::Clear => json!({"clear": false, "confirm": {"kind": "clear", "sk": target, "text": text}}),
+                Confirmed::Raid { login } => json!({"clear": false, "confirm": {"kind": "raid", "sk": target, "login": login, "text": text}}),
+            }),
+            SendPlan::Slash { target, plan } => {
+                let source = self.source_of(&target)?;
+                match post_json(&self.inner.bridge, &source, plan.path, plan.body, plan.method).await {
+                    Ok(_) => Ok(toast(plan.ok, false, true)),
+                    Err(e) => Ok(toast(e, true, false)),
+                }
+            }
+            SendPlan::Plain { text, targets: sks } => {
+                let multi = sks.len() > 1;
+                let sends = sks.iter().map(|sk| {
+                    let reply_to = reply.as_ref().filter(|(rsk, _)| rsk == sk).map(|(_, id)| id.clone());
+                    let text = &text;
+                    async move {
+                        let platform = self.inner.st.lock().unwrap().hub.source(sk).map(|s| s.platform);
+                        (platform, self.send(sk, text, reply_to.as_deref()).await.err())
+                    }
+                });
+                // every chat at once, each its own request; one failing never loses what reached another
+                let outcomes: Vec<(Platform, Option<String>)> = futures::future::join_all(sends).await.into_iter().filter_map(|(p, e)| p.map(|p| (p, e))).collect();
+                let failures = send_failures(outcomes, multi);
+                Ok(if failures.is_empty() { json!({"clear": true}) } else { toast(failures.join(" - "), true, false) })
+            }
+        }
+    }
+
+    /// `{sk, kind: "clear" | "raid", login?}`: the confirmed command. Answers `{toast, warn}`.
+    async fn compose_confirm(&self, args: &Value) -> Result<Value, String> {
+        let source = self.source_of(str_arg(args, "sk")?)?;
+        let what = match str_arg(args, "kind")? {
+            "clear" => Confirmed::Clear,
+            "raid" => Confirmed::Raid { login: str_arg(args, "login")?.to_string() },
+            _ => return Err("unknown command".into()),
+        };
+        Ok(match confirmed_command(&self.inner.bridge, &source, &what).await {
+            Ok(Some((t, warn))) => json!({"toast": t, "warn": warn, "clear": true}),
+            Ok(None) => json!({"clear": true}),
+            Err(e) => json!({"toast": e, "warn": true, "clear": false}),
+        })
+    }
+
     /// The Mentions screen's list, newest first.
     fn mentions_list(&self) -> Value {
         let st = self.inner.st.lock().unwrap();
@@ -1191,6 +1467,11 @@ impl Session {
                     Ok(Value::Null)
                 }
                 "chat.send" => s.send(str_arg(&args, "sk")?, str_arg(&args, "text")?, args.get("replyTo").and_then(|r| r.as_str())).await,
+                "compose.suggest" => s.compose_suggest(&args),
+                "compose.picker" => s.compose_picker(&args),
+                "compose.gates" => Ok(s.compose_gates(&args)),
+                "compose.send" => s.compose_send(&args).await,
+                "compose.confirm" => s.compose_confirm(&args).await,
                 "chat.reloadEmotes" => {
                     let sk = str_arg(&args, "sk")?.to_string();
                     let cid = {
@@ -1270,6 +1551,18 @@ impl Session {
                         st.restyled(&id);
                     }
                     st.redraw_all();
+                    Ok(Value::Null)
+                }
+                // debuggable builds only: stand in for the relay's Twitch emotes of the account, `{sk, channel: [{id, name, url}], global: [...]}`
+                "dev.emotes" => {
+                    let sk = str_arg(&args, "sk")?.to_string();
+                    let list = |k: &str| -> Vec<TwitchPickerEmote> {
+                        let s = |e: &Value, k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        args.get(k).and_then(|a| a.as_array()).map(|a| a.iter().map(|e| TwitchPickerEmote { id: s(e, "id"), name: s(e, "name"), url: s(e, "url") }).collect()).unwrap_or_default()
+                    };
+                    let mut st = s.inner.st.lock().unwrap();
+                    st.src.entry(sk).or_default().twitch_emotes = TwitchEmotesResp { channel: list("channel"), global: list("global"), other: Vec::new() };
+                    st.inv_gen += 1;
                     Ok(Value::Null)
                 }
                 "open.url" => {

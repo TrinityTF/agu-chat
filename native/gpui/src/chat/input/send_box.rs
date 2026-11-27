@@ -78,18 +78,7 @@ impl SendSource {
     }
 }
 
-/// The Twitch account in a channel as far as the app can tell: the broadcaster and mods (mod rights), VIPs and
-/// staff (the badges on its own latest line there) are exempt; those badges also show a subscription. Twitch says
-/// nothing about follows here, so followers-only never locks the box (Twitch refuses the message if it applies).
-pub fn twitch_viewer(broadcaster: bool, is_mod: bool, own_badges: Option<&str>) -> agu_chat_core::chat_rules::ChatViewer {
-    let names = own_badges.map(crate::chat::mod_caps::badge_names).unwrap_or_default();
-    let has = |b: &str| names.contains(b);
-    agu_chat_core::chat_rules::ChatViewer {
-        exempt: broadcaster || is_mod || ["broadcaster", "moderator", "vip", "staff", "admin", "global_mod"].iter().any(|b| has(b)),
-        subscribed: (has("subscriber") || has("founder")).then_some(true),
-        ..Default::default()
-    }
-}
+pub use agu_chat_model::input::gate::twitch_viewer;
 
 /// The notices above the box: the target's gate, or each target's (named by platform) when sending to several.
 pub fn gate_notices(targets: &[&SendSource]) -> Vec<ChatGate> {

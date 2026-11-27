@@ -28,11 +28,13 @@ fun sendOptions(tab: Tab, conns: Map<String, Conn>): List<SendOption> = tab.chan
 }
 
 /**
- * Where the message goes: a reply goes to the chat it answers (its id only means something there), else the chosen
- * chat or all of them while more than one can be written in, else the first chat that can. "" when none can.
+ * Where the message goes, as the desktop's box works it out: a reply goes to the chat it answers (its id only means
+ * something there), else "all" while more than one chat can take a broadcast ([broadcast]: the chats you can write in
+ * that no chat mode locks you out of), else the chosen chat, else the first chat you can write in (one that is not
+ * locked first). "" when none can.
  */
-fun chosenTarget(wanted: String?, sendable: List<String>, replySk: String?): String {
+fun chosenTarget(wanted: String?, sendable: List<String>, replySk: String?, broadcast: List<String> = sendable): String {
     if (replySk != null && replySk in sendable) return replySk
-    if (wanted == ALL && sendable.size > 1) return ALL
-    return sendable.firstOrNull { it == wanted } ?: sendable.firstOrNull().orEmpty()
+    if (wanted == ALL && broadcast.size > 1) return ALL
+    return sendable.firstOrNull { it == wanted } ?: broadcast.firstOrNull() ?: sendable.firstOrNull().orEmpty()
 }

@@ -1380,27 +1380,7 @@ impl ChatPane {
 
     /// Display names newest-first for the given source keys (read lazily: only when "@" or Tab is used).
     pub(super) fn chatters(&self, sks: &[String]) -> Vec<String> {
-        let mut out = Vec::new();
-        for r in self.store.rows().iter().rev() {
-            if !sks.contains(&r.sk) {
-                continue;
-            }
-            let n = match &r.body {
-                RowBody::Msg(m) => &m.user.name,
-                RowBody::Rumble(m) => &m.user.name,
-                RowBody::Kick(m) => &m.user.name,
-                RowBody::YouTube(m) => &m.user.name,
-                RowBody::X(m) => &m.user.name,
-                _ => continue,
-            };
-            if !n.is_empty() {
-                out.push(n.clone());
-            }
-            if out.len() >= 1000 {
-                break;
-            }
-        }
-        out
+        agu_chat_model::input::autocomplete::chatters(self.store.rows(), sks)
     }
 
     /// (newest message id, pinned message id) of a source.

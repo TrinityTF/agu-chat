@@ -336,18 +336,79 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { runCatching { Core.call("app.active", buildJsonObject { put("active", active) }) } }
     }
 
-    // ---- sending -------------------------------------------------------------------------------
+    // ---- the message box -----------------------------------------------------------------------
 
-    /** Sends a message to one chat; returns the error text to show, or null when it went out. */
-    suspend fun send(sk: String, text: String, replyTo: String?): String? = try {
-        Core.call("chat.send", buildJsonObject {
-            put("sk", sk)
-            put("text", text)
-            if (replyTo != null) put("replyTo", replyTo)
-        })
-        null
+    /** What you sent per tab, for the history picker (kept while the app runs, like the desktop's). */
+    private val histories = HashMap<String, SentHistory>()
+
+    fun historyOf(tabId: String): SentHistory = histories.getOrPut(tabId) { SentHistory() }
+
+    /** Debuggable builds only (the dev frames file): put a line in a tab's sent history without sending it. */
+    fun devSent(channel: String, text: String) {
+        val t = tabs.firstOrNull { t -> t.channels.size == 1 && t.channels[0].platform == "twitch" && t.channels[0].channel == channel }
+        t?.let { historyOf(it.id).add(text) }
+    }
+
+    /** The text in each tab's box (a draft stays when you switch tabs), and where each tab's message goes ("*" = all chats, or a source key). */
+    val drafts = HashMap<String, String>()
+    val targets = HashMap<String, String>()
+
+    private fun sksJson(sks: List<String>) = JsonArray(sks.map { JsonPrimitive(it) })
+
+    /** The strip's suggestions for [text] with the caret at [caret] (UTF-16), or null. Asks the core on its own thread. */
+    suspend fun suggest(vk: String, sks: List<String>, text: String, caret: Int): Suggestions? = withContext(Dispatchers.Default) {
+        runCatching {
+            val r = Core.call("compose.suggest", buildJsonObject { put("vk", vk); put("sks", sksJson(sks)); put("text", text); put("caret", caret) })
+            if (r is JsonNull) null else Core.json.decodeFromJsonElement(Suggestions.serializer(), r)
+        }.getOrNull()
+    }
+
+    /** The emote picker's tabs and the sections of [tab] ("" = every tab); with [q] only the emotes whose name has it. */
+    suspend fun picker(sks: List<String>, tab: String, q: String): PickerData = withContext(Dispatchers.Default) {
+        runCatching {
+            Core.json.decodeFromJsonElement(PickerData.serializer(), Core.call("compose.picker", buildJsonObject { put("sks", sksJson(sks)); put("tab", tab); put("q", q) }))
+        }.getOrElse { PickerData() }
+    }
+
+    /** How the chats' modes apply to your account (slow mode, subscribers-only, ...), by source key. */
+    suspend fun gates(vk: String, sks: List<String>): Map<String, Gate> = withContext(Dispatchers.Default) {
+        runCatching {
+            (Core.call("compose.gates", buildJsonObject { put("vk", vk); put("sks", sksJson(sks)) }) as JsonObject)
+                .mapValues { Core.json.decodeFromJsonElement(Gate.serializer(), it.value) }
+        }.getOrElse { emptyMap() }
+    }
+
+    private fun parseSend(r: JsonElement): SendResult {
+        val o = r as? JsonObject ?: return SendResult(false)
+        fun s(k: String) = o[k]?.jsonPrimitive?.contentOrNull
+        val c = o["confirm"] as? JsonObject
+        return SendResult(
+            clear = s("clear") == "true", toast = s("toast"), warn = s("warn") == "true",
+            confirm = c?.let { Confirm(it["kind"]?.jsonPrimitive?.contentOrNull.orEmpty(), it["sk"]?.jsonPrimitive?.contentOrNull.orEmpty(), it["login"]?.jsonPrimitive?.contentOrNull, it["text"]?.jsonPrimitive?.contentOrNull.orEmpty()) },
+        )
+    }
+
+    /**
+     * Send what the box holds to [sks], as a reply when [reply] (source key, message id) is set. The core does what the
+     * desktop's box does: a slash command runs on a single Twitch chat, `/clear` and `/raid` ask first, anything else
+     * is the message (cut at 500 characters) to every chat.
+     */
+    suspend fun composeSend(vk: String, sks: List<String>, text: String, reply: Pair<String, String>?): SendResult = try {
+        parseSend(Core.call("compose.send", buildJsonObject {
+            put("vk", vk); put("sks", sksJson(sks)); put("text", text)
+            if (reply != null) put("reply", buildJsonObject { put("sk", reply.first); put("id", reply.second) })
+        }))
     } catch (e: CoreError) {
-        e.message ?: "Could not send"
+        SendResult(false, e.message ?: "Could not send", warn = true)
+    }
+
+    /** The confirmed `/clear` or `/raid`. */
+    suspend fun composeConfirm(c: Confirm): SendResult = try {
+        parseSend(Core.call("compose.confirm", buildJsonObject {
+            put("sk", c.sk); put("kind", c.kind); c.login?.let { put("login", it) }
+        }))
+    } catch (e: CoreError) {
+        SendResult(false, e.message ?: "Could not run it", warn = true)
     }
 
     // ---- accounts ------------------------------------------------------------------------------

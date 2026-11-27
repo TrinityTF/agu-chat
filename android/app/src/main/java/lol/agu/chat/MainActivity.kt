@@ -48,6 +48,8 @@ class MainActivity : ComponentActivity() {
                 val o = it.jsonObject
                 o["wait"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()?.let { delay(it) }
                 val call = o["call"]?.jsonPrimitive?.contentOrNull
+                // `{sent, channel}`: pretend this was sent in the single-channel tab of that channel (the history picker)
+                o["sent"]?.jsonPrimitive?.contentOrNull?.let { text -> vm.devSent(o["channel"]?.jsonPrimitive?.contentOrNull.orEmpty(), text); continue }
                 if (call == null && o["sk"] == null) continue
                 runCatching { if (call != null) Core.call(call, o["args"]?.jsonObject ?: JsonObject(emptyMap())) else Core.call("dev.frame", o) }
                     .onFailure { e -> android.util.Log.w("devFrames", "${call ?: "frame"}: ${e.message}") }
