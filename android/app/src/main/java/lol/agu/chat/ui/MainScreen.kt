@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -31,7 +33,13 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -112,7 +120,6 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
     var searching by rememberSaveable { mutableStateOf(false) }
     val queries = remember { HashMap<String, String>() }
     var query by remember { mutableStateOf("") }
-    var split by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val ctx = LocalContext.current
@@ -124,6 +131,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
 
     var adding by remember { mutableStateOf<AddTo?>(null) }
     var tabMenu by remember { mutableStateOf<Tab?>(null) }
+    val wideCfg = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 840
     var renaming by remember { mutableStateOf<Tab?>(null) }
     var changing by remember { mutableStateOf<Tab?>(null) }
     var closingOthers by remember { mutableStateOf<Tab?>(null) }
@@ -135,6 +143,15 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
     var mention by remember { mutableStateOf<String?>(null) }
 
     val current = tabs.getOrNull(pager.currentPage)
+    // the tab in the right pane of a wide screen; choosing that tab on the left swaps the two
+    val splitTab = tabs.firstOrNull { it.id == vm.splitId }
+    var prevLeft by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(current?.id) {
+        val cid = current?.id
+        val prev = prevLeft
+        if (cid != null && vm.splitId == cid && prev != null && prev != cid && tabs.any { it.id == prev }) vm.setSplit(prev)
+        prevLeft = cid
+    }
 
     // Jump to a tab you just added (a tab a whisper opens stays in the background, and so do restored ones).
     val focus = vm.focusTab
@@ -176,7 +193,14 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
                 searching = !searching
                 if (!searching) { current?.let { t -> queries[t.id] = ""; vm.search(t.id, "") }; query = "" }
             },
-            showSplit = tabs.size > 1 && wide, split = split, onSplit = { split = !split },
+            showSplit = tabs.size > 1 && wide, split = splitTab != null,
+            onSplit = {
+                if (splitTab != null) vm.setSplit(null)
+                else {
+                    val at = tabs.indexOfFirst { it.id == current?.id }
+                    tabs.getOrNull(if (at + 1 < tabs.size) at + 1 else at - 1)?.let { vm.setSplit(it.id) }
+                }
+            },
             showMod = current != null && vm.canMod(current), modOn = current != null && vm.modMode[current.id] == true,
             onMod = { current?.let { t -> vm.setModMode(t, vm.modMode[t.id] != true) } },
             showModes = current != null && vm.modesChannels(current).isNotEmpty(),
@@ -191,6 +215,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
             tabs = tabs, selected = pager.currentPage, vm = vm,
             onSelect = { i -> scope.launch { pager.animateScrollToPage(i) } },
             onMenu = { tabMenu = it },
+            onReorder = { id, to -> vm.reorderTab(id, to) }, onReordered = { vm.saveOrder() },
             onAdd = { adding = AddTo(null) },
         )
         if (tabs.isEmpty()) {
@@ -212,22 +237,34 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
                 }
             }
         } else {
-            val two = wide && split && tabs.size > 1
-            HorizontalPager(
-                pager, Modifier.weight(1f), key = { tabs.getOrNull(it)?.id ?: it },
-                pageSize = if (two) PageSize.Fixed(width / 2) else PageSize.Fill,
-            ) { page ->
-                val tab = tabs.getOrNull(page)
-                if (tab != null) Box(Modifier.fillMaxSize().let { if (two && page > pager.currentPage) it.drawBehind { drawRect(AguColors.Surface2, size = Size(1.dp.toPx(), size.height)) } else it }) {
-                    Column(Modifier.fillMaxSize()) {
-                        ChannelHeader(vm, tab)
-                        Box(Modifier.weight(1f).fillMaxWidth()) {
-                            ChatList(
-                                vm, tab, jump?.takeIf { it.vk == tab.id }, onLongPress = { menuRow = it },
-                                searching = searching && tab.id == current?.id && query.isNotBlank(),
-                                onReplyNotice = { r -> r.user?.let { u -> (u.name ?: u.login)?.let { n -> mention = n } } },
-                            )
+            val two = wide && splitTab != null && splitTab.id != current?.id
+            val pane: @Composable (Tab) -> Unit = { tab ->
+                Column(Modifier.fillMaxSize()) {
+                    ChannelHeader(vm, tab)
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        ChatList(
+                            vm, tab, jump?.takeIf { it.vk == tab.id }, onLongPress = { menuRow = it },
+                            searching = searching && tab.id == current?.id && query.isNotBlank(),
+                            onReplyNotice = { r -> r.user?.let { u -> (u.name ?: u.login)?.let { n -> mention = n } } },
+                        )
+                    }
+                }
+            }
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                HorizontalPager(pager, Modifier.weight(1f).fillMaxHeight(), key = { tabs.getOrNull(it)?.id ?: it }) { page ->
+                    val tab = tabs.getOrNull(page)
+                    if (tab != null) Box(Modifier.fillMaxSize()) { pane(tab) }
+                }
+                if (two && splitTab != null) {
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(AguColors.Surface2))
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                        Row(Modifier.fillMaxWidth().height(32.dp).padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(splitTab.title(full = true), color = AguColors.Muted, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            Box(Modifier.size(32.dp).clip(CircleShape).clickable { vm.setSplit(null) }, contentAlignment = Alignment.Center) {
+                                Text("×", color = AguColors.Text, fontSize = 20.sp)
+                            }
                         }
+                        key(splitTab.id) { Box(Modifier.weight(1f).fillMaxWidth()) { pane(splitTab) } }
                     }
                 }
             }
@@ -265,6 +302,12 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
                 val at = tabs.indexOfFirst { it.id == tab.id }
                 if (at > 0) SheetItem("Move left") { vm.moveTab(tab, -1); tabMenu = null }
                 if (at in 0 until tabs.lastIndex) SheetItem("Move right") { vm.moveTab(tab, 1); tabMenu = null }
+                if (wideCfg && tabs.size > 1 && vm.splitId != tab.id) SheetItem("Open in split") {
+                    vm.setSplit(tab.id)
+                    if (tab.id == current?.id) { val at = tabs.indexOfFirst { it.id == tab.id }; val to = if (at + 1 < tabs.size) at + 1 else at - 1; if (to >= 0) scope.launch { pager.animateScrollToPage(to) } }
+                    tabMenu = null
+                }
+                if (wideCfg && vm.splitId == tab.id) SheetItem("Close split") { vm.setSplit(null); tabMenu = null }
                 if (tabs.size > 1) SheetItem("Close other tabs", color = AguColors.Danger) { closingOthers = tab; tabMenu = null }
                 SheetItem("Close tab", color = AguColors.Danger) { vm.closeTab(tab); tabMenu = null }
             }
@@ -479,14 +522,61 @@ private fun tabDot(selected: Boolean, unread: Dot?, live: Boolean): Dot? = when 
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun TabStrip(tabs: List<Tab>, selected: Int, vm: ChatViewModel, onSelect: (Int) -> Unit, onMenu: (Tab) -> Unit, onAdd: () -> Unit) {
+private fun TabStrip(
+    tabs: List<Tab>, selected: Int, vm: ChatViewModel, onSelect: (Int) -> Unit, onMenu: (Tab) -> Unit, onAdd: () -> Unit,
+    onReorder: (String, Int) -> Unit = { _, _ -> }, onReordered: () -> Unit = {},
+) {
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    // where each tab sits in the strip (left edge, width), for the drag; the dragged tab follows the finger
+    val spans = remember { HashMap<String, Pair<Float, Float>>() }
+    var dragId by remember { mutableStateOf<String?>(null) }
+    var dragTo by remember { mutableStateOf(0f) }
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp)) {
         tabs.forEachIndexed { i, tab ->
             val sel = i == selected
             val live = tab.sks.any { vm.conns[it]?.live == true }
             val dot = tabDot(sel, vm.unread[tab.id], live)
+            val dragging = dragId == tab.id
             Column(
-                Modifier.combinedClickable(onClick = { onSelect(i) }, onLongClick = { onMenu(tab) }).padding(horizontal = 6.dp),
+                Modifier
+                    .onPlaced { spans[tab.id] = it.positionInParent().x to it.size.width.toFloat() }
+                    .zIndex(if (dragging) 1f else 0f)
+                    .graphicsLayer {
+                        if (dragging) {
+                            translationX = dragTo - (spans[tab.id]?.first ?: 0f)
+                            alpha = 0.85f
+                        }
+                    }
+                    .clickable { onSelect(tabs.indexOfFirst { t -> t.id == tab.id }) }
+                    // a long press that moves drags the tab to a new place; one that stays still opens the tab's menu
+                    .pointerInput(tab.id) {
+                        var grab = 0f
+                        var moved = 0f
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { at ->
+                                grab = at.x
+                                moved = 0f
+                                dragId = tab.id
+                                dragTo = spans[tab.id]?.first ?: 0f
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                moved += kotlin.math.abs(amount.x)
+                                dragTo += amount.x
+                                val centre = dragTo + (spans[tab.id]?.second ?: 0f) / 2
+                                val over = tabs.indexOfFirst { t -> spans[t.id]?.let { (l, w) -> centre >= l && centre < l + w } == true }
+                                if (over >= 0 && tabs[over].id != tab.id) onReorder(tab.id, over)
+                            },
+                            onDragEnd = {
+                                val still = moved < 12f
+                                dragId = null
+                                if (still) onMenu(tab) else onReordered()
+                            },
+                            onDragCancel = { dragId = null; onReordered() },
+                        )
+                    }
+                    .padding(horizontal = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Row(

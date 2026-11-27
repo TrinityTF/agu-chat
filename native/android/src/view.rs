@@ -463,13 +463,15 @@ fn notice_line(n: &Notice) -> ChatMsg {
 fn seventv_notice(n: &Notice, put: &mut dyn FnMut(&str, Value)) {
     let s = n.seventv.as_ref().unwrap();
     let url = if s.emote_id.is_empty() { String::new() } else { provider_emote_url_at(&seven_tv_emote(&json!({"id": s.emote_id, "name": s.name})), DENSITY) };
+    // the picture the emote popup shows: the big one, like the desktop
+    let tip = if s.emote_id.is_empty() { String::new() } else { provider_tooltip_url(&seven_tv_emote(&json!({"id": s.emote_id, "name": s.name}))) };
     let verb = match s.action.as_str() {
         "added" => "added the 7TV emote",
         "removed" => "removed the 7TV emote",
         "renamed" => "renamed the 7TV emote",
         _ => "switched the channel's 7TV emote set to",
     };
-    put("notice", json!({"seventv": {"actor": s.actor, "verb": verb, "url": url, "name": s.name, "oldName": s.old_name, "action": s.action}}));
+    put("notice", json!({"seventv": {"actor": s.actor, "verb": verb, "url": url, "tip": tip, "name": s.name, "oldName": s.old_name, "action": s.action}}));
 }
 
 fn notice_fields(o: &mut serde_json::Map<String, Value>, n: &Notice, env: &Env, look: &EmoteLookup, style: Option<&ChatterStyle>) {
@@ -1202,6 +1204,7 @@ mod tests {
         assert_eq!(v["notice"]["seventv"]["verb"], "added the 7TV emote");
         assert_eq!(v["notice"]["seventv"]["name"], "PotatWind");
         assert!(v["notice"]["seventv"]["url"].as_str().unwrap().contains("E1"));
+        assert!(v["notice"]["seventv"]["tip"].as_str().unwrap().contains("E1"));
     }
 
     fn kick_frame(extra: Value) -> Value {

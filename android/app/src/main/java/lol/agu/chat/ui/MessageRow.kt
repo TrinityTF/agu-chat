@@ -374,7 +374,7 @@ private fun Modifier.tipOnLongPress(tip: Tip?, onTip: (Tip) -> Unit): Modifier =
 
 /** The popup of an emote, a badge or an emoji: the picture, its name and where it is from. */
 @Composable
-private fun TipDialog(tip: Tip, d: Display, onDismiss: () -> Unit) {
+internal fun TipDialog(tip: Tip, d: Display, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = AguColors.Surface,
@@ -465,8 +465,8 @@ private fun RowContent(row: Row, d: Display, frame: Modifier, showMark: Boolean,
         }
         row.kind == "automod" -> AutomodRow(row, d, frame, onTip)
         row.notice?.seventv != null -> SevenNoticeRow(row, d, frame, onTip)
-        row.kind == "notice" -> NoticeRow(row, d, frame, showMark, onTip, onReplyNotice)
         row.event != null -> EventRow(row, d, frame, showMark, onTip)
+        row.kind == "notice" -> NoticeRow(row, d, frame, showMark, onTip, onReplyNotice)
         else -> LineRow(row, d, frame, showMark, onTip)
     }
 }
@@ -575,7 +575,7 @@ private fun SevenNoticeRow(row: Row, d: Display, frame: Modifier, onTip: (Tip) -
     val time = if (d.timestamps) formatTime(row.ts, d.timestampSeconds, is24Hour(ctx)) else null
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
-    val inline = remember(n, d) { if (n.url.isNotEmpty()) mapOf("e" to Inl.Img(n.url, emptyList(), d.emoteDp, Tip(n.name, "7TV", n.url))) else emptyMap() }
+    val inline = remember(n, d) { if (n.url.isNotEmpty()) mapOf("e" to Inl.Img(n.url, emptyList(), d.emoteDp, Tip(n.name, "7TV", n.tip.ifEmpty { n.url }))) else emptyMap() }
     val text = remember(n, d, time) {
         buildAnnotatedString {
             if (time != null) withStyle(SpanStyle(color = Faint, fontSize = (d.bodySp * 0.85f).sp)) { append(time); append(" ") }
@@ -636,9 +636,10 @@ private fun NoticeRow(row: Row, d: Display, frame: Modifier, showMark: Boolean, 
                     )
                 }
                 // a Kick raid's note
-                if (raid && row.parts.isNotEmpty() && row.user == null) Text(row.plainText(), color = AguColors.Muted, fontSize = d.bodySp.sp)
+                if (raid && row.parts.isNotEmpty()) Text(row.plainText(), color = AguColors.Muted, fontSize = d.bodySp.sp)
                 // the attached message is the sender's own chat line (a Super Chat's or a note's text too)
-                if (row.parts.isNotEmpty() && row.user != null) {
+                if (n?.superChat == true && row.parts.isNotEmpty()) Text(row.plainText(), color = AguColors.Muted, fontSize = d.bodySp.sp)
+                else if (!raid && row.parts.isNotEmpty() && row.user != null) {
                     LineText(noticeLine(row), d, showMark, onTip, Modifier.padding(top = 2.dp))
                 }
                 if (n?.reply == true && onReply != null) {

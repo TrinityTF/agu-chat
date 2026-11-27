@@ -2,6 +2,8 @@ package lol.agu.chat.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -123,6 +125,9 @@ private fun Heading(text: String) {
 
 @Composable
 private fun Details(t: HypeTrain) {
+    // a long press on an unlockable emote opens its popup, like the desktop's hover tip
+    var tip by remember { androidx.compose.runtime.mutableStateOf<Tip?>(null) }
+    tip?.let { TipDialog(it, LocalDisplay.current) { tip = null } }
     Column(Modifier.fillMaxWidth()) {
         // what is left of the level
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(Color.White.copy(alpha = 0.06f)).padding(horizontal = 10.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -136,7 +141,7 @@ private fun Details(t: HypeTrain) {
         if (t.emotes.isNotEmpty()) {
             Heading("Unlockable Emotes")
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(Color.White.copy(alpha = 0.04f)).padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (e in t.emotes.take(8)) AsyncImage(model = e.url, contentDescription = e.token, contentScale = ContentScale.Fit, modifier = Modifier.size(32.dp))
+                for (e in t.emotes.take(8)) AsyncImage(model = e.url, contentDescription = e.token, contentScale = ContentScale.Fit, modifier = Modifier.size(32.dp).pointerInput(e.url) { detectTapGestures(onLongPress = { tip = Tip(e.token, "Hype Train emote", e.url) }) })
             }
         }
         if (t.info.isNotEmpty()) {

@@ -749,6 +749,10 @@ pub fn migrate_tabs(v: Value) -> Value {
                         if t.get("modMode").and_then(|m| m.as_bool()).unwrap_or(false) {
                             tab["modMode"] = json!(true);
                         }
+                        // the tab shown in the right pane of a wide screen
+                        if t.get("split").and_then(|m| m.as_bool()).unwrap_or(false) {
+                            tab["split"] = json!(true);
+                        }
                         tab
                     })
                 } else if t.get("platform").is_some() && t.get("channel").is_some() {
@@ -2165,6 +2169,9 @@ mod tests {
         let new = json!([{"name": "Me", "channels": [{"platform": "twitch", "channel": "a"}, {"platform": "kick", "channel": "a"}]}, {"x": 1}, {"name": "empty", "channels": []}]);
         assert_eq!(migrate_tabs(new.clone()), json!([new[0].clone()]));
         assert_eq!(migrate_tabs(json!("nope")), json!([]));
+        // the tab in the right pane of a wide screen and the order both survive
+        let two = json!([{"name": "A", "channels": [{"platform": "twitch", "channel": "a"}]}, {"name": "B", "channels": [{"platform": "kick", "channel": "b"}], "split": true}]);
+        assert_eq!(migrate_tabs(two.clone()), two);
     }
 
     #[test]

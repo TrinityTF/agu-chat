@@ -88,7 +88,7 @@ data class EventHead(
 /** The app's own line about a live 7TV emote change. */
 @Serializable
 @Immutable
-data class SevenNote(val actor: String? = null, val verb: String = "", val url: String = "", val name: String = "", val oldName: String = "", val action: String = "")
+data class SevenNote(val actor: String? = null, val verb: String = "", val url: String = "", val tip: String = "", val name: String = "", val oldName: String = "", val action: String = "")
 
 /** A system line: a sub, a gift, a raid, an announcement, a Super Chat, a membership. */
 @Serializable
@@ -258,7 +258,7 @@ data class ChannelRef(val platform: String, val channel: String)
 
 @Serializable
 @Immutable
-data class SavedTab(val name: String = "", val channels: List<ChannelRef> = emptyList(), val modMode: Boolean = false)
+data class SavedTab(val name: String = "", val channels: List<ChannelRef> = emptyList(), val modMode: Boolean = false, val split: Boolean = false)
 
 /** The core's source key of a channel (Twitch and Kick names are kept lowercase). */
 fun ChannelRef.sk(): String = "$platform:${if (platform == "twitch" || platform == "kick") channel.lowercase() else channel}"

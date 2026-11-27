@@ -50,6 +50,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val pinsOpen = mutableStateMapOf<String, Boolean>()
     /** The tab to bring forward (one you just added); the screen scrolls to it and calls [focusDone]. A tab a whisper opens never gets it. */
     var focusTab by mutableStateOf<String?>(null)
+
+    /** The tab shown in the right pane of a wide screen (null: one pane). Kept with the tabs. */
+    var splitId by mutableStateOf<String?>(null)
         private set
     /** Keep the chats connected while the app is in the background (a foreground service with a notification). */
     var stayConnected by mutableStateOf(Prefs.stayConnected(app))
@@ -299,7 +302,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // Show the tabs immediately, then open each one (a channel that fails shows its error as its status).
         val keep = saved.filter { it.channels.isNotEmpty() }
         val restored = keep.map { Tab(newId(), it.name, it.channels) }
-        restored.forEachIndexed { i, t -> if (keep[i].modMode) modMode[t.id] = true }
+        restored.forEachIndexed { i, t -> if (keep[i].modMode) modMode[t.id] = true; if (keep[i].split) splitId = t.id }
         tabs.addAll(restored)
         for (t in restored) viewModelScope.launch { openView(t, lenient = true) }
     }
@@ -419,6 +422,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { saveTabs() }
     }
 
+    /** Drag-reorder: puts a tab at [to] without moving the pager (the order is saved by [saveOrder] when the drag ends). */
+    fun reorderTab(id: String, to: Int) {
+        val i = tabs.indexOfFirst { it.id == id }
+        if (i < 0 || to !in tabs.indices || to == i) return
+        tabs.add(to, tabs.removeAt(i))
+    }
+
+    fun saveOrder() { viewModelScope.launch { saveTabs() } }
+
+    /** Puts a tab in the right pane of a wide screen, or (null) goes back to one pane. Kept with the tabs. */
+    fun setSplit(id: String?) {
+        splitId = id
+        viewModelScope.launch { saveTabs() }
+    }
+
     fun renameTab(tab: Tab, name: String) {
         val i = tabs.indexOfFirst { it.id == tab.id }
         if (i < 0) return
@@ -440,7 +458,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun saveTabs() {
-        val arr = JsonArray(tabs.map { t -> buildJsonObject { put("name", t.name); put("channels", channelsJson(t.channels)); if (modMode[t.id] == true) put("modMode", true) } })
+        val arr = JsonArray(tabs.map { t -> buildJsonObject { put("name", t.name); put("channels", channelsJson(t.channels)); if (modMode[t.id] == true) put("modMode", true); if (splitId == t.id) put("split", true) } })
         runCatching { Core.call("tabs.set", buildJsonObject { put("tabs", arr) }) }
     }
 

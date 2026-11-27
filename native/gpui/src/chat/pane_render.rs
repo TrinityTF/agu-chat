@@ -312,7 +312,7 @@ impl ChatPane {
                     }
                 }));
             }
-            if let Some(r) = h.reply.clone().filter(|_| !self.menu_commands().is_empty()) {
+            if let Some(r) = h.reply.clone().or_else(|| h.menu.clone()).filter(|_| !self.menu_commands().is_empty()) {
                 bar = bar.child(self.toolbar_button_at(format!("cmds-{key}"), icons::DOTS_H, "Commands", false, cx, move |p, pos, cx| {
                     p.cmd_pick = Some(super::cmd_menu::CmdPick { target: r.clone(), pos });
                     cx.notify();

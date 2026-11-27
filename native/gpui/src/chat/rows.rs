@@ -208,6 +208,8 @@ pub struct Hover {
     pub delete: Option<RowAction>,
     /// Rumble: pin this line right away (Twitch's `pin` opens the "Pin for" menu instead)
     pub pin_now: Option<RowAction>,
+    /// the message the "Commands" menu runs on when the row has no Reply button (Rumble, YouTube, X)
+    pub menu: Option<ReplyTarget>,
 }
 
 #[derive(Clone)]
@@ -922,6 +924,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
         pin: caps.pin.then(|| (sk.clone(), msg.id.clone())),
         delete: can_delete.then(|| RowAction::Delete { sk: sk.clone(), id: msg.id.clone() }),
         pin_now: None,
+        menu: None,
     };
 
     // wrapped in the redeem / cheer frame when it is one
@@ -1291,7 +1294,7 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     } else {
         co_frame_style(&mut spec, rule);
     }
-    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_delete.then(|| RowAction::RumbleMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: 300 }), pin_now: (can_delete && m.notice.is_none()).then(|| RowAction::RumbleMod { sk: sk.clone(), action: "pin", msg: Box::new(m.clone()), seconds: 300 }), ..Default::default() };
+    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_delete.then(|| RowAction::RumbleMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: 300 }), pin_now: (can_delete && m.notice.is_none()).then(|| RowAction::RumbleMod { sk: sk.clone(), action: "pin", msg: Box::new(m.clone()), seconds: 300 }), menu: (m.notice.is_none() && !m.deleted).then(|| ReplyTarget { sk: sk.clone(), platform: Platform::Rumble, id: m.id.clone(), user: if m.user.login.is_empty() { m.user.name.clone() } else { m.user.login.clone() }, text: m.text.clone() }), ..Default::default() };
     with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
 }
@@ -1506,6 +1509,7 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
         delete: can_delete.then(|| RowAction::KickMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: None }),
         pin: None,
         pin_now: None,
+        menu: None,
     };
     with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
@@ -1584,7 +1588,7 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
     } else {
         co_frame_style(&mut spec, rule);
     }
-    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_delete.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), ..Default::default() };
+    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_delete.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), menu: m.notice.is_none().then(|| ReplyTarget { sk: sk.clone(), platform: Platform::Youtube, id: m.id.clone(), user: m.user.name.clone(), text: m.text.clone() }), ..Default::default() };
     with_link(&mut spec, ctx, false);
     BuiltRow::Frame(spec)
 }
@@ -1687,7 +1691,7 @@ pub fn x_row(row: &Row, m: &XMsg, ctx: &RowCtx, rule: Option<&HighlightRule>) ->
     text_run_items(&mut f, &m.text, token(theme::TEXT));
     let mut spec = frame(f.finish(), vec![RowAction::Card { sk: row.sk.clone(), user: CardUser { id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), avatar: m.user.avatar.clone() } }], ctx, row.ord);
     co_frame_style(&mut spec, rule);
-    spec.hover = Hover { copy: Some(m.text.clone()), ..Default::default() };
+    spec.hover = Hover { copy: Some(m.text.clone()), menu: Some(ReplyTarget { sk: row.sk.clone(), platform: Platform::X, id: m.id.clone(), user: if m.user.login.is_empty() { m.user.name.clone() } else { m.user.login.clone() }, text: m.text.clone() }), ..Default::default() };
     with_link(&mut spec, ctx, false);
     BuiltRow::Frame(spec)
 }
