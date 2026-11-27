@@ -110,7 +110,7 @@ private sealed interface Inl {
     class Mark(val platform: String) : Inl
     class Chip(val glyph: String, val color: Color, val tip: Tip?) : Inl
     class Emoji(val text: String, val overlays: List<String>, val tip: Tip?) : Inl
-    class PaintName(val name: String, val paint: Paint, val base: Color) : Inl
+    class PaintName(val name: String, val paint: Paint, val base: Color, val onClick: (() -> Unit)? = null) : Inl
     class Gif(val url: String) : Inl
 }
 
@@ -172,7 +172,7 @@ private fun AnnotatedString.Builder.badges(b: Bld, list: List<Badge>, d: Display
 }
 
 /** A chat line: time, platform mark, badges, name, then the message. [full] false leaves the name off (a note). */
-private fun build(row: Row, d: Display, showMark: Boolean, time: String?): Built {
+private fun build(row: Row, d: Display, showMark: Boolean, time: String?, onUser: (() -> Unit)? = null): Built {
     val b = Bld(d)
     val nameColor = parseColor(row.user?.color) ?: AguColors.Text
     val name = row.user?.name?.takeIf { it.isNotEmpty() } ?: row.user?.login
@@ -187,7 +187,8 @@ private fun build(row: Row, d: Display, showMark: Boolean, time: String?): Built
         badges(b, row.badges, d)
         if (name != null) {
             val paint = row.user?.paint
-            if (paint != null && !row.action) appendInlineContent(b.add("n", Inl.PaintName(name, paint, nameColor)), name)
+            if (paint != null && !row.action) appendInlineContent(b.add("n", Inl.PaintName(name, paint, nameColor, onUser)), name)
+            else if (onUser != null) withLink(LinkAnnotation.Clickable("user", TextLinkStyles(SpanStyle(textDecoration = TextDecoration.None)), linkInteractionListener = { onUser() })) { withStyle(SpanStyle(color = nameColor, fontWeight = FontWeight.Bold)) { append(name) } }
             else withStyle(SpanStyle(color = nameColor, fontWeight = FontWeight.Bold)) { append(name) }
             row.user?.alias?.let { withStyle(SpanStyle(color = Faint, fontSize = 10.sp)) { append(" $it") } }
             if (!row.action && row.parts.isNotEmpty()) withStyle(SpanStyle(color = AguColors.Muted)) { append(": ") } else append(" ")
@@ -308,6 +309,7 @@ private fun inlineContent(spec: Map<String, Inl>, density: Density, d: Display, 
                     val plain = parseColor(s.paint.color) ?: s.base
                     androidx.compose.foundation.text.BasicText(
                         s.name, maxLines = 1, softWrap = false,
+                        modifier = if (s.onClick != null) Modifier.clickable(onClick = s.onClick) else Modifier,
                         style = if (brush != null) style.copy(brush = brush, shadow = shadow) else style.copy(color = plain, shadow = shadow),
                     )
                 }
@@ -376,6 +378,19 @@ fun MessageRow(
         .let { if (alt) it.background(Color.White.copy(alpha = 0.03f)) else it }
         .let { if (flash) it.background(AmberBar.copy(alpha = 0.30f)) else it }
     val onTip: (Tip) -> Unit = { tip = it }
+    // mod mode: the mod buttons stand at the start of the line
+    val mod = LocalMod.current
+    val modTab = LocalModTab.current
+    val strip = mod != null && modTab != null && LocalModMode.current && row.mod != null && row.kind != "modfeed"
+    if (strip) LayoutRow(Modifier.fillMaxWidth()) {
+        ModStrip(row, modTab!!.id, mod!!)
+        RowContent(row, d, frame, showMark, onTip, onReplyNotice)
+    } else RowContent(row, d, frame, showMark, onTip, onReplyNotice)
+    tip?.let { TipDialog(it, d) { tip = null } }
+}
+
+@Composable
+private fun RowContent(row: Row, d: Display, frame: Modifier, showMark: Boolean, onTip: (Tip) -> Unit, onReplyNotice: ((Row) -> Unit)?) {
     when {
         row.kind == "modfeed" -> {
             val time = if (d.timestamps) formatTime(row.ts, d.timestampSeconds, is24Hour(LocalContext.current)) else null
@@ -390,7 +405,6 @@ fun MessageRow(
         row.event != null -> EventRow(row, d, frame, showMark, onTip)
         else -> LineRow(row, d, frame, showMark, onTip)
     }
-    tip?.let { TipDialog(it, d) { tip = null } }
 }
 
 /** The message's text, with the card of its link under it. */
@@ -398,7 +412,9 @@ fun MessageRow(
 private fun LineText(row: Row, d: Display, showMark: Boolean, onTip: (Tip) -> Unit, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
     val time = if (d.timestamps) formatTime(row.ts, d.timestampSeconds, is24Hour(ctx)) else null
-    val built = remember(row, d, showMark, time) { build(row, d, showMark, time) }
+    // tapping the name opens the user card
+    val mod = LocalMod.current
+    val built = remember(row, d, showMark, time, mod) { build(row, d, showMark, time, mod?.takeIf { row.user != null && row.kind != "modfeed" }?.let { c -> { c.openCard(row) } }) }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     Column(modifier) {
@@ -539,7 +555,8 @@ private fun NoticeRow(row: Row, d: Display, frame: Modifier, showMark: Boolean, 
             if (n?.icon != null) Box(Modifier.padding(top = 2.dp).size(n.iconSize.dp)) { NoticeIcon(n.icon) }
             Column(Modifier.weight(1f)) {
                 if (n?.announce == true) Text("Announcement", color = barColor.copy(alpha = 1f), fontSize = (d.bodySp * 0.75f).sp, fontWeight = FontWeight.Bold)
-                n?.head?.let { Text(it, color = parseColor(n.headColor) ?: AguColors.Text, fontSize = d.bodySp.sp, fontWeight = FontWeight.Bold) }
+                val card = LocalMod.current
+                n?.head?.let { Text(it, color = parseColor(n.headColor) ?: AguColors.Text, fontSize = d.bodySp.sp, fontWeight = FontWeight.Bold, modifier = if (card != null && row.user != null) Modifier.clickable { card.openCard(row) } else Modifier) }
                 if (sentence.isNotEmpty()) {
                     val b = n?.bold
                     Text(
@@ -632,6 +649,13 @@ private fun AutomodRow(row: Row, d: Display, frame: Modifier, onTip: (Tip) -> Un
         }
         LineText(row.copy(kind = "msg", system = null), d, false, onTip, Modifier.padding(top = 2.dp))
         row.resolved?.let { Text(it, color = Faint, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp)) }
+        // Allow / Deny while it is held, for an account that may resolve holds
+        val mod = LocalMod.current
+        val id = row.id?.content
+        if (mod != null && id != null && row.canResolve && row.status == "held") LayoutRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Pill("Allow", Color(0xFF86EFAC)) { mod.automod(row.sk, id, true) }
+            Pill("Deny", Color(0xFFFCA5A5)) { mod.automod(row.sk, id, false) }
+        }
     }
 }
 

@@ -1667,16 +1667,7 @@ fn member_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: Option
 /// Whether a YouTube row gets mod buttons: a login, the message's menu params, not the channel's owner and not
 /// the account's own message. Whether the account may moderate is YouTube's answer when a button is used.
 fn youtube_can_mod(m: &YouTubeMsg, env: &CoEnv) -> bool {
-    if !env.caps.connected || m.menu.as_deref().unwrap_or("").is_empty() || m.badges.iter().any(|b| b.icon == "OWNER") {
-        return false;
-    }
-    let mine = if !env.viewer_id.is_empty() && !m.user.id.is_empty() {
-        env.viewer_id == m.user.id
-    } else {
-        let me = env.viewer_login.trim().trim_start_matches('@').to_lowercase();
-        !me.is_empty() && m.user.name.trim().trim_start_matches('@').to_lowercase() == me
-    };
-    !mine
+    super::mod_caps::youtube_can_mod(env.caps.connected, m.menu.as_deref().unwrap_or(""), m.badges.iter().any(|b| b.icon == "OWNER"), &env.viewer_id, &env.viewer_login, &m.user.id, &m.user.name)
 }
 
 pub fn x_row(row: &Row, m: &XMsg, ctx: &RowCtx, rule: Option<&HighlightRule>) -> BuiltRow {

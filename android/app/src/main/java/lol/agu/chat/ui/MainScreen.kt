@@ -111,6 +111,11 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val ctx = LocalContext.current
+    // moderation: what happened shows in the snackbar (the latest one replaces the one before)
+    val mod = remember(vm) {
+        ModController(vm, scope) { text -> scope.launch { snackbar.currentSnackbarData?.dismiss(); snackbar.showSnackbar(text) } }
+    }
+    var modesFor by remember { mutableStateOf<List<ChannelRef>?>(null) }
 
     var adding by remember { mutableStateOf<AddTo?>(null) }
     var tabMenu by remember { mutableStateOf<Tab?>(null) }
@@ -137,6 +142,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
         if (i >= 0 && i != pager.currentPage) pager.animateScrollToPage(i)
     }
 
+    CompositionLocalProvider(LocalMod provides mod) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val width: Dp = maxWidth
     val wide = width >= 840.dp
@@ -148,6 +154,10 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
                 if (!searching) { current?.let { t -> queries[t.id] = ""; vm.search(t.id, "") }; query = "" }
             },
             showSplit = tabs.size > 1 && wide, split = split, onSplit = { split = !split },
+            showMod = current != null && vm.canMod(current), modOn = current != null && vm.modMode[current.id] == true,
+            onMod = { current?.let { t -> vm.setModMode(t, vm.modMode[t.id] != true) } },
+            showModes = current != null && vm.modesChannels(current).isNotEmpty(),
+            onModes = { current?.let { t -> modesFor = vm.modesChannels(t) } },
         )
         if (searching) SearchBar(
             query = query,
@@ -198,6 +208,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
         SnackbarHost(snackbar)
     }
     }
+    }
 
     adding?.let { a ->
         AddChannelDialog(vm, into = a.tab, mergeInto = current, onDismiss = { adding = null })
@@ -238,17 +249,17 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
     }
 
     menuRow?.let { row ->
-        ModalBottomSheet(onDismissRequest = { menuRow = null }, containerColor = AguColors.Surface) {
-            Column(Modifier.navigationBarsPadding().padding(bottom = 12.dp)) {
-                Text(
-                    "${row.user?.name ?: row.user?.login ?: ""}: ${row.plainText()}".take(120),
-                    color = AguColors.Muted, fontSize = 13.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-                )
-                SheetItem("Reply") { replyTo = row; menuRow = null }
-                SheetItem("Copy text") { copyText(ctx, row.plainText()); menuRow = null }
-            }
-        }
+        RowActionsSheet(
+            mod, row,
+            onReply = if (row.kind == "msg" || row.kind == "notice") ({ replyTo = row; menuRow = null }) else null,
+            onCopy = { copyText(ctx, row.plainText()); menuRow = null },
+            onDismiss = { menuRow = null },
+        )
     }
+
+    ModDialogs(mod)
+    mod.card?.let { req -> UserCardSheet(vm, mod, req, onDismiss = { mod.card = null }, onLogin = onAccounts) }
+    modesFor?.let { list -> if (list.isNotEmpty()) ModesSheet(vm, list, onDismiss = { modesFor = null }) }
 }
 
 @Composable
@@ -281,6 +292,8 @@ private fun TopBar(
     onAccounts: () -> Unit, mentions: Int, onBell: () -> Unit,
     searching: Boolean = false, onSearch: () -> Unit = {},
     showSplit: Boolean = false, split: Boolean = false, onSplit: () -> Unit = {},
+    showMod: Boolean = false, modOn: Boolean = false, onMod: () -> Unit = {},
+    showModes: Boolean = false, onModes: () -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(AguColors.Brand), contentAlignment = Alignment.Center) {
@@ -288,6 +301,23 @@ private fun TopBar(
             Image(painterResource(R.drawable.ic_launcher_foreground), contentDescription = null, modifier = Modifier.requiredSize(45.dp))
         }
         Text("Agu Chat", color = AguColors.Text, fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp).weight(1f))
+        if (showModes) Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onModes), contentAlignment = Alignment.Center) { ModIcon("shield", AguColors.Text, 22) }
+        // mod mode: the sword
+        if (showMod) Box(
+            Modifier.size(40.dp).clip(CircleShape).background(if (modOn) AguColors.Accent else Color.Transparent).clickable(onClick = onMod),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.size(22.dp)) {
+                val c = if (modOn) Color.White else AguColors.Text
+                val w = size.width
+                val sw = w * 0.1f
+                drawLine(c, Offset(w * 0.2f, w * 0.8f), Offset(w * 0.8f, w * 0.2f), strokeWidth = sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(c, Offset(w * 0.8f, w * 0.2f), Offset(w * 0.8f, w * 0.38f), strokeWidth = sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(c, Offset(w * 0.8f, w * 0.2f), Offset(w * 0.62f, w * 0.2f), strokeWidth = sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(c, Offset(w * 0.18f, w * 0.5f), Offset(w * 0.5f, w * 0.82f), strokeWidth = sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(c, Offset(w * 0.2f, w * 0.8f), Offset(w * 0.1f, w * 0.9f), strokeWidth = sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            }
+        }
         if (showSplit) Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onSplit), contentAlignment = Alignment.Center) {
             // two panes side by side
             Canvas(Modifier.size(22.dp)) {
@@ -454,6 +484,8 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
         } else vm.jumpDone(jump)
     }
 
+    val modOn = vm.modMode[tab.id] == true && LocalDisplay.current.showModButtons
+    CompositionLocalProvider(LocalModTab provides tab, LocalModMode provides modOn) {
     Column(Modifier.fillMaxSize()) {
         // channels that are not connected say so (named by platform when several are merged)
         val lines = tab.channels.mapNotNull { ch ->
@@ -492,6 +524,7 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }
+    }
     }
     }
 }

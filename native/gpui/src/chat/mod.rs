@@ -29,7 +29,7 @@ pub use agu_chat_model::thread;
 pub mod twitch;
 pub use agu_chat_model::types;
 pub mod ui_util;
-pub mod card_web;
+pub use agu_chat_model::card_web;
 pub mod user_card;
 
 /// `Pixels` as a plain number (its field is private).

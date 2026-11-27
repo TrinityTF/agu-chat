@@ -27,7 +27,7 @@ data class Paint(
 
 @Serializable
 @Immutable
-data class RowUser(val login: String? = null, val name: String? = null, val color: String? = null, val paint: Paint? = null, val alias: String? = null)
+data class RowUser(val id: String? = null, val login: String? = null, val name: String? = null, val color: String? = null, val paint: Paint? = null, val alias: String? = null, val avatar: String? = null)
 
 /** A badge: a picture, or (Kick and YouTube's own) a small glyph chip. [title] shows on long-press. */
 @Serializable
@@ -124,6 +124,45 @@ data class Rant(val text: String = "", val color: String = "#00bcff")
 @Immutable
 data class Preview(val key: String = "", val provider: String = "", val title: String = "", val subtitle: String = "", val thumb: String? = null)
 
+/** Who and what a moderation action is about (the core's `ModTarget`): the message, its sender, YouTube's menu params. */
+@Serializable
+@Immutable
+data class ModTarget(val id: String = "", val uid: String = "", val login: String = "", val name: String = "", val menu: String? = null)
+
+/** What the signed-in account may do to this line (the core decides by platform, caps and badges), and the timeout lengths. */
+@Serializable
+@Immutable
+data class ModInfo(
+    val t: ModTarget = ModTarget(),
+    val ban: Boolean = false,
+    val timeout: Boolean = false,
+    val warn: Boolean = false,
+    val delete: Boolean = false,
+    val unban: Boolean = false,
+    /** a command button (`/announce ...`) may run */
+    val cmd: Boolean = false,
+    /** (label, seconds) */
+    val ladder: List<List<kotlinx.serialization.json.JsonPrimitive>> = emptyList(),
+) {
+    val choices: List<Pair<String, Int>> get() = ladder.mapNotNull { l -> if (l.size == 2) l[0].content to (l[1].content.toIntOrNull() ?: return@mapNotNull null) else null }
+}
+
+/** What the account may do in a channel: shows the mod mode toggle and the channel modes button. */
+@Immutable
+data class Caps(val mod: Boolean = false, val modes: Boolean = false)
+
+/** One mod mode button (settings -> Mod buttons): [action] is ban | timeout | warn | delete | command. */
+@Serializable
+@Immutable
+data class ModButtonCfg(
+    val id: String = "",
+    val action: String = "ban",
+    val icon: String = "",
+    val label: String = "",
+    val seconds: Int = 0,
+    val command: String = "",
+)
+
 @Serializable
 @Immutable
 data class Row(
@@ -159,6 +198,10 @@ data class Row(
     val highlight: Highlight? = null,
     /** the line names you (drawn red) */
     val mention: Boolean = false,
+    /** what a moderator may do to this line; null when nothing */
+    val mod: ModInfo? = null,
+    /** an AutoMod hold: Allow / Deny work for this account */
+    val canResolve: Boolean = false,
 ) {
     /** The text of the message as plain text, for copying. */
     fun plainText(): String = parts.joinToString("") {
@@ -208,7 +251,7 @@ data class ChannelRef(val platform: String, val channel: String)
 
 @Serializable
 @Immutable
-data class SavedTab(val name: String = "", val channels: List<ChannelRef> = emptyList())
+data class SavedTab(val name: String = "", val channels: List<ChannelRef> = emptyList(), val modMode: Boolean = false)
 
 /** The core's source key of a channel (Twitch and Kick names are kept lowercase). */
 fun ChannelRef.sk(): String = "$platform:${if (platform == "twitch" || platform == "kick") channel.lowercase() else channel}"
@@ -243,3 +286,7 @@ data class Jump(val vk: String, val key: String, val nonce: Long)
 /** The core wants a sign-in screen: a WebView on [url]. [show] means "point the open window here" (Twitch's authorise page). */
 @Immutable
 data class LoginRequest(val id: Long, val platform: String, val url: String, val show: Boolean = false)
+
+/** The answer to a moderation call: [toast] is what to say (a warning when [warn]); [confirm] is a question to ask before a ban. */
+@Immutable
+data class ModResult(val ok: Boolean, val toast: String? = null, val warn: Boolean = false, val confirm: String? = null)

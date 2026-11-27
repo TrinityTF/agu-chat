@@ -35,6 +35,10 @@ data class Display(
     val deletedMessages: String = "strike",
     val linkPreviews: Boolean = true,
     val showPlatformMarks: Boolean = true,
+    /** settings.showModButtons: mod mode may draw its buttons at all */
+    val showModButtons: Boolean = true,
+    /** settings -> Mod buttons, in order */
+    val modButtons: List<ModButtonCfg> = DefaultModButtons,
 ) {
     val bodySp: Float get() = fontSize * 15f / 13f
 
@@ -59,10 +63,22 @@ data class Display(
                 deletedMessages = str("deletedMessages", base.deletedMessages),
                 linkPreviews = bool("linkPreviews", base.linkPreviews),
                 showPlatformMarks = bool("showPlatformMarks", base.showPlatformMarks),
+                showModButtons = bool("showModButtons", base.showModButtons),
+                modButtons = (o["modButtons"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull {
+                    runCatching { lol.agu.chat.Core.json.decodeFromJsonElement(ModButtonCfg.serializer(), it) }.getOrNull()
+                } ?: base.modButtons,
             )
         }
     }
 }
+
+/** The core's defaults: ban, timeout 10 minutes, warn, delete. */
+val DefaultModButtons = listOf(
+    ModButtonCfg("ban", "ban", "ban"),
+    ModButtonCfg("timeout", "timeout", "clock", seconds = 600),
+    ModButtonCfg("warn", "warn", "warning"),
+    ModButtonCfg("delete", "delete", "trash"),
+)
 
 val LocalDisplay = staticCompositionLocalOf { Display() }
 

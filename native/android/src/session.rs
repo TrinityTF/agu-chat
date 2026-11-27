@@ -33,7 +33,7 @@ use agu_chat_model::input::autocomplete::{chatters, suggest, ChangeCtx};
 use agu_chat_model::input::gate::twitch_viewer;
 use agu_chat_model::input::inventory::{build_kick_inventory, build_rumble_inventory, build_twitch_inventory, build_youtube_inventory, merge_inventories, Inventory};
 use agu_chat_model::input::slash::{confirmed_command, post_json, Confirmed};
-use agu_chat_model::mod_caps::{fetch_mod_caps, relay_api, ModCaps};
+use agu_chat_model::mod_caps::{fetch_mod_caps, relay_api, CoCaps, ModCaps};
 use agu_chat_model::types::RowBody;
 use agu_chat_model::net::Net;
 use agu_chat_model::search::{parse_search, SearchQuery};
@@ -43,7 +43,7 @@ use agu_chat_model::twitch::cheermotes::{load_cheermotes, Cheermotes};
 use agu_chat_model::twitch::cosmetics::{defs_from_raw, fetch_chatter_style, fetch_seven_tv_defs, retry_delay, SevenTvDefs, StyleBook};
 use agu_chat_model::twitch::emotes::{fetch_seven_tv_personal, fetch_twitch_picker_emotes, ProviderEmote, TwitchEmotesResp, TwitchPickerEmote, fetch_seven_tv_set, flush_cache, forget_cache, init_cache, merge_emote_sets, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
 use agu_chat_model::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, SevenSocket, EMOTE_SET_UPDATE, USER_UPDATE};
-use agu_chat_model::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets};
+use agu_chat_model::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_kick_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -52,6 +52,10 @@ use crate::alerts::{Alerter, Wants};
 use crate::compose::{byte_of, picker_json, plan_send, send_failures, suggestions_json, SendPlan, Target};
 use crate::hub::{Added, Hub};
 use crate::view::{row_json, style_key, Env, Rules};
+
+#[path = "moderation.rs"]
+mod moderation;
+use moderation::{build_mod_env, DevRelay};
 
 /// Events to the app: (kind, JSON payload). Called from background threads.
 pub type Sink = Arc<dyn Fn(&str, &Value) + Send + Sync>;
@@ -77,6 +81,12 @@ struct SrcData {
     /// the account's own Twitch emotes (what the picker and ":" offer), and what the account may do here
     twitch_emotes: TwitchEmotesResp,
     caps: ModCaps,
+    /// Kick / Rumble: whether the account moderates the chat
+    co: CoCaps,
+    /// debuggable builds: `caps` / `co` were set by hand and are not refreshed
+    dev_caps: bool,
+    /// Kick: the broadcaster's user id the 7TV set was asked for
+    kick7: Option<String>,
     /// the emote inventory built for this generation of the emote data
     inv: Option<(u64, Arc<Inventory>)>,
 }
@@ -158,6 +168,7 @@ fn env_of(sk: &str, cx: &Ctx, store: Option<&ChatStore>) -> Env {
         env.cheermotes = d.cheermotes.clone();
     }
     if let Some(st) = store.and_then(|s| s.source(sk)) {
+        env.mods = build_mod_env(&st.source, cx.src.get(sk), cx.rules, store);
         env.known = st.known.clone();
         env.rumble_badges = st.rumble_badges.clone();
         env.rumble_emotes = st.rumble_emotes.clone();
@@ -423,11 +434,22 @@ struct Inner {
     login: crate::login::LoginBridge,
     /// the one socket to 7TV's event API, open while a channel with a 7TV set is
     seven: SevenSocket,
+    /// debuggable builds: keeps moderation requests away from the platforms
+    dev: Mutex<DevRelay>,
 }
 
 #[derive(Clone)]
 pub struct Session {
     inner: Arc<Inner>,
+}
+
+/// The Kick broadcaster's user id in a chat's status (what 7TV links its emote set to).
+fn kick_owner_id(status: &Value) -> Option<String> {
+    match status.get("userId")? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 fn platform_of(v: &Value) -> Result<Platform, String> {
@@ -474,7 +496,14 @@ pub fn migrate_tabs(v: Value) -> Value {
             .filter_map(|t| {
                 if let Some(chs) = t.get("channels").and_then(|c| c.as_array()) {
                     let chs: Vec<Value> = chs.iter().filter(|c| c.get("platform").is_some() && c.get("channel").is_some()).cloned().collect();
-                    (!chs.is_empty()).then(|| json!({"name": t.get("name").and_then(|n| n.as_str()).unwrap_or(""), "channels": chs}))
+                    (!chs.is_empty()).then(|| {
+                        let mut tab = json!({"name": t.get("name").and_then(|n| n.as_str()).unwrap_or(""), "channels": chs});
+                        // mod mode is remembered per tab, like the desktop's per split
+                        if t.get("modMode").and_then(|m| m.as_bool()).unwrap_or(false) {
+                            tab["modMode"] = json!(true);
+                        }
+                        tab
+                    })
                 } else if t.get("platform").is_some() && t.get("channel").is_some() {
                     Some(json!({"name": "", "channels": [{"platform": t["platform"], "channel": t["channel"]}]}))
                 } else {
@@ -500,7 +529,7 @@ impl Session {
         let seven = SevenSocket::new(&net, Arc::new(move |ev| {
             let _ = txs.send(Inbox::Seven(ev));
         }));
-        let inner = Arc::new(Inner { bridge: bridge.clone(), backend, net: net.clone(), sink: sink.clone(), data_dir, st: Mutex::new(state), routes: Arc::new(Mutex::new(Routes::default())), inbox: tx.clone(), login: crate::login::LoginBridge::new(sink.clone()), seven });
+        let inner = Arc::new(Inner { bridge: bridge.clone(), backend, net: net.clone(), sink: sink.clone(), data_dir, st: Mutex::new(state), routes: Arc::new(Mutex::new(Routes::default())), inbox: tx.clone(), login: crate::login::LoginBridge::new(sink.clone()), seven, dev: Mutex::new(DevRelay::default()) });
         inner.login.install();
 
         // frames can arrive before `subscribe` answers with their id: hold them while a subscribe is in flight
@@ -613,6 +642,7 @@ impl Session {
                     }
                     let platform = st.hub.source(&sk).map(|s| s.platform);
                     let mut emotes_for: Vec<String> = Vec::new();
+                    let mut kick_owner: Option<String> = None;
                     for vk in st.hub.views_of(&sk) {
                         if only.as_deref().is_some_and(|o| o != vk) {
                             continue;
@@ -625,6 +655,19 @@ impl Session {
                         let after = v.store.source(&sk).and_then(|s| s.channel_id.clone());
                         if platform == Some(Platform::Twitch) && after.is_some() && after != before {
                             emotes_for.extend(after);
+                        }
+                        if platform == Some(Platform::Kick) && kick_owner.is_none() {
+                            kick_owner = v.store.source(&sk).and_then(|s| s.status.as_ref()).and_then(kick_owner_id);
+                        }
+                    }
+                    // Kick: the broadcaster's 7TV emote set, once the chat says whose it is
+                    if let Some(id) = kick_owner {
+                        let d = st.src.entry(sk.clone()).or_default();
+                        if d.kick7.as_deref() != Some(id.as_str()) {
+                            d.kick7 = Some(id.clone());
+                            let s = self.clone();
+                            let sk2 = sk.clone();
+                            self.inner.net.rt.spawn(async move { s.load_kick_seven(sk2, id).await });
                         }
                     }
                     if let Some(cid) = emotes_for.into_iter().next() {
@@ -732,6 +775,14 @@ impl Session {
             let st = self.inner.st.lock().unwrap();
             st.src.iter().filter_map(|(sk, d)| st.hub.source(sk).filter(|s| s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_none()).map(|s| (sk.clone(), s, d.channel_id.clone()))).collect()
         };
+        // what the account may do in every other open chat (a login or a logout changes it)
+        let others: Vec<(String, SourceRef)> = {
+            let st = self.inner.st.lock().unwrap();
+            st.src.keys().filter_map(|sk| st.hub.source(sk).filter(|s| s.platform != Platform::Twitch).map(|s| (sk.clone(), s))).collect()
+        };
+        for (sk, source) in others {
+            self.load_caps(sk, source).await;
+        }
         for (sk, source, cid) in todo {
             self.load_caps(sk.clone(), source).await;
             // Twitch's emotes of the account are not those of a logged-out visitor
@@ -740,13 +791,6 @@ impl Session {
             }
         }
         self.load_personal(false).await;
-    }
-
-    async fn load_caps(&self, sk: String, source: SourceRef) {
-        let caps = fetch_mod_caps(&self.inner.bridge, &source).await;
-        if let Some(d) = self.inner.st.lock().unwrap().src.get_mut(&sk) {
-            d.caps = caps;
-        }
     }
 
     /// Twitch's own emotes for the picker and ":" (`fresh`: past the cache).
@@ -863,7 +907,7 @@ impl Session {
                 if changes.is_empty() {
                     return;
                 }
-                let sks: Vec<(String, Option<String>)> = {
+                let sks: Vec<(String, Option<(SevenTvPlatform, String)>)> = {
                     let mut guard = self.inner.st.lock().unwrap();
                     let st = &mut *guard;
                     let settings = st.rules.settings.clone();
@@ -876,7 +920,7 @@ impl Session {
                             apply_changes(&mut Arc::make_mut(sets).seven.channel, &changes);
                             d.emotes = Some(Arc::new(merge_for(sets, &settings)));
                         }
-                        hit.push((sk.clone(), d.channel_id.clone()));
+                        hit.push((sk.clone(), d.channel_id.clone().map(|c| (SevenTvPlatform::Twitch, c)).or_else(|| d.kick7.clone().map(|k| (SevenTvPlatform::Kick, k)))));
                     }
                     for (sk, _) in &hit {
                         st.touch_sk(sk);
@@ -885,8 +929,8 @@ impl Session {
                 };
                 for (sk, cid) in sks {
                     // a restart must not bring the old set back from the cache
-                    if let Some(cid) = cid {
-                        forget_cache(&seven_tv_channel_key_on(SevenTvPlatform::Twitch, &cid));
+                    if let Some((platform, cid)) = cid {
+                        forget_cache(&seven_tv_channel_key_on(platform, &cid));
                         self.inner.net.rt.spawn(async { flush_cache() });
                     }
                     for c in &changes {
@@ -933,15 +977,15 @@ impl Session {
             SevenEvent::Dispatch(Dispatch::Other) => {}
             SevenEvent::Resynced => {
                 // the socket was down for a while: whatever changed meanwhile comes with a fresh load
-                let all: Vec<(String, String)> = {
+                let all: Vec<(String, SevenTvPlatform, String)> = {
                     let st = self.inner.st.lock().unwrap();
-                    st.src.iter().filter(|(_, d)| d.seven_ids.is_some()).filter_map(|(sk, d)| d.channel_id.clone().map(|c| (sk.clone(), c))).collect()
+                    st.src.iter().filter(|(_, d)| d.seven_ids.is_some()).filter_map(|(sk, d)| d.channel_id.clone().map(|c| (sk.clone(), SevenTvPlatform::Twitch, c)).or_else(|| d.kick7.clone().map(|k| (sk.clone(), SevenTvPlatform::Kick, k)))).collect()
                 };
-                for (sk, cid) in all {
+                for (sk, platform, cid) in all {
                     let s = self.clone();
                     let client = self.inner.net.client.clone();
                     self.inner.net.rt.spawn(async move {
-                        let (seven, ids) = reload_seven_tv(client, SevenTvPlatform::Twitch, cid).await;
+                        let (seven, ids) = reload_seven_tv(client, platform, cid).await;
                         let mut guard = s.inner.st.lock().unwrap();
                         let st = &mut *guard;
                         let settings = st.rules.settings.clone();
@@ -1074,6 +1118,12 @@ impl Session {
         st.touch_sk(sk);
     }
 
+    /// 7TV for a Kick channel (its broadcaster's set; BTTV and FFZ have none there).
+    async fn load_kick_seven(&self, sk: String, kick_user_id: String) {
+        let sets = load_kick_provider_sets(self.inner.net.client.clone(), kick_user_id, false).await;
+        self.apply_sets(&sk, &sets);
+    }
+
     /// 7TV / BTTV / FFZ for a Twitch channel: the cached sets at once, then fresh ones.
     async fn load_emotes(&self, sk: String, channel_id: String, reload: bool) {
         let client = self.inner.net.client.clone();
@@ -1131,6 +1181,10 @@ impl Session {
         if source.platform == Platform::Twitch {
             let s = self.clone();
             self.inner.net.rt.spawn(async move { s.load_badges_for(sk, source).await });
+        } else {
+            // what the account may do here
+            let s = self.clone();
+            self.inner.net.rt.spawn(async move { s.load_caps(sk, source).await });
         }
         Ok(())
     }
@@ -1513,6 +1567,27 @@ impl Session {
                 }
                 // debuggable builds only (the app checks): feed a frame to an open chat as if the platform sent it,
                 // to see real rows without a busy channel
+                "mod.action" => s.mod_action(&args).await,
+                "mod.command" => s.mod_command(&args).await,
+                "mod.automod" => s.mod_automod(&args).await,
+                "mod.rules" => s.mod_rules(&args).await,
+                "caps.get" => {
+                    let st = s.inner.st.lock().unwrap();
+                    Ok(st.caps_event(str_arg(&args, "sk")?))
+                }
+                "card.info" => s.card_info(&args).await,
+                "card.messages" => s.card_messages(&args).await,
+                "card.comment" => s.card_comment(&args, false).await,
+                "card.comment.delete" => s.card_comment(&args, true).await,
+                "card.ignore" => s.card_ignore(&args).await,
+                "modes.get" => s.modes_get(&args).await,
+                "modes.patch" => s.modes_patch(&args).await,
+                "modes.shield" => s.modes_shield(&args).await,
+                "terms.list" => s.terms(&args, "list").await,
+                "terms.add" => s.terms(&args, "add").await,
+                "terms.remove" => s.terms(&args, "remove").await,
+                "dev.caps" => s.dev_caps(&args),
+                "dev.relay" => s.dev_relay(&args),
                 "dev.frame" => {
                     let sk = str_arg(&args, "sk")?.to_string();
                     let frame = args.get("frame").cloned().ok_or("missing frame")?;
@@ -1640,6 +1715,14 @@ mod tests {
 
     fn chat(id: &str, text: &str) -> Value {
         json!({"type": "chat", "msg": {"id": id, "ts": 1, "user": {"id": "9", "login": "bob", "name": "Bob", "color": ""}, "text": text, "emotes": "", "badges": ""}})
+    }
+
+    #[test]
+    fn a_kick_chats_7tv_set_belongs_to_its_broadcasters_user_id() {
+        assert_eq!(kick_owner_id(&json!({"userId": "123", "slug": "a"})).as_deref(), Some("123"));
+        assert_eq!(kick_owner_id(&json!({"userId": 456})).as_deref(), Some("456"));
+        assert_eq!(kick_owner_id(&json!({"userId": ""})), None, "not known yet");
+        assert_eq!(kick_owner_id(&json!({"slug": "a"})), None);
     }
 
     #[test]

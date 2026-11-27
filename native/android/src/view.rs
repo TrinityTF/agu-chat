@@ -9,6 +9,7 @@ use agu_chat_core::protocol::{AccountsState, HighlightRule, Settings};
 use agu_chat_model::chat_text::{as_link, split_rumble_emotes, sub_split, RumblePart};
 use agu_chat_model::highlights::{compile_highlights, match_input_of, rule_row_style, Highlighter};
 use agu_chat_model::ignores::{apply_ignores, compile_ignores, filter_ignored, CompiledIgnores, IgnoreCache};
+use agu_chat_model::mod_row::{row_mod, timeout_ladder, ModEnv};
 use agu_chat_model::mentions::{is_own, kick_me, me_login_lower, row_mentions_me};
 use agu_chat_model::search::{match_row, SearchQuery};
 use agu_chat_model::shown::visible_rows;
@@ -73,6 +74,8 @@ pub struct Env {
     pub book: Option<Arc<StyleBook>>,
     pub rumble_badges: RumbleBadgeDefs,
     pub rumble_emotes: RumbleEmotes,
+    /// what the account may do to this channel's chatters (None: no moderation in this channel)
+    pub mods: Option<ModEnv>,
 }
 
 pub fn twitch_emote_url(id: &str) -> String {
@@ -814,6 +817,28 @@ pub fn row_json(r: &Row, env: &Env) -> Value {
             o.insert("parts".into(), parts);
         }
     }
+    // the picture on the user card of a platform that has no badge lookup of its own
+    let avatar = match &r.body {
+        RowBody::Rumble(m) => m.user.avatar.as_str(),
+        RowBody::Kick(m) => m.user.avatar.as_str(),
+        RowBody::YouTube(m) => m.user.avatar.as_str(),
+        RowBody::X(m) => m.user.avatar.as_str(),
+        _ => "",
+    };
+    if !avatar.is_empty() {
+        if let Some(u) = o.get_mut("user").and_then(|u| u.as_object_mut()) {
+            u.insert("avatar".into(), json!(avatar));
+        }
+    }
+    if let Some(me) = &env.mods {
+        if let Some(m) = row_mod(r, me) {
+            let t = &m.target;
+            o.insert("mod".into(), json!({"t": {"id": t.id, "uid": t.user_id, "login": t.login, "name": t.name, "menu": t.menu}, "ban": m.ban, "timeout": m.timeout, "warn": m.warn, "delete": m.delete, "unban": m.unban, "cmd": m.cmd, "ladder": timeout_ladder(r.platform).iter().map(|(l, s)| json!([l, s])).collect::<Vec<_>>()}));
+        }
+        if matches!(r.body, RowBody::Automod(_)) {
+            o.insert("canResolve".into(), json!(me.twitch.automod));
+        }
+    }
     v
 }
 
@@ -1269,5 +1294,40 @@ mod tests {
     fn the_emote_box_follows_the_font_and_the_size_setting() {
         assert_eq!(Look::default().emote_px(), 25.0);
         assert_eq!(Look { font_size: 20.0, emote_size: "large".into(), ..Look::default() }.emote_px(), 50.0);
+    }
+
+    fn mod_env(ban: bool, delete: bool, automod: bool) -> Env {
+        let twitch = agu_chat_model::mod_caps::ModCaps { ban, warn: ban, delete, automod, ..Default::default() };
+        Env { mods: Some(ModEnv { platform: Some(Platform::Twitch), twitch, viewer: agu_chat_model::mod_caps::ModViewer { id: "1".into(), ..Default::default() }, ..Default::default() }), ..Env::default() }
+    }
+
+    #[test]
+    fn a_line_carries_what_a_moderator_may_do_to_it() {
+        let (mut st, sk) = store_for(Platform::Twitch, "a_g_u__");
+        st.apply(&sk, &json!({"type": "chat", "msg": {"id": "m1", "ts": 1, "user": {"id": "9", "login": "bob", "name": "Bob", "color": ""}, "text": "hi", "emotes": "", "badges": ""}}));
+        let v = json_of(&st, &mod_env(true, true, false));
+        assert_eq!(v["mod"]["t"], json!({"id": "m1", "uid": "9", "login": "bob", "name": "Bob", "menu": null}));
+        assert_eq!((v["mod"]["ban"].clone(), v["mod"]["timeout"].clone(), v["mod"]["warn"].clone(), v["mod"]["delete"].clone()), (json!(true), json!(true), json!(true), json!(true)));
+        // no rights, no `mod`
+        assert!(json_of(&st, &mod_env(false, false, false)).get("mod").is_none());
+        assert!(json_of(&st, &Env::default()).get("mod").is_none());
+    }
+
+    #[test]
+    fn a_held_message_says_whether_allow_and_deny_work() {
+        let (mut st, sk) = store_for(Platform::Twitch, "a_g_u__");
+        st.apply(&sk, &json!({"type": "automod", "held": {"id": "h1", "ts": 5, "user": {"id": "9", "login": "x", "name": "X"}, "text": "bad", "emotes": "", "reason": "automod", "status": "held"}}));
+        let on = json_of(&st, &mod_env(true, true, true));
+        assert_eq!(on["kind"], "automod");
+        assert_eq!(on["canResolve"], true);
+        assert_eq!(on["mod"]["delete"], false, "a held message is not in chat yet");
+        assert_eq!(json_of(&st, &mod_env(true, true, false))["canResolve"], false);
+    }
+
+    #[test]
+    fn the_picture_of_a_co_chat_user_comes_with_the_line() {
+        let (mut st, sk) = store_for(Platform::Kick, "agu");
+        st.apply(&sk, &json!({"type": "chat", "msg": {"id": "k1", "ts": 1, "text": "hi", "user": {"id": "3", "login": "kim", "name": "Kim", "color": "", "avatar": "https://a/kim.png"}}}));
+        assert_eq!(json_of(&st, &Env::default())["user"]["avatar"], "https://a/kim.png");
     }
 }

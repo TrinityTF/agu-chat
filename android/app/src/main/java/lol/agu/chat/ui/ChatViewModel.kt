@@ -31,6 +31,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val tabs = mutableStateListOf<Tab>()
     /** Connection state per channel (source key). */
     val conns = mutableStateMapOf<String, Conn>()
+    /** What the account may do in each channel (source key): shows the mod mode and channel modes buttons. */
+    val caps = mutableStateMapOf<String, Caps>()
+    /** Mod mode per tab: every line gets the mod buttons. */
+    val modMode = mutableStateMapOf<String, Boolean>()
     /** What happened in a tab you are not looking at: new messages, or a mention / highlight. */
     val unread = mutableStateMapOf<String, Dot>()
     /** The bell's count: unread mentions and highlights in any open chat. */
@@ -74,6 +78,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 when (e.kind) {
                     "rows" -> onRows(e.data)
                     "conn" -> onConn(e.data)
+                    "caps" -> onCaps(e.data)
                     "activity" -> onActivity(e.data)
                     "alert" -> alerts.fire(e.data)
                     "mentions" -> onMentions(e.data)
@@ -150,6 +155,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) { conns[sk] = conn }
     }
 
+    private suspend fun onCaps(data: JsonElement) {
+        val o = data as? JsonObject ?: return
+        val sk = o["sk"]?.jsonPrimitive?.contentOrNull ?: return
+        val caps = Caps(o["mod"]?.jsonPrimitive?.contentOrNull == "true", o["modes"]?.jsonPrimitive?.contentOrNull == "true")
+        withContext(Dispatchers.Main) { this@ChatViewModel.caps[sk] = caps }
+    }
+
     private suspend fun onActivity(data: JsonElement) {
         val o = data as? JsonObject ?: return
         val vk = o["vk"]?.jsonPrimitive?.contentOrNull ?: return
@@ -195,7 +207,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Core.json.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(SavedTab.serializer()), Core.call("tabs.get"))
         }.getOrElse { emptyList() }
         // Show the tabs immediately, then open each one (a channel that fails shows its error as its status).
-        val restored = saved.filter { it.channels.isNotEmpty() }.map { Tab(newId(), it.name, it.channels) }
+        val keep = saved.filter { it.channels.isNotEmpty() }
+        val restored = keep.map { Tab(newId(), it.name, it.channels) }
+        restored.forEachIndexed { i, t -> if (keep[i].modMode) modMode[t.id] = true }
         tabs.addAll(restored)
         for (t in restored) viewModelScope.launch { openView(t, lenient = true) }
     }
@@ -250,7 +264,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         val i = tabs.indexOfFirst { it.id == tab.id }
         if (i >= 0) tabs[i] = tabs[i].copy(channels = channels)
-        conns.keys.filter { sk -> tabs.none { sk in it.sks } }.forEach { conns.remove(it) }
+        conns.keys.filter { sk -> tabs.none { sk in it.sks } }.forEach { conns.remove(it); caps.remove(it) }
         saveTabs()
         return null
     }
@@ -269,13 +283,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             runCatching { Core.call("view.close", buildJsonObject { put("vk", tab.id) }) }
             rowLists.remove(tab.id)
             rowIndex.remove(tab.id)
-            tab.sks.filter { sk -> tabs.none { sk in it.sks } }.forEach { conns.remove(it) }
+            tab.sks.filter { sk -> tabs.none { sk in it.sks } }.forEach { conns.remove(it); caps.remove(it) }
+            modMode.remove(tab.id)
             saveTabs()
         }
     }
 
     private suspend fun saveTabs() {
-        val arr = JsonArray(tabs.map { buildJsonObject { put("name", it.name); put("channels", channelsJson(it.channels)) } })
+        val arr = JsonArray(tabs.map { t -> buildJsonObject { put("name", t.name); put("channels", channelsJson(t.channels)); if (modMode[t.id] == true) put("modMode", true) } })
         runCatching { Core.call("tabs.set", buildJsonObject { put("tabs", arr) }) }
     }
 
@@ -410,6 +425,83 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     } catch (e: CoreError) {
         SendResult(false, e.message ?: "Could not run it", warn = true)
     }
+
+    // ---- moderation ----------------------------------------------------------------------------
+
+    /** The account may moderate somewhere in this tab (the mod mode toggle shows). */
+    fun canMod(tab: Tab) = tab.sks.any { caps[it]?.mod == true }
+
+    /** The channels of this tab whose room settings the account may change (the shield button shows). */
+    fun modesChannels(tab: Tab) = tab.channels.filter { caps[it.sk()]?.modes == true }
+
+    fun setModMode(tab: Tab, on: Boolean) {
+        modMode[tab.id] = on
+        viewModelScope.launch { saveTabs() }
+    }
+
+    private suspend fun callObj(method: String, build: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit = {}): JsonObject? = withContext(Dispatchers.Default) {
+        try {
+            Core.call(method, buildJsonObject(build)) as? JsonObject
+        } catch (e: CoreError) {
+            buildJsonObject { put("ok", false); put("toast", e.message ?: "failed"); put("warn", true); put("error", e.message ?: "failed") }
+        }
+    }
+
+    private fun targetJson(t: ModTarget) = buildJsonObject {
+        put("id", t.id); put("uid", t.uid); put("login", t.login); put("name", t.name); t.menu?.let { put("menu", it) }
+    }
+
+    private fun parseMod(o: JsonObject?): ModResult {
+        o ?: return ModResult(false, "Could not do that", true)
+        fun s(k: String) = o[k]?.jsonPrimitive?.contentOrNull
+        return ModResult(s("ok") == "true", s("toast"), s("warn") == "true", (o["confirm"] as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull)
+    }
+
+    /**
+     * A moderation action on [t] in [sk]: ban | timeout | warn | delete | unban. Kick, Rumble and YouTube answer a ban with
+     * a question first ([ModResult.confirm]); ask again with [confirmed]. The request itself is the core's.
+     */
+    suspend fun modAction(sk: String, action: String, t: ModTarget, seconds: Int? = null, reason: String = "", quick: Boolean = false, confirmed: Boolean = false): ModResult =
+        parseMod(callObj("mod.action") {
+            put("sk", sk); put("action", action); put("t", targetJson(t)); seconds?.let { put("seconds", it) }
+            if (reason.isNotEmpty()) put("reason", reason)
+            if (quick) put("quick", true)
+            if (confirmed) put("confirmed", true)
+        })
+
+    /** A mod-mode command button: the template is filled in with this line and run as the message box would. */
+    suspend fun modCommand(vk: String, sk: String, template: String, row: Row): SendResult {
+        val o = callObj("mod.command") { put("vk", vk); put("sk", sk); put("template", template); put("t", targetJson(row.mod?.t ?: ModTarget())); put("text", row.plainText()) }
+        return o?.let { parseSend(it) } ?: SendResult(false, "Could not run it", warn = true)
+    }
+
+    suspend fun modAutomod(sk: String, id: String, allow: Boolean): ModResult = parseMod(callObj("mod.automod") { put("sk", sk); put("id", id); put("allow", allow) })
+
+    suspend fun modRules(sk: String): List<String> =
+        (callObj("mod.rules") { put("sk", sk) }?.get("rules") as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+
+    /** The user card's data for [user] in [sk] (the core gathers what the platform says and the lines it has seen). */
+    suspend fun cardInfo(sk: String, user: RowUser): JsonObject? = callObj("card.info") {
+        put("sk", sk)
+        put("user", buildJsonObject { put("id", user.id.orEmpty()); put("login", user.login.orEmpty()); put("name", user.name.orEmpty()); put("avatar", user.avatar.orEmpty()) })
+    }
+
+    suspend fun cardMessages(sk: String, id: String, cursor: String?): JsonObject? = callObj("card.messages") { put("sk", sk); put("id", id); cursor?.let { put("cursor", it) } }
+
+    suspend fun cardComment(sk: String, targetId: String, text: String): JsonObject? = callObj("card.comment") { put("sk", sk); put("targetId", targetId); put("text", text) }
+
+    suspend fun cardCommentDelete(sk: String, id: String): JsonObject? = callObj("card.comment.delete") { put("sk", sk); put("commentId", id) }
+
+    /** Ignore or stop ignoring a person; the toast to show. */
+    suspend fun cardIgnore(platform: String, login: String, on: Boolean): String? =
+        callObj("card.ignore") { put("platform", platform); put("login", login); put("on", on) }?.get("toast")?.jsonPrimitive?.contentOrNull
+
+    suspend fun modesGet(sk: String, fresh: Boolean): JsonObject? = callObj("modes.get") { put("sk", sk); put("fresh", fresh) }
+    suspend fun modesPatch(sk: String, body: JsonObject): JsonObject? = callObj("modes.patch") { put("sk", sk); put("body", body) }
+    suspend fun modesShield(sk: String, on: Boolean): JsonObject? = callObj("modes.shield") { put("sk", sk); put("on", on) }
+    suspend fun termsList(sk: String): JsonObject? = callObj("terms.list") { put("sk", sk) }
+    suspend fun termsAdd(sk: String, text: String): JsonObject? = callObj("terms.add") { put("sk", sk); put("text", text) }
+    suspend fun termsRemove(sk: String, id: String): JsonObject? = callObj("terms.remove") { put("sk", sk); put("id", id) }
 
     // ---- accounts ------------------------------------------------------------------------------
 

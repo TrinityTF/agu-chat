@@ -169,6 +169,21 @@ pub fn co_reach(platform: Platform, viewer_login: &str, channel: &str, target_lo
     REACH_ALL
 }
 
+/// YouTube: whether the account may moderate this line. It needs the message's context menu (`menu`), a login, and
+/// the line neither the channel owner's nor the account's own.
+pub fn youtube_can_mod(connected: bool, menu: &str, owner_badge: bool, viewer_id: &str, viewer_login: &str, user_id: &str, user_name: &str) -> bool {
+    if !connected || menu.is_empty() || owner_badge {
+        return false;
+    }
+    let mine = if !viewer_id.is_empty() && !user_id.is_empty() {
+        viewer_id == user_id
+    } else {
+        let me = viewer_login.trim().trim_start_matches('@').to_lowercase();
+        !me.is_empty() && user_name.trim().trim_start_matches('@').to_lowercase() == me
+    };
+    !mine
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
