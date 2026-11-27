@@ -5,3 +5,4 @@ app/src/main/jniLibs/
 *.keystore
 *.jks
 keystore.properties
+dist-test/
