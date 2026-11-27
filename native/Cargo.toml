@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "chat", "gpui"]
+members = ["core", "chat", "gpui", "android"]
 
 [profile.release]
 opt-level = 3

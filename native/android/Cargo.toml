@@ -1,0 +1,20 @@
+[package]
+name = "agu-chat-android"
+version = "0.3.11"
+edition = "2021"
+description = "Agu Chat for Android: the Rust side of the app (core + chat logic) behind a small JSON bridge to Kotlin"
+
+[lib]
+name = "agu_chat_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+agu-chat-core = { path = "../core" }
+agu-chat-model = { path = "../chat" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+futures = "0.3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

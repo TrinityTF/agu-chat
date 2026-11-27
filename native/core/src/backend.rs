@@ -214,7 +214,19 @@ impl Drop for Backend {
 /// Open `url` in the default browser. ShellExecute runs on a thread of its own: on the UI thread it can pump
 /// window messages while the UI is in the middle of an update (a click on a link), and the re-entered UI aborts
 /// the app. The thread sets COM up first, as ShellExecute asks.
+static URL_OPENER: std::sync::OnceLock<Arc<dyn Fn(&str) + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Hand every link the backend opens to the host app instead of the OS shell (Android opens them with an Intent).
+/// Set once, before the backend starts.
+pub fn set_url_opener(f: Arc<dyn Fn(&str) + Send + Sync>) {
+    let _ = URL_OPENER.set(f);
+}
+
 pub(crate) fn shell_open(url: &str) {
+    if let Some(f) = URL_OPENER.get() {
+        f(url);
+        return;
+    }
     #[cfg(windows)]
     {
         let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();

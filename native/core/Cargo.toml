@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json", "gzip", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "stream"] }
 md5 = "0.7"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +21,16 @@ sha1 = "0.10"
 sha2 = "0.10"
 url = "2"
 resvg = { version = "0.45.1", default-features = false }
+
+# TLS: the OS stack on desktop; rustls with Mozilla's roots on Android (no OpenSSL to ship)
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

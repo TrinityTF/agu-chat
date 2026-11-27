@@ -18,6 +18,16 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 const PREFIX: &[u8] = b"v10";
+
+/// Android: the 32-byte key, kept wrapped by the Android Keystore on the app side and handed over at startup.
+#[cfg(target_os = "android")]
+static PLATFORM_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// Android: set the secrets key (the app unwraps it with the Android Keystore). Once, before the backend starts.
+#[cfg(target_os = "android")]
+pub fn set_platform_key(k: [u8; 32]) {
+    let _ = PLATFORM_KEY.set(k);
+}
 const DPAPI_TAG: &[u8] = b"DPAPI";
 
 pub struct SafeStorage {
@@ -36,6 +46,12 @@ impl SafeStorage {
     fn key(&self) -> Result<[u8; 32], String> {
         let mut guard = self.key.lock().unwrap();
         if let Some(k) = *guard {
+            return Ok(k);
+        }
+        #[cfg(target_os = "android")]
+        {
+            let k = *PLATFORM_KEY.get().ok_or("the app has not unlocked its key yet")?;
+            *guard = Some(k);
             return Ok(k);
         }
         #[cfg(target_os = "macos")]
@@ -76,7 +92,7 @@ impl SafeStorage {
     }
 
     pub fn is_encryption_available(&self) -> bool {
-        cfg!(any(windows, target_os = "macos")) && self.key().is_ok()
+        cfg!(any(windows, target_os = "macos", target_os = "android")) && self.key().is_ok()
     }
 
     pub fn decrypt_string(&self, buf: &[u8]) -> Result<String, String> {

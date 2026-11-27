@@ -45,6 +45,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agu-chat-android"
+version = "0.3.11"
+dependencies = [
+ "agu-chat-core",
+ "agu-chat-model",
+ "futures",
+ "jni",
+ "rustls",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "agu-chat-core"
 version = "0.3.11"
 dependencies = [
@@ -58,6 +71,7 @@ dependencies = [
  "regex",
  "reqwest",
  "resvg",
+ "rustls",
  "security-framework",
  "serde",
  "serde_json",
@@ -3254,6 +3268,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]
@@ -5719,6 +5734,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-tls",
  "hyper-util",
  "js-sys",
@@ -5726,6 +5742,8 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -5733,6 +5751,7 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
@@ -5742,6 +5761,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]
@@ -7234,9 +7254,13 @@ dependencies = [
  "futures-util",
  "log",
  "native-tls",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
  "tokio-native-tls",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -7489,6 +7513,8 @@ dependencies = [
  "log",
  "native-tls",
  "rand 0.8.8",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
@@ -8043,6 +8069,24 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
