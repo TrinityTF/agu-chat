@@ -35,6 +35,7 @@ fun Composer(
     onText: (String) -> Unit,
     canSend: Boolean,
     readOnlyReason: String?,
+    showLogin: Boolean,
     replyingTo: String?,
     onCancelReply: () -> Unit,
     onSend: () -> Unit,
@@ -65,7 +66,7 @@ fun Composer(
                 contentAlignment = Alignment.CenterStart,
             ) {
                 if (!canSend) {
-                    Text(readOnlyReason?.takeIf { it.isNotBlank() } ?: "Log in to send", color = AguColors.Muted, fontSize = 15.sp, maxLines = 1)
+                    Text(readOnlyReason?.takeIf { it.isNotBlank() } ?: "Chat is read-only", color = AguColors.Muted, fontSize = 15.sp, maxLines = 1)
                 } else {
                     if (text.isEmpty()) Text("Send a message", color = AguColors.Muted, fontSize = 15.sp)
                     BasicTextField(
@@ -90,7 +91,7 @@ fun Composer(
                 ) {
                     Text("↑", color = if (enabled) androidx.compose.ui.graphics.Color.White else AguColors.Muted, fontSize = 22.sp, textAlign = TextAlign.Center)
                 }
-            } else {
+            } else if (showLogin) {
                 TextButton(onClick = onLogin) { Text("Log in", color = AguColors.Accent) }
             }
         }

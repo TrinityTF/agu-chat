@@ -34,6 +34,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var appVersion by mutableStateOf("")
         private set
+    /** The sign-in WebView the core asked for (YouTube, X, Twitch), or null. */
+    var loginRequest by mutableStateOf<LoginRequest?>(null)
+        private set
+    /** Errors of a login call that failed on the spot (the core's own errors come with the account state). */
+    val loginErrors = mutableStateMapOf<String, String>()
+    /** Platforms with a login call in flight (Rumble's password or code is being checked). */
+    val loginBusy = mutableStateMapOf<String, Boolean>()
 
     private val rowLists = HashMap<String, SnapshotStateList<Row>>()
     private val rowIndex = HashMap<String, HashMap<String, Int>>() // sk -> row key -> position
@@ -48,6 +55,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "rows" -> onRows(e.data)
                     "conn" -> onConn(e.data)
                     "accounts" -> parseAccounts(e.data)?.let { withContext(Dispatchers.Main) { accounts = it } }
+                    "login.webview", "login.show" -> onLoginRequest(e.kind, e.data)
+                    "login.close", "login.forget" -> {
+                        val platform = (e.data as? JsonObject)?.get("platform")?.jsonPrimitive?.contentOrNull
+                        withContext(Dispatchers.Main) {
+                            if (e.kind == "login.forget") LoginCookies.clear()
+                            if (loginRequest?.platform == platform) loginRequest = null
+                        }
+                    }
                 }
             }
         }
@@ -188,6 +203,64 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun refreshAccounts() {
         runCatching { Core.call("accounts.get") }.getOrNull()?.let { d -> parseAccounts(d)?.let { accounts = it } }
+    }
+
+    private suspend fun onLoginRequest(kind: String, data: JsonElement) {
+        val o = data as? JsonObject ?: return
+        val id = o["id"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: return
+        val platform = o["platform"]?.jsonPrimitive?.contentOrNull ?: return
+        val url = o["url"]?.jsonPrimitive?.contentOrNull ?: return
+        withContext(Dispatchers.Main) { loginRequest = LoginRequest(id, platform, url, show = kind == "login.show") }
+    }
+
+    /** Hand the sign-in screen's outcome to the core: the cookies it found, an error, or null for "closed". */
+    fun loginAnswer(request: LoginRequest, cookies: List<Pair<String, String>>? = null, error: String? = null, keepOpen: Boolean = false) {
+        if (!keepOpen && loginRequest?.id == request.id) loginRequest = null
+        viewModelScope.launch {
+            runCatching {
+                Core.call("login.result", buildJsonObject {
+                    put("id", request.id)
+                    when {
+                        cookies != null -> put("cookies", JsonArray(cookies.map { (k, v) -> JsonArray(listOf(JsonPrimitive(k), JsonPrimitive(v))) }))
+                        error != null -> put("error", error)
+                        else -> put("cancelled", true)
+                    }
+                })
+            }
+            if (cookies == null && error == null) {
+                // closing the window is a cancel of the whole login (also stops a Twitch flow between its two pages)
+                runCatching { Core.call("accounts.cancel", buildJsonObject { put("platform", request.platform) }) }
+                refreshAccounts()
+            }
+        }
+    }
+
+    /** Start a login; returns the core's answer (Rumble: `twoFactor`), or null when it failed (the error is in [loginErrors]). */
+    suspend fun login(platform: String, args: JsonObject = JsonObject(emptyMap())): JsonObject? {
+        loginErrors.remove(platform)
+        loginBusy[platform] = true
+        return try {
+            Core.call("accounts.login", buildJsonObject { put("platform", platform); put("args", args) }) as? JsonObject ?: JsonObject(emptyMap())
+        } catch (e: CoreError) {
+            loginErrors[platform] = e.message?.takeIf { it.isNotBlank() } ?: "Could not log in"
+            null
+        } finally {
+            loginBusy.remove(platform)
+            refreshAccounts()
+        }
+    }
+
+    fun cancelLogin(platform: String) {
+        loginErrors.remove(platform)
+        if (loginRequest?.platform == platform) loginRequest = null
+        accountCall("accounts.cancel", platform)
+    }
+
+    fun logout(platform: String) {
+        loginErrors.remove(platform)
+        // the sign-in WebView's cookies go with the account, so the next login starts clean
+        if (platform in listOf("twitch", "x", "youtube")) LoginCookies.clear()
+        accountCall("accounts.logout", platform)
     }
 
     fun accountCall(method: String, platform: String) {

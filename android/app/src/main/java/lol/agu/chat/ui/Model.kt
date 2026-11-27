@@ -107,3 +107,7 @@ data class SavedTab(val platform: String, val channel: String)
 data class Tab(val platform: String, val channel: String, val sk: String) {
     val id get() = "$platform:${channel.lowercase()}"
 }
+
+/** The core wants a sign-in screen: a WebView on [url]. [show] means "point the open window here" (Twitch's authorise page). */
+@Immutable
+data class LoginRequest(val id: Long, val platform: String, val url: String, val show: Boolean = false)

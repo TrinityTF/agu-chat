@@ -5,6 +5,7 @@
 //!              `reset` means the list is exactly `upsert` (a snapshot, or the emotes changed every line).
 //! - `conn`     `{sk, conn}`: the channel's connection state (`ConnFrame`).
 //! - `accounts` the `AccountsState` map; `settings` the settings object.
+//! - `login.webview` / `login.show` / `login.close` / `login.forget`: the cookie logins' sign-in screen (`login.rs`).
 //!
 //! Frames are applied off the UI thread and the diffs are sent at most every `FLUSH_MS`, so a busy chat costs
 //! the bridge a few calls a second, not one per message.
@@ -112,6 +113,7 @@ struct Inner {
     chans: Mutex<HashMap<String, Chan>>,
     routes: Arc<Mutex<Routes>>,
     inbox: mpsc::UnboundedSender<Inbox>,
+    login: crate::login::LoginBridge,
 }
 
 #[derive(Clone)]
@@ -136,7 +138,8 @@ impl Session {
         let net = Net::new(&version);
         init_cache(data_dir.clone());
         let (tx, rx) = mpsc::unbounded_channel();
-        let inner = Arc::new(Inner { bridge: bridge.clone(), backend, net: net.clone(), sink: sink.clone(), data_dir, chans: Mutex::new(HashMap::new()), routes: Arc::new(Mutex::new(Routes::default())), inbox: tx.clone() });
+        let inner = Arc::new(Inner { bridge: bridge.clone(), backend, net: net.clone(), sink: sink.clone(), data_dir, chans: Mutex::new(HashMap::new()), routes: Arc::new(Mutex::new(Routes::default())), inbox: tx.clone(), login: crate::login::LoginBridge::new(sink.clone()) });
+        inner.login.install();
 
         // frames can arrive before `subscribe` answers with their id: hold them while a subscribe is in flight
         let routes = inner.routes.clone();
@@ -387,6 +390,8 @@ impl Session {
                     b.accounts_logout(platform_of(&args)?).await;
                     Ok(Value::Null)
                 }
+                // the sign-in screen's answer to a `login.webview` / `login.show` event
+                "login.result" => s.inner.login.answer(&args).map(|_| Value::Null),
                 "settings.get" => Ok(serde_json::to_value(b.settings_get()).unwrap_or(Value::Null)),
                 "settings.set" => Ok(serde_json::to_value(b.settings_set(args.get("patch").cloned().unwrap_or(json!({}))).await).unwrap_or(Value::Null)),
                 "tabs.get" => Ok(std::fs::read(s.inner.data_dir.join("mobile-tabs.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!([]))),

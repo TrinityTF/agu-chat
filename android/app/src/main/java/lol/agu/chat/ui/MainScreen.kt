@@ -73,6 +73,7 @@ fun MainScreen(vm: ChatViewModel) {
     Box(Modifier.fillMaxSize().background(AguColors.Bg)) {
         Chats(vm, onAccounts = { showAccounts = true })
         if (showAccounts) AccountsScreen(vm, onBack = { showAccounts = false })
+        vm.loginRequest?.let { LoginWebScreen(it, vm) }
     }
 }
 
@@ -131,8 +132,8 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
                 text = text,
                 onText = { text = it; current?.let { t -> drafts[t.id] = it } },
                 canSend = conn?.canSend != false,
-                // the core words it for the desktop app ("... in Settings"); here the Log in button is right beside it
-                readOnlyReason = if (conn?.loggedOut == true) "Log in to send messages" else conn?.readOnlyReason,
+                readOnlyReason = readOnlyText(conn, current?.platform),
+                showLogin = conn?.loggedOut == true,
                 replyingTo = replyTo?.let { it.user?.name ?: it.user?.login },
                 onCancelReply = { replyTo = null },
                 onSend = {
@@ -322,4 +323,20 @@ private fun AddChannelDialog(vm: ChatViewModel, onDismiss: () -> Unit) {
         confirmButton = { TextButton(onClick = ::submit, enabled = !busy) { Text(if (busy) "Adding…" else "Add", color = AguColors.Accent) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = AguColors.Muted) } },
     )
+}
+
+/**
+ * Why the box is read-only, worded like the desktop's: logged out says to log in (the core's text points at Settings,
+ * and the Log in button sits right beside it), otherwise the core's reason, else connecting / offline / read-only.
+ */
+internal fun readOnlyText(conn: Conn?, platform: String?): String? {
+    if (conn == null || conn.canSend != false) return null
+    val reason = conn.readOnlyReason?.replace(" in Settings", "")?.takeIf { it.isNotBlank() }
+    return when {
+        conn.loggedOut == true -> reason?.takeIf { it.contains("again", true) || it.contains("expired", true) } ?: "Log in to send messages"
+        reason != null -> reason
+        conn.state == "connecting" -> "Connecting..."
+        conn.live == false && platform != "twitch" && platform != "kick" -> "Offline"
+        else -> "Chat is read-only"
+    }
 }
