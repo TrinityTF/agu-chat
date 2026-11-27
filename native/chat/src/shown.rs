@@ -4,11 +4,17 @@ use std::collections::HashSet;
 
 use agu_chat_core::protocol::Settings;
 
-use super::twitch::events::{kick_event_visible, notice_visible};
+use super::twitch::events::{kick_event_visible, notice_kind, notice_visible, ChatEventKind};
 use super::types::*;
 
-/// Rows after the event toggles and deleted-message hiding.
+/// Rows after the event toggles and deleted-message hiding (announcements stay hidden, like the site's default).
 pub fn visible_rows(rows: &[RowRef], rs: &Settings) -> Vec<RowRef> {
+    visible_rows_with(rows, rs, false)
+}
+
+/// `announcements`: also show a streamer's announcements (the Android app does; the desktop's event toggles keep
+/// them off).
+pub fn visible_rows_with(rows: &[RowRef], rs: &Settings, announcements: bool) -> Vec<RowRef> {
     let mut bombs: HashSet<String> = HashSet::new();
     for r in rows {
         if let RowBody::Notice(n) = &r.body {
@@ -22,7 +28,11 @@ pub fn visible_rows(rows: &[RowRef], rs: &Settings) -> Vec<RowRef> {
     }
     rows.iter()
         .filter(|r| match &r.body {
-            RowBody::Notice(n) => n.seventv.is_some() || notice_visible(&n.msg_id, n.source_msg_id.as_deref(), n.gift_id.as_deref(), &bombs),
+            RowBody::Notice(n) => {
+                n.seventv.is_some()
+                    || (announcements && notice_kind(&n.msg_id, n.source_msg_id.as_deref()) == Some(ChatEventKind::Announcements))
+                    || notice_visible(&n.msg_id, n.source_msg_id.as_deref(), n.gift_id.as_deref(), &bombs)
+            }
             RowBody::ModFeed(_) => rs.show_mod_actions,
             RowBody::Automod(_) => rs.show_automod,
             RowBody::Msg(m) => !(m.deleted && rs.deleted_messages == "hide"),
@@ -32,4 +42,23 @@ pub fn visible_rows(rows: &[RowRef], rs: &Settings) -> Vec<RowRef> {
         })
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agu_chat_core::protocol::Platform;
+    use std::sync::Arc;
+
+    fn notice(msg_id: &str) -> RowRef {
+        Arc::new(Row { key: msg_id.into(), ts: 1, sk: "twitch:c".into(), platform: Platform::Twitch, ord: 0, backlog: false, body: RowBody::Notice(Notice { id: msg_id.into(), msg_id: msg_id.into(), system: "x".into(), ..Default::default() }) })
+    }
+
+    #[test]
+    fn announcements_are_hidden_unless_asked_for() {
+        let rows = vec![notice("announcement"), notice("sub")];
+        let s = Settings::default();
+        assert_eq!(visible_rows(&rows, &s).len(), 1);
+        assert_eq!(visible_rows_with(&rows, &s, true).len(), 2);
+    }
 }

@@ -209,6 +209,8 @@ pub fn build_notice(m: &IrcLine) -> Option<Value> {
         // same community gift id; the chat page folds the per-recipient lines under the first one.
         "giftId": m.tag("msg-param-community-gift-id"),
         "giftCount": js_int_or(m.tag("msg-param-mass-gift-count"), 0),
+        // an announcement's colour: PRIMARY, BLUE, GREEN, ORANGE or PURPLE
+        "paramColor": m.tag("msg-param-color"),
     }))
 }
 

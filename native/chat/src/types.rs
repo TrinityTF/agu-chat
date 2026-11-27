@@ -82,6 +82,8 @@ lenient! {
         pub deleted_note: Option<String>,
         /// set on the app's own notice of a 7TV emote change (not a Twitch notice)
         pub seventv: Option<SevenTvNote>,
+        /// an announcement's colour (PRIMARY, BLUE, GREEN, ORANGE, PURPLE)
+        pub param_color: Option<String>,
     }
 }
 

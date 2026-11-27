@@ -4,6 +4,7 @@
 //! - `rows`     `{vk, reset, upsert: [row], remove: [key]}`: a view's rows to add or replace (in list order) and rows
 //!              gone. `reset` means the list is exactly `upsert` (a snapshot, or the emotes changed every line).
 //! - `conn`     `{sk, conn}`: a channel's connection state (`ConnFrame`).
+//! - `preview`  `{key, provider, title, subtitle, thumb}`: a link preview card that just arrived (`preview.get`).
 //! - `activity` `{vk, kind}`: new messages in a view ("message", or "highlight" for a mention / highlight rule).
 //! - `alert`    `{sound: {file, volume} | null, vibrate}`: play the sound / vibrate for a highlight.
 //! - `mentions` `{unread, total}`: the bell's count (the list is the `mentions.list` call).
@@ -18,7 +19,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agu_chat_core::protocol::{AccountsState, AguBridge, Platform, SourceRef};
+use agu_chat_core::link_preview::cache::PreviewCache;
+use agu_chat_core::link_preview::{match_url, Preview};
+use agu_chat_core::protocol::{AccountsState, AguBridge, Platform, Settings, SourceRef};
 use agu_chat_core::twitch::whisper;
 use agu_chat_core::{AppMeta, Backend};
 use agu_chat_model::alerts::ping_samples;
@@ -26,17 +29,21 @@ use agu_chat_model::ignores::IgnoreCache;
 use agu_chat_model::mentions::{classify, mention_id, row_deleted, Alert, Mentions};
 use agu_chat_model::mod_caps::relay_api;
 use agu_chat_model::net::Net;
+use agu_chat_model::search::{parse_search, SearchQuery};
 use agu_chat_model::store::{source_key, ChatStore};
 use agu_chat_model::twitch::badges::BadgeMap;
-use agu_chat_model::twitch::emotes::{flush_cache, init_cache, merge_emote_sets, EmoteSets};
-use agu_chat_model::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_provider_sets, ProviderSets};
+use agu_chat_model::twitch::cheermotes::{load_cheermotes, Cheermotes};
+use agu_chat_model::twitch::cosmetics::{defs_from_raw, fetch_chatter_style, fetch_seven_tv_defs, retry_delay, SevenTvDefs, StyleBook};
+use agu_chat_model::twitch::emotes::{fetch_seven_tv_set, flush_cache, forget_cache, init_cache, merge_emote_sets, seven_tv_channel_key_on, EmoteSets, ProviderScopedMap, SevenTvIds, SevenTvPlatform};
+use agu_chat_model::twitch::seven_events::{apply_changes, same_id, Dispatch, EmoteChange, SevenEvent, SevenSocket, EMOTE_SET_UPDATE, USER_UPDATE};
+use agu_chat_model::twitch::use_twitch_data::{load_badges, load_cached_provider_sets, load_provider_sets, reload_seven_tv, ProviderSets};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::alerts::{Alerter, Wants};
 use crate::hub::{Added, Hub};
-use crate::view::{row_json, Env, Rules};
+use crate::view::{row_json, style_key, Env, Rules};
 
 /// Events to the app: (kind, JSON payload). Called from background threads.
 pub type Sink = Arc<dyn Fn(&str, &Value) + Send + Sync>;
@@ -47,10 +54,26 @@ const FLUSH_MS: u64 = 60;
 #[derive(Default)]
 struct SrcData {
     badges: Arc<BadgeMap>,
+    /// 7TV / BTTV / FFZ as loaded, kept per provider so the settings and live 7TV changes can re-merge them
+    sets: Option<Arc<ProviderSets>>,
     emotes: Option<Arc<EmoteSets>>,
     emotes_loading: bool,
+    /// the Twitch channel id the emote sets and cheermotes belong to
+    channel_id: Option<String>,
+    cheermotes: Option<Arc<Cheermotes>>,
+    cheermotes_loading: bool,
+    /// the 7TV user and set this channel is listening to for live emote changes
+    seven_ids: Option<SevenTvIds>,
     /// the last `conn` frame, to tell a view that opens on a channel that is already connected
     conn: Option<Value>,
+}
+
+/// What a row is drawn against, besides its own channel's data.
+struct Ctx<'a> {
+    src: &'a HashMap<String, SrcData>,
+    rules: &'a Rules,
+    defs: Option<Arc<SevenTvDefs>>,
+    book: &'a Arc<StyleBook>,
 }
 
 /// One tab's list: a store merging all its channels, and what the app was last sent of it.
@@ -65,20 +88,26 @@ struct View {
     full: bool,
     /// rows up to this arrival number were looked at for alerts
     seen_ord: u64,
+    /// the tab's search: only matching rows are shown
+    search: Option<SearchQuery>,
+    /// chatters whose 7TV style just arrived: their rows are sent again
+    restyle: HashSet<String>,
 }
 
 impl View {
     fn new() -> Self {
-        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0 }
+        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new() }
     }
 
     /// The rows event since the last one, or None when nothing changed.
-    fn diff(&mut self, vk: &str, rules: &Rules, src: &HashMap<String, SrcData>) -> Option<Value> {
+    fn diff(&mut self, vk: &str, cx: &Ctx) -> Option<Value> {
         if !self.dirty {
             return None;
         }
         self.dirty = false;
-        let rows = rules.shown(self.store.rows(), &mut self.ignore_cache);
+        let rules = cx.rules;
+        let rows = rules.shown(self.store.rows(), &mut self.ignore_cache, self.search.as_ref());
+        let restyle = std::mem::take(&mut self.restyle);
         let now: Vec<(String, usize)> = rows.iter().map(|r| (r.key.clone(), Arc::as_ptr(r) as usize)).collect();
         let keys_now: HashSet<&str> = now.iter().map(|(k, _)| k.as_str()).collect();
         let removed: Vec<String> = self.sent_order.iter().filter(|k| !keys_now.contains(k.as_str())).cloned().collect();
@@ -91,8 +120,9 @@ impl View {
         let mut envs: HashMap<String, Env> = HashMap::new();
         let mut upsert = Vec::new();
         for (r, (k, p)) in rows.iter().zip(now.iter()) {
-            if full || self.sent.get(k) != Some(p) {
-                let env = envs.entry(r.sk.clone()).or_insert_with(|| env_of(&r.sk, src, Some(&self.store)));
+            let styled = !restyle.is_empty() && restyle.contains(&style_key(r));
+            if full || styled || self.sent.get(k) != Some(p) {
+                let env = envs.entry(r.sk.clone()).or_insert_with(|| env_of(&r.sk, cx, Some(&self.store)));
                 let mut v = row_json(r, env);
                 rules.decorate(&mut v, r);
                 upsert.push(v);
@@ -107,16 +137,25 @@ impl View {
     }
 }
 
-fn env_of(sk: &str, src: &HashMap<String, SrcData>, store: Option<&ChatStore>) -> Env {
-    let mut env = Env::default();
-    if let Some(d) = src.get(sk) {
+fn env_of(sk: &str, cx: &Ctx, store: Option<&ChatStore>) -> Env {
+    let mut env = Env { look: cx.rules.look(), defs: cx.defs.clone(), book: Some(cx.book.clone()), ..Env::default() };
+    if let Some(d) = cx.src.get(sk) {
         env.badges = d.badges.clone();
         env.emotes = d.emotes.clone();
+        env.cheermotes = d.cheermotes.clone();
     }
     if let Some(st) = store.and_then(|s| s.source(sk)) {
         env.known = st.known.clone();
+        env.rumble_badges = st.rumble_badges.clone();
+        env.rumble_emotes = st.rumble_emotes.clone();
     }
     env
+}
+
+/// The emotes a channel's rows are drawn with: the providers the settings switch on, merged.
+fn merge_for(sets: &ProviderSets, s: &Settings) -> EmoteSets {
+    let empty = ProviderScopedMap::default();
+    merge_emote_sets(if s.seven_tv { &sets.seven } else { &empty }, if s.bttv { &sets.bttv } else { &empty }, if s.ffz { &sets.ffz } else { &empty })
 }
 
 fn whisper_or_channel(s: &SourceRef) -> String {
@@ -140,13 +179,21 @@ struct State {
     mentions_sent: (usize, usize),
     /// the app is on screen (an alert vibrates only in the background)
     active: bool,
+    /// 7TV paint and badge definitions (once fetched) and every chatter's style
+    defs: Option<Arc<SevenTvDefs>>,
+    defs_requested: bool,
+    defs_failures: u32,
+    book: Arc<StyleBook>,
+    /// link preview cards: one cache for every tab, at most 4 requests at a time
+    previews: PreviewCache,
+    seven_seq: u64,
 }
 
 type Out = Vec<(&'static str, Value)>;
 
 impl State {
     fn new() -> State {
-        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true }
+        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0 }
     }
 
     /// Everything shown depends on these (settings, accounts): draw all rows again.
@@ -164,6 +211,27 @@ impl State {
                 v.dirty = true;
                 v.full = true;
             }
+        }
+    }
+
+    /// The settings changed: the emotes each channel draws (7TV / BTTV / FFZ on or off), the link preview cache,
+    /// then every row again.
+    fn settings_changed(&mut self) {
+        let s = self.rules.settings.clone();
+        for d in self.src.values_mut() {
+            if let Some(sets) = &d.sets {
+                d.emotes = Some(Arc::new(merge_for(sets, &s)));
+            }
+        }
+        self.previews.set_enabled(s.link_previews);
+        self.redraw_all();
+    }
+
+    /// A chatter's 7TV style arrived: their rows are sent again.
+    fn restyled(&mut self, key: &str) {
+        for v in self.views.values_mut() {
+            v.restyle.insert(key.to_string());
+            v.dirty = true;
         }
     }
 
@@ -231,6 +299,8 @@ enum Inbox {
     /// a frame of a channel: to every view holding it, or only to `only` (a view's replayed snapshot)
     Frame { sk: String, only: Option<String>, f: Value },
     Reset(String),
+    /// a live change of a channel's 7TV emotes
+    Seven(SevenEvent),
 }
 
 struct Inner {
@@ -243,6 +313,8 @@ struct Inner {
     routes: Arc<Mutex<Routes>>,
     inbox: mpsc::UnboundedSender<Inbox>,
     login: crate::login::LoginBridge,
+    /// the one socket to 7TV's event API, open while a channel with a 7TV set is
+    seven: SevenSocket,
 }
 
 #[derive(Clone)]
@@ -311,7 +383,11 @@ impl Session {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = State::new();
         state.rules = Rules::new(bridge.settings_get(), AccountsState::new());
-        let inner = Arc::new(Inner { bridge: bridge.clone(), backend, net: net.clone(), sink: sink.clone(), data_dir, st: Mutex::new(state), routes: Arc::new(Mutex::new(Routes::default())), inbox: tx.clone(), login: crate::login::LoginBridge::new(sink.clone()) });
+        let txs = tx.clone();
+        let seven = SevenSocket::new(&net, Arc::new(move |ev| {
+            let _ = txs.send(Inbox::Seven(ev));
+        }));
+        let inner = Arc::new(Inner { bridge: bridge.clone(), backend, net: net.clone(), sink: sink.clone(), data_dir, st: Mutex::new(state), routes: Arc::new(Mutex::new(Routes::default())), inbox: tx.clone(), login: crate::login::LoginBridge::new(sink.clone()), seven });
         inner.login.install();
 
         // frames can arrive before `subscribe` answers with their id: hold them while a subscribe is in flight
@@ -336,6 +412,10 @@ impl Session {
                 st.rules = Rules::new(settings, a.clone());
                 st.redraw_all();
             }
+            // a login brings the cheermotes (they need the account's token)
+            let session = Session { inner: i2.clone() };
+            let rt = i2.net.rt.handle().clone();
+            rt.spawn(async move { session.load_cheermotes_all().await });
             s2(&"accounts", &serde_json::to_value(a).unwrap_or(Value::Null))
         })));
         let (i3, s3) = (inner.clone(), sink.clone());
@@ -344,7 +424,7 @@ impl Session {
                 let mut st = i3.st.lock().unwrap();
                 let accounts = st.rules.accounts.clone();
                 st.rules = Rules::new(s.clone(), accounts);
-                st.redraw_all();
+                st.settings_changed();
             }
             s3(&"settings", &serde_json::to_value(s).unwrap_or(Value::Null))
         })));
@@ -356,10 +436,13 @@ impl Session {
         let s = session.clone();
         net.rt.spawn(async move {
             let a = s.inner.bridge.accounts_get().await;
-            let mut st = s.inner.st.lock().unwrap();
-            let settings = st.rules.settings.clone();
-            st.rules = Rules::new(settings, a);
-            st.redraw_all();
+            {
+                let mut st = s.inner.st.lock().unwrap();
+                let settings = st.rules.settings.clone();
+                st.rules = Rules::new(settings, a);
+                st.settings_changed();
+            }
+            s.load_cheermotes_all().await;
         });
         session
     }
@@ -388,11 +471,16 @@ impl Session {
     }
 
     fn take(&self, m: Inbox) {
+        if let Inbox::Seven(ev) = m {
+            self.on_seven(ev);
+            return;
+        }
         let mut out: Out = Vec::new();
         {
             let mut guard = self.inner.st.lock().unwrap();
             let st = &mut *guard;
             match m {
+                Inbox::Seven(_) => {}
                 Inbox::Reset(sk) => {
                     for vk in st.hub.views_of(&sk) {
                         if let Some(v) = st.views.get_mut(&vk) {
@@ -428,6 +516,7 @@ impl Session {
                     }
                     if let Some(cid) = emotes_for.into_iter().next() {
                         let d = st.src.entry(sk.clone()).or_default();
+                        d.channel_id = Some(cid.clone());
                         if d.emotes.is_none() && !d.emotes_loading {
                             d.emotes_loading = true;
                             let s = self.clone();
@@ -448,15 +537,320 @@ impl Session {
             let vks: Vec<String> = st.views.iter().filter(|(_, v)| v.dirty).map(|(k, _)| k.clone()).collect();
             for vk in vks {
                 st.scan(&vk, &mut out);
-                let State { views, rules, src, .. } = st;
-                if let Some(e) = views.get_mut(&vk).and_then(|v| v.diff(&vk, rules, src)) {
+                let State { views, rules, src, defs, book, .. } = st;
+                let cx = Ctx { src, rules, defs: defs.clone(), book };
+                if let Some(e) = views.get_mut(&vk).and_then(|v| v.diff(&vk, &cx)) {
                     out.push(("rows", e));
                 }
             }
             st.mentions_event(&mut out);
         }
         self.emit(out);
+        // chatters the rows just asked about
+        self.pump_styles();
     }
+
+    // ---- 7TV cosmetics -------------------------------------------------------------------------
+
+    /// Start the lookups the style book has queued (at most three run at once).
+    fn pump_styles(&self) {
+        let book = self.inner.st.lock().unwrap().book.clone();
+        while let Some(key) = book.next_job() {
+            let s = self.clone();
+            let client = self.inner.net.client.clone();
+            let book = book.clone();
+            self.inner.net.rt.spawn(async move {
+                match book.finish(&key, fetch_chatter_style(&client, &key).await) {
+                    None => {
+                        if book.known(&key).is_some_and(|k| k.is_some()) {
+                            s.inner.st.lock().unwrap().restyled(&key);
+                        }
+                    }
+                    // a failed lookup is tried again after a wait, so a network blip does not take a paint away
+                    Some(wait) => {
+                        tokio::time::sleep(wait).await;
+                        book.requeue(&key);
+                    }
+                }
+                s.pump_styles();
+            });
+        }
+    }
+
+    /// The paint and badge definitions, fetched once (and again after a wait when that failed).
+    fn ensure_defs(&self) {
+        {
+            let mut st = self.inner.st.lock().unwrap();
+            if st.defs_requested || st.defs.is_some() || !st.rules.settings.seven_tv_cosmetics {
+                return;
+            }
+            st.defs_requested = true;
+        }
+        let s = self.clone();
+        let client = self.inner.net.client.clone();
+        self.inner.net.rt.spawn(async move {
+            match fetch_seven_tv_defs(&client).await {
+                Some(raw) => {
+                    let defs = defs_from_raw(&raw);
+                    let mut st = s.inner.st.lock().unwrap();
+                    st.defs = Some(Arc::new(defs));
+                    st.redraw_all();
+                }
+                None => {
+                    let wait = {
+                        let mut st = s.inner.st.lock().unwrap();
+                        st.defs_failures += 1;
+                        retry_delay(st.defs_failures)
+                    };
+                    tokio::time::sleep(wait).await;
+                    s.inner.st.lock().unwrap().defs_requested = false;
+                    s.ensure_defs();
+                }
+            }
+        });
+    }
+
+    // ---- cheermotes ----------------------------------------------------------------------------
+
+    /// Bits cheermotes for every open Twitch channel that has none yet (they need the account's token, so a login
+    /// brings them).
+    async fn load_cheermotes_all(&self) {
+        let todo: Vec<(String, SourceRef)> = {
+            let mut st = self.inner.st.lock().unwrap();
+            let mut v = Vec::new();
+            let sks: Vec<String> = st.src.keys().cloned().collect();
+            for sk in sks {
+                let Some(source) = st.hub.source(&sk).filter(|s| s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_none()) else { continue };
+                let d = st.src.get_mut(&sk).unwrap();
+                if d.cheermotes.is_none() && !d.cheermotes_loading {
+                    d.cheermotes_loading = true;
+                    v.push((sk, source));
+                }
+            }
+            v
+        };
+        for (sk, source) in todo {
+            self.load_cheermotes(sk, source).await;
+        }
+    }
+
+    async fn load_cheermotes(&self, sk: String, source: SourceRef) {
+        let cm = load_cheermotes(&self.inner.bridge, &source, &sk).await;
+        let mut st = self.inner.st.lock().unwrap();
+        if let Some(d) = st.src.get_mut(&sk) {
+            d.cheermotes_loading = false;
+            if let Some(cm) = cm {
+                d.cheermotes = Some(Arc::new(cm));
+                st.touch_sk(&sk);
+            }
+        }
+    }
+
+    // ---- live 7TV changes ----------------------------------------------------------------------
+
+    /// Listen for live changes to a channel's 7TV set (and to which set it uses); a channel with none stops listening.
+    fn watch_seven(&self, st: &mut State, sk: &str, ids: Option<SevenTvIds>) {
+        let d = st.src.entry(sk.to_string()).or_default();
+        if d.seven_ids == ids {
+            return;
+        }
+        let old = std::mem::replace(&mut d.seven_ids, ids.clone());
+        let sock = &self.inner.seven;
+        if let Some(o) = old {
+            sock.unsubscribe(EMOTE_SET_UPDATE, &o.set_id);
+            sock.unsubscribe(USER_UPDATE, &o.user_id);
+        }
+        if let Some(n) = ids {
+            sock.subscribe(EMOTE_SET_UPDATE, &n.set_id);
+            sock.subscribe(USER_UPDATE, &n.user_id);
+        }
+    }
+
+    /// A channel's data goes (its last view closed): stop listening for its 7TV changes.
+    fn forget_src(&self, d: SrcData) {
+        if let Some(o) = d.seven_ids {
+            self.inner.seven.unsubscribe(EMOTE_SET_UPDATE, &o.set_id);
+            self.inner.seven.unsubscribe(USER_UPDATE, &o.user_id);
+        }
+    }
+
+    /// The app's own notice of a 7TV change, one compact line in the channel's chat.
+    fn seven_notice(&self, sk: &str, note: Value) {
+        let (ts, seq) = {
+            let mut st = self.inner.st.lock().unwrap();
+            st.seven_seq += 1;
+            (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0), st.seven_seq)
+        };
+        let s = |k: &str| note.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let system = match s("action").as_str() {
+            "renamed" => format!("{} renamed the 7TV emote {} to {}", s("actor"), s("oldName"), s("name")),
+            "set" => format!("{} switched the channel's 7TV emote set to {}", s("actor"), s("name")),
+            a => format!("{} {a} the 7TV emote {}", s("actor"), s("name")),
+        };
+        let notice = json!({"id": format!("7tv-{ts}-{seq}"), "ts": ts, "msgId": "seventv", "system": system.trim(), "seventv": note});
+        let _ = self.inner.inbox.send(Inbox::Frame { sk: sk.to_string(), only: None, f: json!({"type": "chatnotice", "notice": notice}) });
+    }
+
+    fn on_seven(&self, ev: SevenEvent) {
+        match ev {
+            SevenEvent::Dispatch(Dispatch::EmoteSet { set_id, actor, changes }) => {
+                if changes.is_empty() {
+                    return;
+                }
+                let sks: Vec<(String, Option<String>)> = {
+                    let mut guard = self.inner.st.lock().unwrap();
+                    let st = &mut *guard;
+                    let settings = st.rules.settings.clone();
+                    let mut hit = Vec::new();
+                    for (sk, d) in st.src.iter_mut() {
+                        if !d.seven_ids.as_ref().is_some_and(|i| same_id(&i.set_id, &set_id)) {
+                            continue;
+                        }
+                        if let Some(sets) = d.sets.as_mut() {
+                            apply_changes(&mut Arc::make_mut(sets).seven.channel, &changes);
+                            d.emotes = Some(Arc::new(merge_for(sets, &settings)));
+                        }
+                        hit.push((sk.clone(), d.channel_id.clone()));
+                    }
+                    for (sk, _) in &hit {
+                        st.touch_sk(sk);
+                    }
+                    hit
+                };
+                for (sk, cid) in sks {
+                    // a restart must not bring the old set back from the cache
+                    if let Some(cid) = cid {
+                        forget_cache(&seven_tv_channel_key_on(SevenTvPlatform::Twitch, &cid));
+                        self.inner.net.rt.spawn(async { flush_cache() });
+                    }
+                    for c in &changes {
+                        let (action, e, old_name) = match c {
+                            EmoteChange::Added(e) => ("added", e, ""),
+                            EmoteChange::Removed(e) => ("removed", e, ""),
+                            EmoteChange::Updated { old, new } if old.name != new.name => ("renamed", new, old.name.as_str()),
+                            // only its flags changed: nothing to tell
+                            EmoteChange::Updated { .. } => continue,
+                        };
+                        self.seven_notice(&sk, json!({"actor": actor, "action": action, "emoteId": e.id, "name": e.name, "oldName": old_name}));
+                    }
+                }
+            }
+            SevenEvent::Dispatch(Dispatch::UserSet { user_id, actor, set_id, set_name }) => {
+                let sks: Vec<String> = {
+                    let st = self.inner.st.lock().unwrap();
+                    st.src.iter().filter(|(_, d)| d.seven_ids.as_ref().is_some_and(|i| same_id(&i.user_id, &user_id) && !same_id(&i.set_id, &set_id))).map(|(k, _)| k.clone()).collect()
+                };
+                for sk in sks {
+                    let s = self.clone();
+                    let client = self.inner.net.client.clone();
+                    let (user_id, set_id, actor) = (user_id.clone(), set_id.clone(), actor.clone());
+                    let name = if set_name.is_empty() { "another set".to_string() } else { set_name.clone() };
+                    self.inner.net.rt.spawn(async move {
+                        let Some(map) = fetch_seven_tv_set(&client, &set_id).await else { return };
+                        {
+                            let mut guard = s.inner.st.lock().unwrap();
+                            let st = &mut *guard;
+                            let settings = st.rules.settings.clone();
+                            if let Some(d) = st.src.get_mut(&sk) {
+                                if let Some(sets) = d.sets.as_mut() {
+                                    Arc::make_mut(sets).seven.channel = map;
+                                    d.emotes = Some(Arc::new(merge_for(sets, &settings)));
+                                }
+                            }
+                            s.watch_seven(st, &sk, Some(SevenTvIds { user_id, set_id }));
+                            st.touch_sk(&sk);
+                        }
+                        s.seven_notice(&sk, json!({"actor": actor, "action": "set", "name": name}));
+                    });
+                }
+            }
+            SevenEvent::Dispatch(Dispatch::Other) => {}
+            SevenEvent::Resynced => {
+                // the socket was down for a while: whatever changed meanwhile comes with a fresh load
+                let all: Vec<(String, String)> = {
+                    let st = self.inner.st.lock().unwrap();
+                    st.src.iter().filter(|(_, d)| d.seven_ids.is_some()).filter_map(|(sk, d)| d.channel_id.clone().map(|c| (sk.clone(), c))).collect()
+                };
+                for (sk, cid) in all {
+                    let s = self.clone();
+                    let client = self.inner.net.client.clone();
+                    self.inner.net.rt.spawn(async move {
+                        let (seven, ids) = reload_seven_tv(client, SevenTvPlatform::Twitch, cid).await;
+                        let mut guard = s.inner.st.lock().unwrap();
+                        let st = &mut *guard;
+                        let settings = st.rules.settings.clone();
+                        if let Some(d) = st.src.get_mut(&sk) {
+                            if let Some(sets) = d.sets.as_mut() {
+                                let sets = Arc::make_mut(sets);
+                                sets.seven.channel = seven.channel;
+                                if !seven.global.is_empty() {
+                                    sets.seven.global = seven.global;
+                                }
+                                d.emotes = Some(Arc::new(merge_for(sets, &settings)));
+                            }
+                        }
+                        if ids.is_some() {
+                            s.watch_seven(st, &sk, ids);
+                        }
+                        st.touch_sk(&sk);
+                    });
+                }
+            }
+        }
+    }
+
+    // ---- link previews -------------------------------------------------------------------------
+
+    fn now_ms() -> u64 {
+        static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        T0.get_or_init(Instant::now).elapsed().as_millis() as u64
+    }
+
+    fn preview_json(key: &str, p: &Preview) -> Value {
+        json!({"key": key, "provider": p.provider.label(), "title": p.title, "subtitle": p.subtitle, "thumb": p.thumb})
+    }
+
+    /// The preview card of a link: the answer when it is in; otherwise `null`, and the request is queued (a
+    /// `preview` event brings the answer).
+    fn preview_get(&self, href: &str) -> Value {
+        let Some(t) = match_url(href) else { return Value::Null };
+        let got = self.inner.st.lock().unwrap().previews.get(&t, Self::now_ms());
+        match got {
+            Some(p) => Self::preview_json(&t.key, &p),
+            None => {
+                self.pump_previews();
+                Value::Null
+            }
+        }
+    }
+
+    /// Start the queued requests while fewer than four run.
+    fn pump_previews(&self) {
+        loop {
+            let Some(job) = self.inner.st.lock().unwrap().previews.next_job() else { return };
+            let s = self.clone();
+            let client = self.inner.net.client.clone();
+            self.inner.net.rt.spawn(async move {
+                let key = job.key.clone();
+                let res = agu_chat_core::link_preview::fetch::fetch(&job, &client).await;
+                let got = {
+                    let mut st = s.inner.st.lock().unwrap();
+                    let ok = st.previews.finish(&key, res, Self::now_ms());
+                    if ok {
+                        st.previews.peek(&key)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(p) = got {
+                    (s.inner.sink)("preview", &Self::preview_json(&key, &p));
+                }
+                s.pump_previews();
+            });
+        }
+    }
+
+    // ---- emotes and badges ---------------------------------------------------------------------
 
     async fn load_badges_for(&self, sk: String, source: SourceRef) {
         let Some((map, cid)) = load_badges(&self.inner.bridge, &source, &sk).await else { return };
@@ -464,6 +858,9 @@ impl Session {
             let mut st = self.inner.st.lock().unwrap();
             let d = st.src.entry(sk.clone()).or_default();
             d.badges = Arc::new(map);
+            if cid.is_some() {
+                d.channel_id = cid.clone();
+            }
             let go = cid.is_some() && d.emotes.is_none() && !d.emotes_loading;
             if go {
                 d.emotes_loading = true;
@@ -471,18 +868,40 @@ impl Session {
             st.touch_sk(&sk);
             cid.filter(|_| go)
         };
+        if whisper::login_of(&source.channel).is_none() {
+            let mut todo = false;
+            {
+                let mut st = self.inner.st.lock().unwrap();
+                if let Some(d) = st.src.get_mut(&sk) {
+                    if d.cheermotes.is_none() && !d.cheermotes_loading {
+                        d.cheermotes_loading = true;
+                        todo = true;
+                    }
+                }
+            }
+            if todo {
+                let s = self.clone();
+                let (sk2, src2) = (sk.clone(), source.clone());
+                self.inner.net.rt.spawn(async move { s.load_cheermotes(sk2, src2).await });
+            }
+        }
         if let Some(cid) = start_emotes {
             self.load_emotes(sk, cid, false).await;
         }
     }
 
     fn apply_sets(&self, sk: &str, sets: &ProviderSets) {
-        let merged = merge_emote_sets(&sets.seven, &sets.bttv, &sets.ffz);
-        let mut st = self.inner.st.lock().unwrap();
+        let mut guard = self.inner.st.lock().unwrap();
+        let st = &mut *guard;
         if !st.hub.is_held(sk) {
             return;
         }
-        st.src.entry(sk.to_string()).or_default().emotes = Some(Arc::new(merged));
+        let merged = merge_for(sets, &st.rules.settings);
+        let d = st.src.entry(sk.to_string()).or_default();
+        d.sets = Some(Arc::new(sets.clone()));
+        d.emotes = Some(Arc::new(merged));
+        let ids = sets.seven_ids.clone();
+        self.watch_seven(st, sk, ids);
         st.touch_sk(sk);
     }
 
@@ -588,8 +1007,12 @@ impl Session {
             view.dirty = true;
             view.full = true;
             let mut out: Out = Vec::new();
+            let mut gone: Vec<SrcData> = Vec::new();
             for (sk, _) in &change.released {
-                st.src.remove(sk);
+                gone.extend(st.src.remove(sk));
+            }
+            for d in gone {
+                self.forget_src(d);
             }
             for a in &change.added {
                 if let Added::Held(s) = a {
@@ -641,7 +1064,9 @@ impl Session {
             st.views.remove(vk);
             let r = st.hub.close_view(vk);
             for (sk, _) in &r {
-                st.src.remove(sk);
+                if let Some(d) = st.src.remove(sk) {
+                    self.forget_src(d);
+                }
             }
             r
         };
@@ -694,7 +1119,8 @@ impl Session {
             .iter()
             .rev()
             .map(|e| {
-                let env = env_of(&e.row.sk, &st.src, None);
+                let cx = Ctx { src: &st.src, rules: &st.rules, defs: st.defs.clone(), book: &st.book };
+                let env = env_of(&e.row.sk, &cx, None);
                 let mut row = row_json(&e.row, &env);
                 st.rules.decorate(&mut row, &e.row);
                 json!({"id": e.id, "vk": e.leaf_id, "sk": e.row.sk, "channel": e.channel, "platform": e.row.platform.as_str(), "ts": e.row.ts, "read": e.read, "whisper": agu_chat_model::mentions::is_whisper_key(&e.row.sk), "row": row})
@@ -743,8 +1169,23 @@ impl Session {
                         return Err("that tab is not open".into());
                     }
                     let lenient = args.get("lenient").and_then(|l| l.as_bool()).unwrap_or(false);
+                    s.ensure_defs();
                     s.set_view(vk, channels_arg(&args)?, lenient).await
                 }
+                // {vk, query}: show only the lines of a tab that match (an empty query shows them all)
+                "view.search" => {
+                    let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                    let q = parse_search(query);
+                    let mut st = s.inner.st.lock().unwrap();
+                    let v = st.views.get_mut(str_arg(&args, "vk")?).ok_or("that tab is not open")?;
+                    v.search = if q.from.is_empty() && q.words.is_empty() { None } else { Some(q) };
+                    v.dirty = true;
+                    v.full = true;
+                    Ok(Value::Null)
+                }
+                // {href}: the preview card of a link (a clip, a YouTube video, a post on X, ...) or null while it loads;
+                // the `preview` event brings it
+                "preview.get" => Ok(s.preview_get(str_arg(&args, "href")?)),
                 "view.close" => {
                     s.close_view(str_arg(&args, "vk")?).await;
                     Ok(Value::Null)
@@ -807,6 +1248,27 @@ impl Session {
                     }
                     let settings = st.rules.settings.clone();
                     st.rules = Rules::new(settings, accounts);
+                    st.redraw_all();
+                    Ok(Value::Null)
+                }
+                // debuggable builds only: stand in for 7TV's cosmetics, `{defs: {paints, badges}, users: [{id, paint_id?, badge_id?}]}`
+                "dev.cosmetics" => {
+                    let mut st = s.inner.st.lock().unwrap();
+                    if let Some(d) = args.get("defs") {
+                        st.defs = Some(Arc::new(defs_from_raw(d)));
+                        st.defs_requested = true;
+                    }
+                    let book = st.book.clone();
+                    for u in args.get("users").and_then(|u| u.as_array()).into_iter().flatten() {
+                        let id = u.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let opt = |k: &str| u.get(k).and_then(|v| v.as_str()).map(|v| v.to_string());
+                        book.want(&id);
+                        while let Some(k) = book.next_job() {
+                            let style = (k == id).then(|| agu_chat_model::twitch::cosmetics::ChatterStyle { paint_id: opt("paint_id"), badge_id: opt("badge_id"), ..Default::default() });
+                            book.finish(&k, Some(style));
+                        }
+                        st.restyled(&id);
+                    }
                     st.redraw_all();
                     Ok(Value::Null)
                 }
@@ -905,8 +1367,9 @@ mod tests {
         assert_eq!(st.mentions.len(), 1, "one mention however many tabs");
         // both views draw the row with the rule's colour
         for vk in ["v1", "v2"] {
-            let State { views, rules, src, .. } = &mut st;
-            let e = views.get_mut(vk).unwrap().diff(vk, rules, src).expect("rows");
+            let State { views, rules, src, defs, book, .. } = &mut st;
+            let cx = Ctx { src, rules, defs: defs.clone(), book };
+            let e = views.get_mut(vk).unwrap().diff(vk, &cx).expect("rows");
             assert_eq!(e["upsert"][0]["highlight"]["color"], "#ff9f1a");
         }
     }
@@ -918,8 +1381,9 @@ mod tests {
         st.views.remove("v1");
         assert!(st.hub.close_view("v1").is_empty());
         feed(&mut st, "twitch:agu", &chat("2", "again"));
-        let State { views, rules, src, .. } = &mut st;
-        let e = views.get_mut("v2").unwrap().diff("v2", rules, src).unwrap();
+        let State { views, rules, src, defs, book, .. } = &mut st;
+        let cx = Ctx { src, rules, defs: defs.clone(), book };
+        let e = views.get_mut("v2").unwrap().diff("v2", &cx).unwrap();
         assert_eq!(e["upsert"].as_array().unwrap().len(), 2);
     }
 
@@ -933,8 +1397,9 @@ mod tests {
         st.views.insert("v".into(), v);
         feed(&mut st, "twitch:agu", &chat("1", "from twitch"));
         feed(&mut st, "kick:agu", &json!({"type": "chat", "msg": {"id": "k1", "ts": 2, "text": "from kick", "user": {"id": "3", "login": "kim", "name": "Kim", "color": "#00ff00"}}}));
-        let State { views, rules, src, .. } = &mut st;
-        let e = views.get_mut("v").unwrap().diff("v", rules, src).unwrap();
+        let State { views, rules, src, defs, book, .. } = &mut st;
+        let cx = Ctx { src, rules, defs: defs.clone(), book };
+        let e = views.get_mut("v").unwrap().diff("v", &cx).unwrap();
         let platforms: Vec<&str> = e["upsert"].as_array().unwrap().iter().map(|r| r["platform"].as_str().unwrap()).collect();
         assert_eq!(platforms.len(), 2);
         assert!(platforms.contains(&"twitch") && platforms.contains(&"kick"));

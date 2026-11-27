@@ -4,13 +4,35 @@ import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonPrimitive
 
+/** A 7TV name paint: a gradient (colour stops, an angle), a solid colour, plus drop shadows. Colours are `#aarrggbb`. */
 @Serializable
 @Immutable
-data class RowUser(val login: String? = null, val name: String? = null, val color: String? = null)
+data class PaintStop(val at: Float = 0f, val color: String = "#ffffffff")
 
 @Serializable
 @Immutable
-data class Badge(val url: String, val title: String? = null)
+data class PaintShadow(val x: Float = 0f, val y: Float = 0f, val radius: Float = 0f, val color: String = "#ff000000")
+
+@Serializable
+@Immutable
+data class Paint(
+    val function: String = "",
+    val color: String? = null,
+    val angle: Float = 0f,
+    val repeat: Boolean = false,
+    val shape: String = "",
+    val stops: List<PaintStop> = emptyList(),
+    val shadows: List<PaintShadow> = emptyList(),
+)
+
+@Serializable
+@Immutable
+data class RowUser(val login: String? = null, val name: String? = null, val color: String? = null, val paint: Paint? = null, val alias: String? = null)
+
+/** A badge: a picture, or (Kick and YouTube's own) a small glyph chip. [title] shows on long-press. */
+@Serializable
+@Immutable
+data class Badge(val url: String? = null, val title: String? = null, val glyph: String? = null, val color: String? = null)
 
 @Serializable
 @Immutable
@@ -29,6 +51,12 @@ data class Part(
     val color: String? = null,
     val amount: Double? = null,
     val overlays: List<Overlay> = emptyList(),
+    /** the emote's big picture, its provider and the line the long-press popup shows */
+    val tip: String? = null,
+    val provider: String? = null,
+    val label: String? = null,
+    val tipName: String? = null,
+    val tipLabel: String? = null,
 )
 
 @Serializable
@@ -40,6 +68,62 @@ data class ReplyRef(val user: String? = null, val text: String? = null, val pare
 @Immutable
 data class Highlight(val color: String, val alpha: Float = 0.14f)
 
+/** The header of a redeem, a cheer or a Kick gift: who did what, and for how much (the right side). */
+@Serializable
+@Immutable
+data class EventHead(
+    val verb: String = "",
+    val reward: String? = null,
+    val amount: Double? = null,
+    val amountText: String? = null,
+    val bits: Boolean = false,
+    val bitsColor: String? = null,
+    val kicks: Boolean = false,
+    val image: String? = null,
+)
+
+/** The app's own line about a live 7TV emote change. */
+@Serializable
+@Immutable
+data class SevenNote(val actor: String? = null, val verb: String = "", val url: String = "", val name: String = "", val oldName: String = "", val action: String = "")
+
+/** A system line: a sub, a gift, a raid, an announcement, a Super Chat, a membership. */
+@Serializable
+@Immutable
+data class NoticeInfo(
+    val icon: String? = null,
+    val iconSize: Int = 16,
+    /** the name on its own line above the sentence, in [headColor] */
+    val head: String? = null,
+    val headColor: String? = null,
+    val sentence: String? = null,
+    /** the part of [sentence] shown bold (start, end) */
+    val bold: List<Int>? = null,
+    val raid: Boolean = false,
+    /** the bar's colour (`#aarrggbb`) when it is not the accent: an announcement's, a Super Chat's */
+    val bar: String? = null,
+    /** a Reply button puts @name in the message box */
+    val reply: Boolean = false,
+    val announce: Boolean = false,
+    val superChat: Boolean = false,
+    val member: Boolean = false,
+    val seventv: SevenNote? = null,
+)
+
+/** The first link of a message that a card can be made for. */
+@Serializable
+@Immutable
+data class LinkRef(val href: String, val key: String, val provider: String = "")
+
+@Serializable
+@Immutable
+data class Rant(val text: String = "", val color: String = "#00bcff")
+
+/** What a link preview card shows (the core's `Preview`). */
+@Serializable
+@Immutable
+data class Preview(val key: String = "", val provider: String = "", val title: String = "", val subtitle: String = "", val thumb: String? = null)
+
 @Serializable
 @Immutable
 data class Row(
@@ -47,6 +131,8 @@ data class Row(
     val sk: String = "",
     val platform: String = "",
     val ts: Long = 0,
+    /** arrival counter: alternating row shading keys off it */
+    val ord: Long = 0,
     val backlog: Boolean = false,
     val kind: String = "msg",
     val id: JsonPrimitive? = null,
@@ -55,12 +141,20 @@ data class Row(
     val parts: List<Part> = emptyList(),
     val action: Boolean = false,
     val firstMsg: Boolean = false,
+    val returning: Boolean = false,
+    val highlighted: Boolean = false,
     val deleted: Boolean = false,
     val deletedNote: String? = null,
     val reply: ReplyRef? = null,
     val system: String? = null,
     val bits: Double? = null,
     val status: String? = null,
+    val chip: String? = null,
+    val resolved: String? = null,
+    val event: EventHead? = null,
+    val notice: NoticeInfo? = null,
+    val link: LinkRef? = null,
+    val rant: Rant? = null,
     /** a highlight rule matched this line */
     val highlight: Highlight? = null,
     /** the line names you (drawn red) */

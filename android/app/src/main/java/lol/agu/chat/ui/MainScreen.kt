@@ -12,6 +12,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,11 +29,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -43,12 +50,15 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,6 +74,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -73,11 +84,13 @@ import lol.agu.chat.R
 @Composable
 fun MainScreen(vm: ChatViewModel) {
     var showAccounts by rememberSaveable { mutableStateOf(false) }
-    Box(Modifier.fillMaxSize().background(AguColors.Bg)) {
-        Chats(vm, onAccounts = { showAccounts = true })
-        if (vm.mentionsOpen) MentionsScreen(vm)
-        if (showAccounts) AccountsScreen(vm, onBack = { showAccounts = false })
-        vm.loginRequest?.let { LoginWebScreen(it, vm) }
+    CompositionLocalProvider(LocalDisplay provides vm.display, LocalPreviews provides vm.previews) {
+        Box(Modifier.fillMaxSize().background(AguColors.Bg)) {
+            Chats(vm, onAccounts = { showAccounts = true })
+            if (vm.mentionsOpen) MentionsScreen(vm)
+            if (showAccounts) AccountsScreen(vm, onBack = { showAccounts = false })
+            vm.loginRequest?.let { LoginWebScreen(it, vm) }
+        }
     }
 }
 
@@ -89,6 +102,11 @@ private class AddTo(val tab: Tab?)
 private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
     val tabs = vm.tabs
     val pager = rememberPagerState { tabs.size }
+    // search: the text typed per tab (only the open tab's search box shows); a wide screen can show two tabs side by side
+    var searching by rememberSaveable { mutableStateOf(false) }
+    val queries = remember { HashMap<String, String>() }
+    var query by remember { mutableStateOf("") }
+    var split by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val ctx = LocalContext.current
@@ -112,7 +130,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
         prevCount = tabs.size
     }
     // Each tab keeps its own draft; replying is per tab too. The tab you look at has seen its messages.
-    LaunchedEffect(current?.id) { replyTo = null; text = drafts[current?.id].orEmpty(); vm.select(current?.id) }
+    LaunchedEffect(current?.id) { replyTo = null; text = drafts[current?.id].orEmpty(); vm.select(current?.id); query = queries[current?.id].orEmpty() }
     // A tapped mention: its tab comes forward (the list scrolls to the message itself)
     val jump = vm.jump
     LaunchedEffect(jump) {
@@ -125,8 +143,23 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
     val sendable = options.filter { it.canSend }
     val chosen = chosenTarget(targets[current?.id], sendable.map { it.sk }, replyTo?.sk)
 
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val width: Dp = maxWidth
+    val wide = width >= 840.dp
     Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
-        TopBar(onAccounts, vm.mentionsUnread, onBell = { vm.openMentions() })
+        TopBar(
+            onAccounts, vm.mentionsUnread, onBell = { vm.openMentions() },
+            searching = searching, onSearch = {
+                searching = !searching
+                if (!searching) { current?.let { t -> queries[t.id] = ""; vm.search(t.id, "") }; query = "" }
+            },
+            showSplit = tabs.size > 1 && wide, split = split, onSplit = { split = !split },
+        )
+        if (searching) SearchBar(
+            query = query,
+            onQuery = { q -> query = q; current?.let { t -> queries[t.id] = q; vm.search(t.id, q) } },
+            onClose = { searching = false; current?.let { t -> queries[t.id] = ""; vm.search(t.id, "") }; query = "" },
+        )
         TabStrip(
             tabs = tabs, selected = pager.currentPage, vm = vm,
             onSelect = { i -> scope.launch { pager.animateScrollToPage(i) } },
@@ -144,9 +177,19 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
                 }
             }
         } else {
-            HorizontalPager(pager, Modifier.weight(1f), key = { tabs.getOrNull(it)?.id ?: it }) { page ->
+            val two = wide && split && tabs.size > 1
+            HorizontalPager(
+                pager, Modifier.weight(1f), key = { tabs.getOrNull(it)?.id ?: it },
+                pageSize = if (two) PageSize.Fixed(width / 2) else PageSize.Fill,
+            ) { page ->
                 val tab = tabs.getOrNull(page)
-                if (tab != null) ChatList(vm, tab, jump?.takeIf { it.vk == tab.id }, onLongPress = { menuRow = it })
+                if (tab != null) Box(Modifier.fillMaxSize().let { if (two && page > pager.currentPage) it.drawBehind { drawRect(AguColors.Surface2, size = Size(1.dp.toPx(), size.height)) } else it }) {
+                    ChatList(
+                        vm, tab, jump?.takeIf { it.vk == tab.id }, onLongPress = { menuRow = it },
+                        searching = searching && tab.id == current?.id && query.isNotBlank(),
+                        onReplyNotice = { r -> r.user?.let { u -> (u.name ?: u.login)?.let { n -> text = "@$n " + text; current?.let { c -> drafts[c.id] = text } } } },
+                    )
+                }
             }
             val single = current?.sks?.firstOrNull()?.let { vm.conns[it] }
             val first = options.firstOrNull()
@@ -186,6 +229,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
             )
         }
         SnackbarHost(snackbar)
+    }
     }
 
     adding?.let { a ->
@@ -282,13 +326,35 @@ private fun copyText(ctx: Context, text: String) {
 }
 
 @Composable
-private fun TopBar(onAccounts: () -> Unit, mentions: Int, onBell: () -> Unit) {
+private fun TopBar(
+    onAccounts: () -> Unit, mentions: Int, onBell: () -> Unit,
+    searching: Boolean = false, onSearch: () -> Unit = {},
+    showSplit: Boolean = false, split: Boolean = false, onSplit: () -> Unit = {},
+) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(AguColors.Brand), contentAlignment = Alignment.Center) {
             // the launcher glyph (40 of its 108 units): drawn at 45dp its bubbles fill ~55% of the square, as on agu.lol/app
             Image(painterResource(R.drawable.ic_launcher_foreground), contentDescription = null, modifier = Modifier.requiredSize(45.dp))
         }
         Text("Agu Chat", color = AguColors.Text, fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp).weight(1f))
+        if (showSplit) Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onSplit), contentAlignment = Alignment.Center) {
+            // two panes side by side
+            Canvas(Modifier.size(22.dp)) {
+                val c = if (split) AguColors.Accent else AguColors.Text
+                val w = size.width
+                drawRect(c, Offset(w * 0.06f, w * 0.18f), Size(w * 0.42f, w * 0.64f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = w * 0.09f))
+                drawRect(c, Offset(w * 0.52f, w * 0.18f), Size(w * 0.42f, w * 0.64f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = w * 0.09f))
+            }
+        }
+        Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onSearch), contentAlignment = Alignment.Center) {
+            // a magnifier
+            Canvas(Modifier.size(22.dp)) {
+                val c = if (searching) AguColors.Accent else AguColors.Text
+                val w = size.width
+                drawCircle(c, radius = w * 0.28f, center = Offset(w * 0.42f, w * 0.42f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = w * 0.1f))
+                drawLine(c, Offset(w * 0.64f, w * 0.64f), Offset(w * 0.9f, w * 0.9f), strokeWidth = w * 0.11f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            }
+        }
         Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onBell), contentAlignment = Alignment.Center) {
             val red = mentions > 0
             val c = if (red) MentionBell else AguColors.Text
@@ -323,6 +389,27 @@ private fun TopBar(onAccounts: () -> Unit, mentions: Int, onBell: () -> Unit) {
                 drawArc(c, 180f, 180f, true, topLeft = Offset(size.width * 0.12f, size.height * 0.58f), size = Size(size.width * 0.76f, size.height * 0.8f))
             }
         }
+    }
+}
+
+/** Search a tab: words that must all appear, and `from:name` for one person's messages. */
+@Composable
+private fun SearchBar(query: String, onQuery: (String) -> Unit, onClose: () -> Unit) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp).clip(RoundedCornerShape(22.dp)).background(AguColors.Surface2).padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f).padding(vertical = 10.dp)) {
+            if (query.isEmpty()) Text("Search messages, from:name", color = AguColors.Muted, fontSize = 15.sp)
+            BasicTextField(
+                query, onQuery, singleLine = true,
+                textStyle = TextStyle(color = AguColors.Text, fontSize = 15.sp),
+                cursorBrush = SolidColor(AguColors.Accent),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = {}),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        }
+        Text("×", color = AguColors.Text, fontSize = 22.sp, modifier = Modifier.clip(CircleShape).clickable(onClick = onClose).padding(horizontal = 14.dp))
     }
 }
 
@@ -378,17 +465,30 @@ private fun TabStrip(tabs: List<Tab>, selected: Int, vm: ChatViewModel, onSelect
 }
 
 @Composable
-private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row) -> Unit) {
+private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row) -> Unit, searching: Boolean = false, onReplyNotice: ((Row) -> Unit)? = null) {
     val rows = vm.rowsFor(tab.id)
     val state = rememberLazyListState()
     val scope = rememberCoroutineScope()
     // "At the bottom" is judged from the previous layout, so a freshly appended row does not unstick us.
     val atBottom by remember { derivedStateOf { !state.canScrollForward } }
+    // how many lines there were when you scrolled up (the pill counts what came since)
+    var pausedAt by remember { mutableStateOf<Int?>(null) }
+    // Stuck to the bottom until you scroll up; late-loading pictures and cards then keep it at the bottom.
+    var stuck by remember { mutableStateOf(true) }
+    LaunchedEffect(state) {
+        snapshotFlow { state.isScrollInProgress }.collect { moving -> if (!moving) stuck = !state.canScrollForward }
+    }
+    LaunchedEffect(stuck) { pausedAt = if (stuck) null else rows.size }
     var flashKey by remember { mutableStateOf<String?>(null) }
     val merged = tab.channels.size > 1
 
-    LaunchedEffect(rows.size) {
-        if (atBottom && rows.isNotEmpty()) state.scrollToItem(rows.lastIndex)
+    LaunchedEffect(state) {
+        snapshotFlow { state.layoutInfo.totalItemsCount to state.layoutInfo.visibleItemsInfo.lastOrNull()?.let { it.offset + it.size } }.collect {
+            if (stuck && rows.isNotEmpty() && state.canScrollForward) {
+                state.scrollToItem(rows.lastIndex)
+                state.scrollBy(100000f)
+            }
+        }
     }
     // A tapped mention: scroll to its message and mark it for a moment
     LaunchedEffect(jump) {
@@ -405,7 +505,9 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), state) {
-            items(rows, key = { it.key }) { row -> MessageRow(row, onLongPress, showMark = merged, flash = row.key == flashKey) }
+            items(rows, key = { it.key }) { row ->
+                MessageRow(row, onLongPress, showMark = merged && LocalDisplay.current.showPlatformMarks, flash = row.key == flashKey, onReplyNotice = onReplyNotice)
+            }
         }
         // channels that are not connected say so (named by platform when several are merged)
         val lines = tab.channels.mapNotNull { ch ->
@@ -428,12 +530,13 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
                 }
             }
         }
-        if (!atBottom && rows.isNotEmpty()) {
+        if (!stuck && !atBottom && rows.isNotEmpty()) {
+            val more = pausedAt?.let { (rows.size - it).coerceAtLeast(0) } ?: 0
             Text(
-                "New messages ↓", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                "${if (searching) "Newest matches" else "More messages below"}${if (more > 0) " (${if (more > 999) "999+" else more})" else ""}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
                     .clip(RoundedCornerShape(50)).background(AguColors.Accent)
-                    .clickable { scope.launch { state.scrollToItem(rows.lastIndex) } }
+                    .clickable { stuck = true; scope.launch { state.scrollToItem(rows.lastIndex); state.scrollBy(100000f) } }
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }

@@ -12,7 +12,7 @@ use agu_chat_core::protocol::{HighlightRule, ModButton, Platform, Settings, Sour
 use gpui::{FontWeight, Hsla};
 use serde_json::Value;
 
-use super::chat_text::{as_link, mention_word, text_mentions_login};
+use super::chat_text::{as_link, mention_word, split_rumble_emotes, sub_split, text_mentions_login, RumblePart};
 use super::highlights::{parse_hex, rule_row_style};
 use super::inline::*;
 use super::link_card::{first_link, LinkCard};
@@ -1088,35 +1088,6 @@ fn seventv_notice(s: &SevenTvNote, base: f32, size: SizeOpt) -> BuiltRow {
     BuiltRow::Notice(NoticeSpec { system: f.finish(), text: None, raid: false, icon: None, head: None, card: None, bar: Some(token_a(theme::SLATE_500, 0.9)), reply: None, line: None })
 }
 
-/// A sub / gift notice's sentence without the name it starts with, and the byte range to bold in it (7TV bolds
-/// "Subscribed" and the gift's recipient): "Popo_Master subscribed with Prime." -> ("Subscribed with Prime.",
-/// 0..10). None when the sentence doesn't start with the user's name (an anonymous gift).
-fn sub_split(system: &str, user: &ChatUser) -> Option<(String, (usize, usize))> {
-    let sys = system.trim();
-    let lower = sys.to_lowercase();
-    let name = [&user.name, &user.login].into_iter().map(|n| n.trim().to_lowercase()).find(|n| !n.is_empty() && lower.starts_with(n.as_str()))?;
-    let rest = sys[name.len()..].trim_start();
-    if rest.is_empty() {
-        return None;
-    }
-    // "is gifting ..." reads on from the name; a past tense starts its own sentence
-    let rest = if rest.starts_with("is ") || rest.starts_with("has ") {
-        rest.to_string()
-    } else {
-        let mut c = rest.chars();
-        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
-    };
-    let bold = if rest.starts_with("Subscribed") {
-        (0, "Subscribed".len())
-    } else if let Some(i) = rest.find(" sub to ").map(|i| i + " sub to ".len()).or_else(|| rest.find(" Sub to ").map(|i| i + " Sub to ".len())) {
-        let end = rest[i..].find(|c: char| c.is_whitespace() || c == '!').map_or(rest.len(), |e| i + e);
-        (i, end)
-    } else {
-        (0, 0)
-    };
-    Some((rest, bold))
-}
-
 pub fn feed_row(f: &ModFeedEntry, ctx: &RowCtx) -> BuiltRow {
     let time = ctx.rs.timestamps.then(|| fmt_time(f.ts, false));
     BuiltRow::Feed(FeedSpec { time, text: f.text.clone(), base: ctx.rs.font_size })
@@ -1318,55 +1289,6 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::RumbleMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: 300 }), ..Default::default() };
     with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
-}
-
-/// Port of `splitRumbleEmotes` (CoChatRows.tsx): `:name:` tokens (RUMBLE_TOKEN = /:([A-Za-z0-9_+.-]{1,60}):/g)
-/// resolved against the chat's emote list; a token with no emote stays text, and like the global regex the
-/// scan then resumes AFTER its closing colon (so in "a:b:c:" a missing ":b:" never makes ":c:" a token).
-#[derive(Debug, PartialEq)]
-pub(crate) enum RumblePart<'a> {
-    Text(&'a str),
-    Emote { name: &'a str, file: String },
-}
-
-pub(crate) fn split_rumble_emotes<'a>(text: &'a str, emotes: &RumbleEmotes) -> Vec<RumblePart<'a>> {
-    if text.is_empty() {
-        return vec![];
-    }
-    if emotes.is_empty() {
-        return vec![RumblePart::Text(text)];
-    }
-    let is_tok = |c: char| c.is_ascii_alphanumeric() || "_+.-".contains(c);
-    let mut parts = Vec::new();
-    let mut last = 0;
-    let mut i = 0;
-    while i < text.len() {
-        if text.as_bytes()[i] == b':' {
-            let rest = &text[i + 1..];
-            let len = rest.find(|c: char| !is_tok(c)).unwrap_or(rest.len());
-            if (1..=60).contains(&len) && rest[len..].starts_with(':') {
-                let name = &rest[..len];
-                let end = i + 1 + len + 1;
-                if let Some(file) = emotes.get(name).and_then(|e| e.get("file")).and_then(|v| v.as_str()) {
-                    if i > last {
-                        parts.push(RumblePart::Text(&text[last..i]));
-                    }
-                    parts.push(RumblePart::Emote { name, file: file.to_string() });
-                    last = end;
-                }
-                i = end;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    if parts.is_empty() {
-        return vec![RumblePart::Text(text)];
-    }
-    if last < text.len() {
-        parts.push(RumblePart::Text(&text[last..]));
-    }
-    parts
 }
 
 fn rumble_text(f: &mut Flow, text: &str, emotes: &RumbleEmotes, col: Hsla, strike: bool, rs: &Settings) {
@@ -1782,44 +1704,8 @@ fn _unused() -> (u8, u8, u8) {
 }
 
 #[cfg(test)]
-mod sub_split_tests {
-    use super::*;
-
-    fn user(name: &str) -> ChatUser {
-        serde_json::from_value(serde_json::json!({"name": name, "login": name.to_lowercase()})).unwrap()
-    }
-
-    #[test]
-    fn splits_the_name_off_and_bolds_like_7tv() {
-        let (r, b) = sub_split("Popo_Master subscribed with Prime.", &user("Popo_Master")).unwrap();
-        assert_eq!(r, "Subscribed with Prime.");
-        assert_eq!(&r[b.0..b.1], "Subscribed");
-        let (r, b) = sub_split("KnubbeTV gifted a Tier 1 sub to necix7135i!", &user("KnubbeTV")).unwrap();
-        assert_eq!(r, "Gifted a Tier 1 sub to necix7135i!");
-        assert_eq!(&r[b.0..b.1], "necix7135i");
-        let (r, b) = sub_split("KnubbeTV is gifting 1 Tier 1 Subs to EsfandTV's community!", &user("KnubbeTV")).unwrap();
-        assert!(r.starts_with("is gifting"));
-        assert_eq!(b, (0, 0));
-        assert!(sub_split("An anonymous user gifted a Tier 1 sub to x!", &user("AnAnonymousGifter")).is_none());
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rumble_emotes_split_like_the_global_regex() {
-        let emotes: RumbleEmotes = serde_json::from_value(serde_json::json!({ "r+cooldoge": { "file": "a.png" }, "c": { "file": "c.png" } })).unwrap();
-        use RumblePart::*;
-        assert_eq!(split_rumble_emotes("hey from rumble :r+cooldoge: yo", &emotes), vec![Text("hey from rumble "), Emote { name: "r+cooldoge", file: "a.png".into() }, Text(" yo")]);
-        // a miss consumes its closing colon, so ":c:" is never formed from the tail of ":b:"
-        assert_eq!(split_rumble_emotes("a:b:c:", &emotes), vec![Text("a:b:c:")]);
-        assert_eq!(split_rumble_emotes("::c::", &emotes), vec![Text(":"), Emote { name: "c", file: "c.png".into() }, Text(":")]);
-        assert_eq!(split_rumble_emotes("time 10:30: ok :c:", &emotes), vec![Text("time 10:30: ok "), Emote { name: "c", file: "c.png".into() }]);
-        assert_eq!(split_rumble_emotes("no list :c:", &RumbleEmotes::new()), vec![Text("no list :c:")]);
-        assert_eq!(split_rumble_emotes("", &emotes), vec![]);
-    }
 
     #[test]
     fn emote_box_matches_the_css_numbers() {

@@ -44,6 +44,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var accounts by mutableStateOf<Map<String, AccountState>>(emptyMap())
         private set
+    /** How lines are drawn (the core's display settings). */
+    var display by mutableStateOf(Display())
+        private set
+    /** Link preview cards: rows ask for theirs, the core answers with a `preview` event. */
+    val previews = PreviewStore { href -> viewModelScope.launch { runCatching { Core.call("preview.get", buildJsonObject { put("href", href) }) }.getOrNull()?.let { onPreview(it) } } }
     var appVersion by mutableStateOf("")
         private set
     /** The sign-in WebView the core asked for (YouTube, X, Twitch), or null. */
@@ -72,6 +77,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "activity" -> onActivity(e.data)
                     "alert" -> alerts.fire(e.data)
                     "mentions" -> onMentions(e.data)
+                    "settings" -> withContext(Dispatchers.Main) { display = Display.parse(e.data, display) }
+                    "preview" -> onPreview(e.data)
                     "accounts" -> parseAccounts(e.data)?.let { withContext(Dispatchers.Main) { accounts = it } }
                     "login.webview", "login.show" -> onLoginRequest(e.kind, e.data)
                     "login.close", "login.forget" -> {
@@ -85,6 +92,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
+            runCatching { Core.call("settings.get") }.getOrNull()?.let { display = Display.parse(it, display) }
             alerts.prepare()
             restoreTabs()
             refreshAccounts()
@@ -152,6 +160,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val had = unread[vk]
             if (had == null || had < dot) unread[vk] = dot
         }
+    }
+
+    private suspend fun onPreview(data: JsonElement) {
+        val p = runCatching { Core.json.decodeFromJsonElement(Preview.serializer(), data) }.getOrNull() ?: return
+        withContext(Dispatchers.Main) { previews.cards[p.key] = p }
     }
 
     private suspend fun onMentions(data: JsonElement) {
@@ -264,6 +277,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun saveTabs() {
         val arr = JsonArray(tabs.map { buildJsonObject { put("name", it.name); put("channels", channelsJson(it.channels)) } })
         runCatching { Core.call("tabs.set", buildJsonObject { put("tabs", arr) }) }
+    }
+
+    /** Search a tab: only the lines that match are shown (words must all appear; `from:name` keeps one person). "" shows all. */
+    fun search(vk: String, query: String) {
+        viewModelScope.launch { runCatching { Core.call("view.search", buildJsonObject { put("vk", vk); put("query", query) }) } }
     }
 
     // ---- mentions ------------------------------------------------------------------------------
