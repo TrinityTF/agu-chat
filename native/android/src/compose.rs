@@ -1,8 +1,9 @@
 //! The message box's logic, as the desktop's send box does it, without any call to the network: what a typed text
 //! turns into (a slash command's request, a confirm step, a plain send), the suggestion strip as JSON, the emote
 //! picker as JSON. `session.rs` runs the plans.
-use agu_chat_core::protocol::Platform;
-use agu_chat_model::input::autocomplete::{Suggestions, SuggestKind};
+use agu_chat_core::protocol::{CustomCommand, Platform};
+use agu_chat_model::input::autocomplete::{command_query, Suggestion, Suggestions, SuggestKind};
+use agu_chat_model::input::custom_commands::auto_matches;
 use agu_chat_model::input::inventory::{Inventory, PickerProvider};
 use agu_chat_model::input::slash::{is_me, parse_command, parse_user_arg, plan_slash, split_args, Confirmed, Planned, SlashPlan};
 use serde_json::{json, Value};
@@ -34,6 +35,28 @@ pub fn suggestions_json(text: &str, s: &Suggestions) -> Value {
         "end": utf16_of(text, s.end),
         "items": s.items.iter().map(|i| json!({"name": i.name, "img": i.img, "hint": i.hint, "dim": i.dim, "replace": i.replace})).collect::<Vec<_>>(),
     })
+}
+
+/// `s` (what the built-in commands offer for the text before the caret) with the custom commands added, as the
+/// desktop's `with_custom_auto`: they show wherever a "/" name is being typed, a custom command hides a built-in of
+/// the same name (it wins when sent), and the hint is the first line of its text.
+pub fn with_custom(s: Option<Suggestions>, text: &str, caret: usize, cmds: &[CustomCommand]) -> Option<Suggestions> {
+    if cmds.is_empty() {
+        return s;
+    }
+    let before = &text[..caret.min(text.len())];
+    let Some(query) = command_query(before) else { return s };
+    let custom = auto_matches(query, cmds);
+    if custom.is_empty() {
+        return s;
+    }
+    let mut sug = match s {
+        Some(x) if x.kind == SuggestKind::Command => x,
+        _ => Suggestions { kind: SuggestKind::Command, start: 0, end: before.len(), items: Vec::new() },
+    };
+    sug.items.retain(|i| !custom.iter().any(|c| i.name.strip_prefix('/').is_some_and(|n| n.eq_ignore_ascii_case(&c.name))));
+    sug.items.extend(custom.into_iter().map(|m| Suggestion { replace: format!("/{} ", m.name), name: format!("/{}", m.name), img: String::new(), hint: m.label, dim: false }));
+    Some(sug)
 }
 
 fn provider_id(p: PickerProvider) -> &'static str {
@@ -262,6 +285,32 @@ mod tests {
         let out = vec![(Platform::Twitch, None), (Platform::Kick, Some("slow mode".to_string()))];
         assert_eq!(send_failures(out.clone(), true), vec!["Kick: slow mode".to_string()]);
         assert_eq!(send_failures(out, false), vec!["slow mode".to_string()]);
+    }
+
+    #[test]
+    fn custom_commands_join_the_slash_suggestions_with_a_preview() {
+        let cmds = vec![
+            CustomCommand { name: "/copypasta".into(), text: "
+first line
+second".into(), in_menu: false },
+            CustomCommand { name: "/ban".into(), text: "mine".into(), in_menu: false },
+            CustomCommand { name: "gm".into(), text: "no slash".into(), in_menu: false },
+        ];
+        let items = |s: Option<Suggestions>| s.unwrap().items.into_iter().map(|i| (i.name, i.hint, i.replace)).collect::<Vec<_>>();
+        // nothing built-in matches: a list of its own
+        let s = with_custom(None, "/cop", 4, &cmds);
+        assert_eq!(items(s), vec![("/copypasta".to_string(), "first line".to_string(), "/copypasta ".to_string())]);
+        // it replaces the whole typed word
+        assert_eq!(with_custom(None, "/cop", 4, &cmds).unwrap().end, 4);
+        // a custom command hides the built-in of the same name; a name without a slash is not completed
+        let built = Suggestions { kind: SuggestKind::Command, start: 0, end: 2, items: vec![Suggestion { name: "/ban".into(), img: String::new(), hint: "built".into(), dim: false, replace: "/ban ".into() }, Suggestion { name: "/block".into(), img: String::new(), hint: "b".into(), dim: false, replace: "/block ".into() }] };
+        let names: Vec<String> = with_custom(Some(built.clone()), "/b", 2, &cmds).unwrap().items.into_iter().map(|i| i.name).collect();
+        assert_eq!(names, vec!["/block".to_string(), "/ban".to_string()]);
+        assert!(with_custom(None, "/g", 2, &cmds).is_none());
+        // not typing a command: untouched
+        assert!(with_custom(None, "hello /cop", 10, &cmds).is_none());
+        assert!(with_custom(None, "/cop x", 6, &cmds).is_none());
+        assert_eq!(with_custom(Some(built.clone()), "/b", 2, &[]), Some(built));
     }
 
     #[test]

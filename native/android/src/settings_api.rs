@@ -20,6 +20,7 @@ pub fn meta(version: &str) -> Value {
         "maxLabel": MAX_LABEL,
         "maxCommand": MAX_COMMAND,
         "templateHelp": TEMPLATE_HELP,
+        "commandsHelp": crate::commands_api::help(),
         "repoUrl": REPO_URL,
         "issuesUrl": format!("{REPO_URL}/issues"),
         "newIssueUrl": new_issue_url(version, "android"),

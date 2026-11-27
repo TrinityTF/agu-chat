@@ -2,6 +2,7 @@
 //! `session` is the bridge (testable on desktop); `jni_glue` exposes it to Kotlin as `lol.agu.chat.Core`.
 pub mod alerts;
 pub mod card;
+pub mod commands_api;
 pub mod compose;
 pub mod hub;
 pub mod login;

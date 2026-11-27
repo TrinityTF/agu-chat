@@ -2,7 +2,7 @@
 //! Chatterino or from a commands.json copied from another computer. The logic is in
 //! `agu_chat_model::input::custom_commands`; this is the page.
 use agu_chat_core::protocol::CustomCommand;
-use agu_chat_model::input::custom_commands::{chatterino_commands_file, clean_name, command_error, merge, parse_chatterino};
+use agu_chat_model::input::custom_commands::{chatterino_commands_file, COMMANDS_HELP, clean_name, command_error, merge, parse_chatterino};
 use gpui::{div, prelude::*, px, AnyElement, ClickEvent, Context, PathPromptOptions, Window};
 use serde_json::json;
 
@@ -13,7 +13,7 @@ use crate::icons;
 use crate::text_input::InputStyle;
 use crate::theme::{self, a, c};
 
-const HELP: &str = "Type the name in the message box to send the text. Each line is its own message, and a line starting with / runs as a command. Fill-ins: {1} the first word typed after the name, {1+} that word and the rest, {channel.name}, {user.name}, {msg.id}, {msg.text}. Shift+Enter starts a new line.";
+const HELP_END: &str = " Shift+Enter starts a new line.";
 
 impl SettingsDialog {
     fn set_status(&mut self, text: impl Into<String>, warn: bool, cx: &mut Context<Self>) {
@@ -168,7 +168,7 @@ impl SettingsDialog {
         let card = || div().mb(px(12.)).rounded(px(4.)).border_1().border_color(c(theme::LINE)).bg(c(theme::RAISED)).p(px(12.));
         div()
             .child(txt(13.).mb(px(8.)).mt(px(4.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("Custom commands"))
-            .child(txt(11.).mb(px(8.)).text_color(c(theme::FAINT)).child(HELP))
+            .child(txt(11.).mb(px(8.)).text_color(c(theme::FAINT)).child(format!("{COMMANDS_HELP}{HELP_END}")))
             .child(imports)
             .child(
                 card()

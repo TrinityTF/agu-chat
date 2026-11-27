@@ -389,6 +389,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
+    /** A channel typed in the change dialog, as the add dialog reads it; null when nothing is typed. */
+    fun draftRef(platform: String, raw: String): ChannelRef? = clean(raw).takeIf { it.isNotEmpty() }?.let { refOf(platform, raw) }
+
+    /** The wording for an empty channel box. */
+    fun emptyChannelText(platform: String) = emptyName(platform)
+
+    /** The desktop's "Change channel(s)": the tab keeps its place and name and shows exactly [channels]. Null on success, else what to show. */
+    suspend fun setChannels(tab: Tab, channels: List<ChannelRef>): String? {
+        if (channels.isEmpty()) return "A tab needs at least one channel"
+        if (channels == tab.channels) return null
+        if (channels.any { it.isWhisper() } && channels.any { !it.isWhisper() }) return "A whisper can't share a split with channels."
+        return changeChannels(tab, channels)
+    }
+
+    /** "Close other tabs": every tab but [keep] is closed, with its channels. */
+    fun closeOthers(keep: Tab) {
+        for (t in tabs.toList()) if (t.id != keep.id) closeTab(t)
+        focusTab = keep.id
+    }
+
+    /** Moves a tab one place left (-1) or right (1); the order is kept with the other tabs. */
+    fun moveTab(tab: Tab, by: Int) {
+        val i = tabs.indexOfFirst { it.id == tab.id }
+        val j = i + by
+        if (i < 0 || j !in tabs.indices) return
+        tabs.add(j, tabs.removeAt(i))
+        focusTab = tab.id
+        viewModelScope.launch { saveTabs() }
+    }
+
     fun renameTab(tab: Tab, name: String) {
         val i = tabs.indexOfFirst { it.id == tab.id }
         if (i < 0) return
@@ -588,6 +618,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         parseSend(Core.call("compose.send", buildJsonObject {
             put("vk", vk); put("sks", sksJson(sks)); put("text", text)
             if (reply != null) put("reply", buildJsonObject { put("sk", reply.first); put("id", reply.second) })
+        }))
+    } catch (e: CoreError) {
+        SendResult(false, e.message ?: "Could not send", warn = true)
+    }
+
+    /** A custom command run from a message's menu: what it stands for (that message filling the placeholders) goes to the message's chat. */
+    suspend fun runCommand(vk: String, row: Row, name: String): SendResult = try {
+        parseSend(Core.call("commands.run", buildJsonObject {
+            put("vk", vk); put("sk", row.sk); put("name", name)
+            put("login", row.user?.login.orEmpty()); put("id", row.id?.content.orEmpty()); put("text", row.plainText())
         }))
     } catch (e: CoreError) {
         SendResult(false, e.message ?: "Could not send", warn = true)

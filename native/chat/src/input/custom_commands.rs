@@ -14,6 +14,9 @@ use super::autocomplete::{command_query, AutoMatch, AutoMode, AutoState};
 use agu_chat_core::protocol::CustomCommand;
 use serde_json::Value;
 
+/// The help line of the settings page, the same on every platform.
+pub const COMMANDS_HELP: &str = "Type the name in the message box to send the text. Each line is its own message, and a line starting with / runs as a command. Fill-ins: {1} the first word typed after the name, {1+} that word and the rest, {channel.name}, {user.name}, {msg.id}, {msg.text}.";
+
 /// What a command can fill in besides the typed words. Empty strings when unknown.
 #[derive(Clone, Debug, Default)]
 pub struct CommandContext {

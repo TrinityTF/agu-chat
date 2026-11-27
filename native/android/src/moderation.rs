@@ -123,7 +123,7 @@ impl Session {
         relay_api(&self.inner.bridge, source, path, method, body).await
     }
 
-    async fn relay_post(&self, source: &SourceRef, path: &str, body: Option<Value>, method: &str) -> Result<RelayResponse, String> {
+    pub(super) async fn relay_post(&self, source: &SourceRef, path: &str, body: Option<Value>, method: &str) -> Result<RelayResponse, String> {
         let r = self.relay(source, path, Some(method), body).await;
         if r.ok {
             Ok(r)

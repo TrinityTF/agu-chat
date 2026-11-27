@@ -445,7 +445,11 @@ private fun WarnDialog(ctrl: ModController, d: ModDialog.Warn) {
 /** What a long-press on a line offers: Reply, Copy, the user card, and for a moderator what the core allows on that line. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCopy: () -> Unit, onDismiss: () -> Unit, onThread: (() -> Unit)? = null) {
+fun RowActionsSheet(
+    ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCopy: () -> Unit, onDismiss: () -> Unit, onThread: (() -> Unit)? = null,
+    /** the custom commands that show in a message's menu, and what tapping one does */
+    commands: List<String> = emptyList(), onCommand: (String) -> Unit = {},
+) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = AguColors.Surface) {
         Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
             // the line itself, drawn as in chat (emotes as pictures), without mod buttons and not tappable
@@ -472,6 +476,10 @@ fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCo
                 if (m.warn) SheetRow("Warn…") { onDismiss(); ctrl.warn(row.sk, m.t) }
                 // on Rumble the mute choices' "Forever" is the ban, as in Rumble's own menu
                 if (m.ban && m.muteChoices.isEmpty()) SheetRow("Ban…", AguColors.Danger) { onDismiss(); ctrl.ban(row.sk, row.platform, m.t) }
+            }
+            if (commands.isNotEmpty() && row.kind != "modfeed") {
+                Text("Commands", color = AguColors.Muted, fontSize = 13.sp, modifier = Modifier.padding(start = 20.dp, top = 10.dp, bottom = 2.dp))
+                for (name in commands) SheetRow(name) { onDismiss(); onCommand(name) }
             }
         }
     }

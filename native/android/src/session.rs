@@ -37,7 +37,7 @@ use agu_chat_core::protocol::ConnFrame;
 use agu_chat_model::input::autocomplete::{chatters, suggest, ChangeCtx};
 use agu_chat_model::input::gate::twitch_viewer;
 use agu_chat_model::input::inventory::{build_kick_inventory, build_rumble_inventory, build_twitch_inventory, build_youtube_inventory, merge_inventories, Inventory};
-use agu_chat_model::input::slash::{confirmed_command, post_json, Confirmed};
+use agu_chat_model::input::slash::{confirmed_command, Confirmed};
 use agu_chat_model::mod_caps::{fetch_mod_caps, relay_api, CoCaps, ModCaps};
 use agu_chat_model::types::RowBody;
 use agu_chat_model::net::Net;
@@ -54,7 +54,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::alerts::{Alerter, Wants};
-use crate::compose::{byte_of, picker_json, plan_send, send_failures, suggestions_json, SendPlan, Target};
+use crate::compose::{byte_of, picker_json, plan_send, send_failures, suggestions_json, with_custom, SendPlan, Target};
+use agu_chat_model::input::custom_commands::{expand_for_message, expand_input, find as find_command, CommandContext};
+use agu_chat_model::input::slash::is_me;
 use crate::hub::{Added, Hub};
 use crate::view::{row_json, style_key, Env, Rules};
 
@@ -500,6 +502,14 @@ impl State {
             _ => None,
         });
         (last, store.source(sk).and_then(|s| s.pinned.as_ref().map(|p| p.id.clone())))
+    }
+
+    /// The account's own name on a platform ("" when not logged in), for a custom command's `{my.name}`.
+    fn me_name(&self, platform: Platform) -> String {
+        if platform == Platform::Twitch {
+            return self.rules.me_login().to_string();
+        }
+        self.rules.accounts.get(&platform).and_then(|a| a.user.as_ref()).map(|u| if u.login.is_empty() { u.name.clone() } else { u.login.clone() }).unwrap_or_default()
     }
 
     fn me_twitch_id(&self) -> String {
@@ -1652,7 +1662,8 @@ impl Session {
         let rows = st.views.get(vk).map(|v| v.store.rows());
         let names = || rows.map(|r| chatters(r, &sks)).unwrap_or_default();
         let cx = ChangeCtx { inventory: &inv.inventory, slash_ok, twitch_caps: caps.as_ref(), names: &names };
-        Ok(suggest(text, caret, &cx).map(|r| suggestions_json(text, &r)).unwrap_or(Value::Null))
+        let found = with_custom(suggest(text, caret, &cx), text, caret, &st.rules.settings.custom_commands);
+        Ok(found.map(|r| suggestions_json(text, &r)).unwrap_or(Value::Null))
     }
 
     /// `{sks, tab?, q?}` -> the emote picker: `{tabs, sections}`.
@@ -1675,15 +1686,80 @@ impl Session {
     }
 
     /// `{vk, sks, text, reply?: {sk, id}}`: what Send does. Answers `{clear, toast?, warn, confirm?}`: `clear` empties
-    /// the box, `confirm` asks first (`/clear`, `/raid`; answered with `compose.confirm`).
+    /// the box, `confirm` asks first (`/clear`, `/raid`; answered with `compose.confirm`). A custom command's name
+    /// sends what it stands for instead, line by line.
     async fn compose_send(&self, args: &Value) -> Result<Value, String> {
         let (vk, text) = (str_arg(args, "vk")?, str_arg(args, "text")?);
         let sks = sks_arg(args);
         let reply = args.get("reply").filter(|r| r.is_object()).and_then(|r| Some((r.get("sk")?.as_str()?.to_string(), r.get("id")?.as_str()?.to_string())));
+        let custom = {
+            let st = self.inner.st.lock().unwrap();
+            let cmds = &st.rules.settings.custom_commands;
+            match sks.first().and_then(|sk| st.hub.source(sk)) {
+                Some(first) if !cmds.is_empty() => {
+                    let ctx = CommandContext { channel: first.channel.clone(), me: st.me_name(first.platform), ..Default::default() };
+                    expand_input(text, cmds, &ctx)
+                }
+                _ => None,
+            }
+        };
+        match custom {
+            Some(lines) => self.send_lines(vk, &sks, lines, reply).await,
+            None => self.send_text(vk, &sks, text, reply.as_ref(), true).await,
+        }
+    }
+
+    /// `{vk, sk, name, login, id, text}`: a custom command run from a message's menu, sent to that message's chat.
+    async fn command_run(&self, args: &Value) -> Result<Value, String> {
+        let (vk, sk, name) = (str_arg(args, "vk")?, str_arg(args, "sk")?, str_arg(args, "name")?);
+        let lines = {
+            let st = self.inner.st.lock().unwrap();
+            let cmd = find_command(&st.rules.settings.custom_commands, name).ok_or("That command is gone")?;
+            let source = st.hub.source(sk).ok_or("that chat is not open")?;
+            let ctx = CommandContext {
+                channel: source.channel.clone(),
+                me: st.me_name(source.platform),
+                user: str_arg(args, "login").unwrap_or("").to_string(),
+                msg_id: str_arg(args, "id").unwrap_or("").to_string(),
+                msg_text: str_arg(args, "text").unwrap_or("").to_string(),
+            };
+            expand_for_message(cmd, &ctx)
+        };
+        self.send_lines(vk, &[sk.to_string()], lines, None).await
+    }
+
+    /// What a custom command expanded to: each line goes the way a typed line would (a "/..." line runs as that slash
+    /// command on a single Twitch chat, anything else is a message to the targets), in order, stopping at the first
+    /// failure. Answers like `compose.send`.
+    async fn send_lines(&self, vk: &str, sks: &[String], lines: Vec<String>, reply: Option<(String, String)>) -> Result<Value, String> {
+        if lines.is_empty() {
+            return Ok(json!({"clear": false, "toast": "That command has no text", "warn": true}));
+        }
+        let mut toasts: Vec<String> = Vec::new();
+        let mut reply = reply;
+        for line in &lines {
+            let r = self.send_text(vk, sks, line, reply.as_ref(), false).await?;
+            if let Some(t) = r.get("toast").and_then(|t| t.as_str()) {
+                toasts.push(t.to_string());
+            }
+            if r.get("clear") != Some(&Value::Bool(true)) {
+                return Ok(json!({"clear": false, "toast": toasts.join(" - "), "warn": true}));
+            }
+            // the reply goes with the first message line only
+            if !(line.starts_with('/') && !is_me(line)) {
+                reply = None;
+            }
+        }
+        Ok(if toasts.is_empty() { json!({"clear": true}) } else { json!({"clear": true, "toast": toasts.join(" - "), "warn": false}) })
+    }
+
+    /// One typed text to the chats: the desktop's `SendBox::send` after the custom commands. `confirm`: whether `/clear`
+    /// and `/raid` may ask (a custom command's lines can't: the user types them).
+    async fn send_text(&self, vk: &str, sks: &[String], text: &str, reply: Option<&(String, String)>, confirm: bool) -> Result<Value, String> {
         let (targets, last, pinned) = {
             let st = self.inner.st.lock().unwrap();
             let mut targets = Vec::new();
-            for sk in &sks {
+            for sk in sks {
                 let src = st.hub.source(sk).ok_or("that chat is not open")?;
                 targets.push(Target { sk: sk.clone(), platform: src.platform, whisper: src.platform == Platform::Twitch && whisper::login_of(&src.channel).is_some() });
             }
@@ -1694,13 +1770,17 @@ impl Session {
         match plan_send(text, &targets, last.as_deref(), pinned.as_deref()) {
             SendPlan::Nothing => Ok(json!({"clear": false})),
             SendPlan::Refuse(t) => Ok(toast(t, true, false)),
-            SendPlan::Confirm { target, what, text } => Ok(match what {
-                Confirmed::Clear => json!({"clear": false, "confirm": {"kind": "clear", "sk": target, "text": text}}),
-                Confirmed::Raid { login } => json!({"clear": false, "confirm": {"kind": "raid", "sk": target, "login": login, "text": text}}),
+            SendPlan::Confirm { target, what, text } => Ok(if !confirm {
+                toast(format!("Type /{} yourself to confirm it", if what == Confirmed::Clear { "clear" } else { "raid" }), true, false)
+            } else {
+                match what {
+                    Confirmed::Clear => json!({"clear": false, "confirm": {"kind": "clear", "sk": target, "text": text}}),
+                    Confirmed::Raid { login } => json!({"clear": false, "confirm": {"kind": "raid", "sk": target, "login": login, "text": text}}),
+                }
             }),
             SendPlan::Slash { target, plan } => {
                 let source = self.source_of(&target)?;
-                match post_json(&self.inner.bridge, &source, plan.path, plan.body, plan.method).await {
+                match self.relay_post(&source, plan.path, plan.body, plan.method).await {
                     Ok(_) => Ok(toast(plan.ok, false, true)),
                     Err(e) => Ok(toast(e, true, false)),
                 }
@@ -1708,7 +1788,7 @@ impl Session {
             SendPlan::Plain { text, targets: sks } => {
                 let multi = sks.len() > 1;
                 let sends = sks.iter().map(|sk| {
-                    let reply_to = reply.as_ref().filter(|(rsk, _)| rsk == sk).map(|(_, id)| id.clone());
+                    let reply_to = reply.filter(|(rsk, _)| rsk == sk).map(|(_, id)| id.clone());
                     let text = &text;
                     async move {
                         let platform = self.inner.st.lock().unwrap().hub.source(sk).map(|s| s.platform);
@@ -1860,6 +1940,16 @@ impl Session {
                 "compose.gates" => Ok(s.compose_gates(&args)),
                 "compose.send" => s.compose_send(&args).await,
                 "compose.confirm" => s.compose_confirm(&args).await,
+                "commands.run" => s.command_run(&args).await,
+                "commands.check" => Ok(crate::commands_api::check(&b.settings_get().custom_commands, &args)),
+                "commands.import" => {
+                    let text = str_arg(&args, "text")?;
+                    let out = crate::commands_api::import_json(&b.settings_get().custom_commands, text);
+                    if let Some(list) = out.get("commands") {
+                        b.settings_set(json!({"customCommands": list})).await;
+                    }
+                    Ok(json!({"status": out["status"], "warn": out["warn"]}))
+                }
                 "chat.reloadEmotes" => {
                     let sk = str_arg(&args, "sk")?.to_string();
                     let cid = {

@@ -83,7 +83,9 @@ fun ThreadSheet(vm: ChatViewModel, req: ThreadReq, onDismiss: () -> Unit, onLogi
         val msg = field.text.trim()
         if (sending || msg.isEmpty() || d.root.isEmpty()) return
         // a command would run as the chat's own: those go in the message box
-        if (msg.startsWith("/")) { scope.launch { snackbar.showSnackbar("Commands go in the message box below") }; return }
+        val word = msg.split(Regex("\\s+"), limit = 2).first()
+        val custom = vm.settings.list("customCommands").any { it.str("name").equals(word, ignoreCase = true) }
+        if (msg.startsWith("/") && !custom) { scope.launch { snackbar.showSnackbar("Commands go in the message box below") }; return }
         sending = true
         scope.launch {
             // a reply to the thread's first message, so Twitch keeps it in this thread

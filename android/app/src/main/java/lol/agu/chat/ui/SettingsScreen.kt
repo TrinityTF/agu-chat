@@ -31,6 +31,7 @@ private val sections = listOf(
     "appearance" to "Appearance and chat",
     "highlights" to "Highlights",
     "ignores" to "Ignores",
+    "commands" to "Commands",
     "modbuttons" to "Mod buttons",
     "updates" to "Updates",
     "report" to "Report a bug",
@@ -51,6 +52,7 @@ fun SettingsScreen(vm: ChatViewModel, start: String, onClose: () -> Unit) {
         "highlights" -> HighlightsSettings(vm, onBack = back)
         "ignores" -> IgnoresSettings(vm, onBack = back)
         "modbuttons" -> ModButtonsSettings(vm, onBack = back)
+        "commands" -> CommandsSettings(vm, onBack = back)
         "updates" -> UpdatesSettings(vm, onBack = back)
         "report" -> ReportSettings(vm, onBack = back)
         "about" -> AboutSettings(vm, onBack = back)
