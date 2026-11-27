@@ -338,7 +338,9 @@ private fun inlineContent(spec: Map<String, Inl>, density: Density, d: Display, 
                 val h = with(density) { GifDp.dp.toSp() }
                 val w = with(density) { (GifDp * aspect).dp.toSp() }
                 InlineTextContent(Placeholder(w, h, PlaceholderVerticalAlign.TextCenter)) {
-                    EmoteImage(s.url, d.animatedEmotes, Modifier.fillMaxSize(), onSuccess = { aspects[s.url] = it })
+                    // a tap opens the GIF's own link, as in Chatterino
+                    val uri = LocalUriHandler.current
+                    EmoteImage(s.url, d.animatedEmotes, Modifier.fillMaxSize().clickable { runCatching { uri.openUri(s.url) } }, onSuccess = { aspects[s.url] = it })
                 }
             }
             is Inl.ModBtn -> {

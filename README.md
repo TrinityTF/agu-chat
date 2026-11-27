@@ -6,13 +6,14 @@
 
 <p align="center">
   <b>Every chat, one window.</b><br />
-  A fast, native desktop chat client for streamers and moderators, on Windows and Mac.<br />
+  A fast, native chat client for streamers and moderators, on Windows, Mac and Android.<br />
   Twitch, Kick, YouTube, Rumble and X, side by side or merged into one.
 </p>
 
 <p align="center">
   <a href="https://github.com/TrinityTF/agu-chat/releases"><img alt="Download for Windows 10 / 11" src="https://img.shields.io/badge/Download-Windows%2010%20%2F%2011-9147ff?style=for-the-badge" /></a>
   <a href="https://github.com/TrinityTF/agu-chat/releases"><img alt="Download for macOS" src="https://img.shields.io/badge/Download-macOS-9147ff?style=for-the-badge&logo=apple&logoColor=white" /></a>
+  <a href="https://github.com/TrinityTF/agu-chat/releases"><img alt="Download for Android" src="https://img.shields.io/badge/Download-Android-9147ff?style=for-the-badge&logo=android&logoColor=white" /></a>
 </p>
 
 <p align="center">
@@ -96,12 +97,15 @@
 **Sending**
 - **Choose where to send:** in a merged split, the button next to the message box picks one chat or all of them. A chat you can't write in says why: "not logged in", "offline" (X, YouTube and Rumble chats only take messages while the stream is live) or "read-only".
 - **Typing:** Tab completes emotes and names; `:` searches emotes, `@` mentions people, `/` lists commands. There's an emote picker, and Up brings back what you sent.
+- **Custom commands:** save a short name like `/hello` for any text, then type the name to send it. A command can fill in words you type after it (`{1}`, `{1+}`), the channel, and, from a message's menu, that message's sender, id and text (`{user.name}`, `{msg.id}`, `{msg.text}`). Each line is its own message, and a line starting with `/` runs as a command. Set them up in **Settings → Commands**, where **Import from Chatterino** brings over the commands you already have there.
+- **Reply threads:** open a reply thread to read the whole conversation and answer in it.
 
 **Moderation**
 - **Mod mode** adds mod buttons to every message: ban, timeout, warn and delete by default, or your own set (any timeout length, or a command such as `/announce …`) in **Settings → Mod buttons**.
 - **Channel modes:** the shield in a split's header sets Shield Mode, subscribers-only, emote-only, unique chat, followers-only and slow mode, and the channel's blocked terms.
 - **User cards:** click a name for the user's messages, warnings, timeouts, bans and mod comments, with mod actions.
 - **AutoMod:** approve or deny held messages right in chat.
+- **Pinned messages:** pin a message for a set time, see who pinned what, and unpin it or set when it unpins.
 - **Slash commands** such as `/ban`, `/timeout`, `/slow`, `/announce`, `/raid` and `/pin`.
 
 **Make it yours**
@@ -125,6 +129,7 @@
 1. Download Agu Chat from [Releases](https://github.com/TrinityTF/agu-chat/releases):
    - **Windows 10 or 11 (64-bit):** `Agu-Chat-Setup-<version>-x64.exe`, then run it.
    - **macOS 11 or later (Apple Silicon, M1 and newer):** `Agu-Chat-<version>-mac.zip`. Open it and drag **Agu Chat** into Applications. The first time, right-click Agu Chat and choose **Open**, then **Open** again (the app isn't signed by Apple yet). When you first log in somewhere, allow Agu Chat to use the Keychain, where your logins are kept.
+   - **Android 9 or later (phone or tablet):** `Agu-Chat-<version>-android.apk`. Download it on your phone and open it. Android asks you to allow installing apps from your browser the first time.
 2. Click **Add a channel** in a new tab. Add channels from several platforms to one split to merge them.
 3. Log in to the platforms you want to write in under **Settings → Accounts**.
 
@@ -183,11 +188,11 @@ In **Settings → Updates** choose a channel:
 - **Beta:** every new release, so you get new features first.
 - **Stable:** only full releases (version 1.0.0 and up). Until 1.0.0 is out, every release is a beta, so Stable also receives them.
 
-New versions download in the background and install when you close Agu Chat, or right away with **Restart to update**. On a Mac this needs Agu Chat to be in Applications (or another folder you can write to); otherwise **Restart to update** opens the download page. Switching from Beta to Stable keeps your current version until a newer stable one is out.
+New versions download in the background and install when you close Agu Chat, or right away with **Restart to update**. On a Mac this needs Agu Chat to be in Applications (or another folder you can write to); otherwise **Restart to update** opens the download page. On Android, the new version downloads in the app and Android asks you to confirm the install. Switching from Beta to Stable keeps your current version until a newer stable one is out.
 
 ## Privacy
 
-Your logins are stored only on your computer, encrypted with Windows' own protection (on a Mac, with a key kept in your Keychain), and are never sent anywhere except to the platform they belong to. Twitch login happens on twitch.tv, so your password never goes through Agu Chat, and you can revoke access at any time (Twitch → Settings → Connections).
+Your logins are stored only on your device, encrypted with Windows' own protection (on a Mac, with a key kept in your Keychain; on Android, with a key kept in the Android Keystore), and are never sent anywhere except to the platform they belong to. Twitch login happens on twitch.tv, so your password never goes through Agu Chat, and you can revoke access at any time (Twitch → Settings → Connections).
 
 The one exception is Kick: its login and token refresh go through Agu Chat's sign-in service at api.agu.lol, which passes the tokens to your computer and keeps nothing. X and YouTube logins happen in a sign-in window inside Agu Chat (it shows x.com's or Google's own page, so your password goes to them only); only the resulting session is kept, encrypted on your computer like the others.
 
@@ -202,4 +207,13 @@ cd native
 cargo build --release -p agu-chat-gpui
 ```
 
-The program is `native/target/release/agu-chat-gpui.exe` (`agu-chat-gpui` on macOS; `native/installer/mac/bundle.sh` wraps it into `Agu Chat.app`). `cargo test -p agu-chat-core -p agu-chat-gpui` runs the tests.
+The program is `native/target/release/agu-chat-gpui.exe` (`agu-chat-gpui` on macOS; `native/installer/mac/bundle.sh` wraps it into `Agu Chat.app`). `cargo test -p agu-chat-core -p agu-chat-model -p agu-chat-gpui` runs the tests.
+
+The Android app is in `android/` and needs the Android SDK and NDK, JDK 17 and [cargo-ndk](https://github.com/bbqsrc/cargo-ndk):
+
+```bash
+cd native
+cargo ndk -t arm64-v8a -t x86_64 -P 28 -o ../android/app/src/main/jniLibs build --release -p agu-chat-android
+cd ../android
+./gradlew assembleDebug
+```

@@ -997,6 +997,8 @@ impl Element for InlineFlow {
                 Item::Text(t) => (t.act.is_some() || t.tip.is_some()) && matches!(p.atom.kind, AtomKind::Word { .. }),
                 Item::Image(i) => i.tip.is_some() || i.act.is_some(),
                 Item::Button(_) => true,
+                // a Twitch GIF opens its GIPHY link, as in Chatterino
+                Item::Gif(_) => true,
                 _ => false,
             };
             if interactive {
@@ -1162,6 +1164,7 @@ impl Element for InlineFlow {
                 Item::Text(t) => t.act.clone(),
                 Item::Image(i) => i.act.clone(),
                 Item::Button(b) => Some(b.act.clone()),
+                Item::Gif(g) => Some(Act::Url(g.url.clone())),
                 _ => None,
             };
             if act.is_some() {
