@@ -548,8 +548,9 @@ impl Installer for NativeInstaller {
             }
             let done = dir.join(&asset.name);
             std::fs::rename(&part, &done).map_err(|e| fail(e.to_string()))?;
+            // the Mac zip is unpacked; anything else (an Android apk in a test) stays as downloaded
             #[cfg(target_os = "macos")]
-            let done = mac::unpack(&done, &dir).map_err(fail)?;
+            let done = if target == MAC { mac::unpack(&done, &dir).map_err(fail)? } else { done };
             *ready.lock().unwrap() = Some(done);
             Ok(())
         })
