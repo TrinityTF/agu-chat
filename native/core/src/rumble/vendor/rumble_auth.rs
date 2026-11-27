@@ -333,34 +333,94 @@ pub async fn delete_message(session: &str, chat_id: &str, message_id: &str) -> R
     chat_api(&format!("/chat/api/chat/{}/message/{}", enc(chat_id), enc(message_id)), "DELETE", None, session, None).await
 }
 
-fn mute(session: &str, video_id: &str, username: &str, duration: Option<u64>) -> impl std::future::Future<Output = Result<Service, RumbleError>> {
-    let user = username.strip_prefix('@').unwrap_or(username).to_string();
-    let mut data = vec![("user_to_mute", user), ("entity_type", "user".to_string()), ("video", net::f64_value(video_id.parse::<f64>().unwrap_or(f64::NAN)).to_string())];
-    // A "video" mute is a timeout on this stream; a "total" mute with no end is the permanent ban.
-    match duration {
-        Some(d) => {
+/// How long a mute lasts, as Rumble's mute menu offers it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MuteKind {
+    /// "For 5 minutes" and the like: a mute on this stream that ends after `seconds`
+    Timed(u64),
+    /// "For this livestream": a mute on this stream with no end. INFERRED: the mod menu's own code sits behind a
+    /// moderator login, so this is read from the shape of the two documented forms (video + duration = timeout,
+    /// total + no duration = ban); a video mute without a duration is the natural third case.
+    Stream,
+    /// "Forever": the permanent mute (the ban)
+    Forever,
+}
+
+fn video_number(video_id: &str) -> String {
+    net::f64_value(video_id.parse::<f64>().unwrap_or(f64::NAN)).to_string()
+}
+
+fn bare(name: &str) -> String {
+    name.strip_prefix('@').unwrap_or(name).to_string()
+}
+
+/// The form of `moderation.mute`. `entity` is "user", or "channel" for a message posted as a channel.
+pub fn mute_form(video_id: &str, username: &str, entity: &str, kind: MuteKind) -> Vec<(&'static str, String)> {
+    let mut data = vec![("user_to_mute", bare(username)), ("entity_type", entity.to_string()), ("video", video_number(video_id))];
+    match kind {
+        MuteKind::Timed(d) => {
             data.push(("duration", d.max(1).to_string()));
             data.push(("type", "video".to_string()));
         }
-        None => data.push(("type", "total".to_string())),
+        MuteKind::Stream => data.push(("type", "video".to_string())),
+        MuteKind::Forever => data.push(("type", "total".to_string())),
     }
-    let session = session.to_string();
-    async move { service_php("moderation.mute", &data, &[], Some(&session)).await }
+    data
+}
+
+/// The form of `moderation.unmute`. `scope` is "total" (lifts a permanent mute) or "video" (a mute on this stream).
+pub fn unmute_form(video_id: &str, username: &str, entity: &str, scope: &str) -> Vec<(&'static str, String)> {
+    vec![("type", scope.to_string()), ("muted_user", bare(username)), ("entity_type", entity.to_string()), ("video", video_number(video_id))]
+}
+
+/// The form of `chat.message.pin` / `chat.message.unpin` (the unpin one is seen in Rumble's own client; pin takes
+/// the same two fields: INFERRED from the pair).
+pub fn pin_form(video_id: &str, message_id: &str) -> Vec<(&'static str, String)> {
+    vec![("video_id", video_number(video_id)), ("message_id", message_id.to_string())]
+}
+
+async fn mute(session: &str, video_id: &str, username: &str, entity: &str, kind: MuteKind) -> Result<(), RumbleError> {
+    service_php("moderation.mute", &mute_form(video_id, username, entity, kind), &[], Some(session)).await.map(|_| ())
 }
 
 /// Moderation via service.php (the slash commands live on the apex and answer "Access denied" here).
 /// Rumble takes the target by NAME, not id.
 pub async fn timeout_user(session: &str, video_id: &str, username: &str, seconds: u64) -> Result<(), RumbleError> {
-    mute(session, video_id, username, Some(seconds)).await.map(|_| ())
+    mute(session, video_id, username, "user", MuteKind::Timed(seconds)).await
 }
 
 pub async fn ban_user(session: &str, video_id: &str, username: &str) -> Result<(), RumbleError> {
-    mute(session, video_id, username, None).await.map(|_| ())
+    mute(session, video_id, username, "user", MuteKind::Forever).await
 }
 
-/// Undoing a mute needs the id of the mute RECORD, which chat messages don't carry: say so.
-pub async fn unban_user() -> Result<(), RumbleError> {
-    Err(RumbleError { message: "Unbanning has to be done on Rumble — it needs the mute record, which chat messages don't carry".into(), refused: true, ..Default::default() })
+/// "For this livestream": muted on this broadcast only, until it ends.
+pub async fn mute_for_stream(session: &str, video_id: &str, username: &str) -> Result<(), RumbleError> {
+    mute(session, video_id, username, "user", MuteKind::Stream).await
+}
+
+/// Lifts a mute by NAME. A person can be muted for the stream or forever, and a chat message doesn't say which,
+/// so with no `scope` the permanent one is tried first, then the stream one.
+pub async fn unmute_user(session: &str, video_id: &str, username: &str, scope: Option<&str>) -> Result<(), RumbleError> {
+    let scopes: Vec<&str> = match scope {
+        Some("video") => vec!["video"],
+        Some("total") => vec!["total"],
+        _ => vec!["total", "video"],
+    };
+    let mut first_err = None;
+    for s in scopes {
+        match service_php("moderation.unmute", &unmute_form(video_id, username, "user", s), &[], Some(session)).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    Err(first_err.unwrap_or_else(|| RumbleError::plain("Rumble rejected the unmute")))
+}
+
+pub async fn pin_message(session: &str, video_id: &str, message_id: &str, pin: bool) -> Result<(), RumbleError> {
+    let name = if pin { "chat.message.pin" } else { "chat.message.unpin" };
+    service_php(name, &pin_form(video_id, message_id), &[], Some(session)).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -392,5 +452,22 @@ mod tests {
         assert_eq!(id.len(), 43);
         assert!(!id.contains('='));
         assert_eq!(form(&[("a", "b c".into()), ("d", "é".into())]), "a=b+c&d=%C3%A9");
+    }
+
+    #[test]
+    fn mute_forms_match_rumbles_menu() {
+        let f = |k| mute_form("12345", "@Bob", "user", k);
+        assert_eq!(f(MuteKind::Timed(300)), vec![("user_to_mute", "Bob".into()), ("entity_type", "user".into()), ("video", "12345".into()), ("duration", "300".into()), ("type", "video".into())]);
+        assert_eq!(f(MuteKind::Stream), vec![("user_to_mute", "Bob".into()), ("entity_type", "user".into()), ("video", "12345".into()), ("type", "video".into())]);
+        assert_eq!(f(MuteKind::Forever), vec![("user_to_mute", "Bob".into()), ("entity_type", "user".into()), ("video", "12345".into()), ("type", "total".into())]);
+        assert_eq!(mute_form("1", "x", "channel", MuteKind::Forever)[1], ("entity_type", "channel".into()));
+    }
+
+    #[test]
+    fn unmute_and_pin_forms() {
+        assert_eq!(unmute_form("12345", "Bob", "user", "total"), vec![("type", "total".into()), ("muted_user", "Bob".into()), ("entity_type", "user".into()), ("video", "12345".into())]);
+        assert_eq!(unmute_form("12345", "Bob", "user", "video")[0], ("type", "video".into()));
+        assert_eq!(pin_form("12345", "m9"), vec![("video_id", "12345".into()), ("message_id", "m9".into())]);
+        assert_eq!(form(&pin_form("12345", "m 9")), "video_id=12345&message_id=m+9");
     }
 }

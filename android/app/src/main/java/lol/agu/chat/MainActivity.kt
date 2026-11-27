@@ -31,6 +31,14 @@ class MainActivity : ComponentActivity() {
         )
         setContent { AguTheme { MainScreen(vm) } }
         devFrames()
+        fromNotification(intent)
+    }
+
+    /** A tapped mention notification: show that message (its tab and line). */
+    private fun fromNotification(i: android.content.Intent?) {
+        val key = i?.getStringExtra(Notifier.EXTRA_KEY) ?: return
+        i.removeExtra(Notifier.EXTRA_KEY)
+        vm.openFromNotification(i.getStringExtra(Notifier.EXTRA_VK).orEmpty(), i.getStringExtra(Notifier.EXTRA_SK).orEmpty(), key)
     }
 
     /**
@@ -61,6 +69,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         vm.setActive(true)
+        Notifier.clearMentions(this)
     }
 
     override fun onPause() {
@@ -72,5 +81,6 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         devFrames()
+        fromNotification(intent)
     }
 }

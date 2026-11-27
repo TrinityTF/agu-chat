@@ -4,7 +4,10 @@
 use agu_chat_core::protocol::Platform;
 use serde_json::Value;
 
-use super::types::SuspiciousUser;
+use super::chat_text::{split_rumble_emotes, RumblePart};
+use super::twitch::emotes::EmoteSets;
+use super::twitch::parts::{build_kick_parts, build_parts, MsgPart};
+use super::types::{RowBody, RumbleEmotes, SuspiciousUser};
 
 /// One badge for the card's grid: a picture when the platform gives one, else a glyph chip.
 #[derive(Clone, Debug)]
@@ -158,3 +161,80 @@ pub fn kick_default_avatar(user_id: &str) -> String {
     format!("https://kick.com/img/default-profile-pictures/default-avatar-{n}.webp")
 }
 
+/// One piece of a person's line in the card's Messages list, ready to draw with the emotes in place of their codes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardPiece {
+    Text(String),
+    /// a platform's own emote / emoji picture (Rumble `:r+name:`, a YouTube emoji)
+    Image { url: String, alt: String, label: String },
+    /// the parts the chat rows draw (Twitch emote tags, Kick markup, 7TV / BTTV / FFZ words)
+    Parts(Vec<MsgPart>),
+}
+
+/// The line of any platform as the card draws it. `emotes` is the channel's emote sets (Twitch, or the Kick-linked
+/// 7TV set), `rumble` the Rumble chat's own emote list. The same conversion the chat rows use.
+pub fn card_pieces(body: &RowBody, emotes: Option<&EmoteSets>, rumble: &RumbleEmotes) -> Vec<CardPiece> {
+    match body {
+        RowBody::Msg(m) => vec![CardPiece::Parts(build_parts(&m.text, &m.emotes, emotes, None, m.gifs.as_deref().unwrap_or("")))],
+        RowBody::Kick(m) => vec![CardPiece::Parts(build_kick_parts(&m.text, emotes))],
+        RowBody::Rumble(m) => split_rumble_emotes(&m.text, rumble)
+            .into_iter()
+            .map(|p| match p {
+                RumblePart::Text(t) => CardPiece::Text(t.to_string()),
+                RumblePart::Emote { name, file } => CardPiece::Image { url: file, alt: format!(":{name}:"), label: "Rumble".into() },
+            })
+            .collect(),
+        RowBody::YouTube(m) if !m.parts.is_empty() => m
+            .parts
+            .iter()
+            .map(|p| if p.t == "emoji" && !p.u.is_empty() { CardPiece::Image { url: p.u.clone(), alt: p.a.clone(), label: if p.custom { "YouTube member emote" } else { "YouTube" }.into() } } else { CardPiece::Text(p.v.clone()) })
+            .collect(),
+        RowBody::YouTube(m) => vec![CardPiece::Text(m.text.clone())],
+        RowBody::X(m) => vec![CardPiece::Text(m.text.clone())],
+        _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod card_piece_tests {
+    use super::*;
+    use crate::types::{KickMsg, RumbleMsg, YouTubeMsg, YouTubePart};
+    use serde_json::json;
+
+    fn rumble_emotes() -> RumbleEmotes {
+        json!({"r+thisisfine": {"file": "https://e/fine.png"}, "r+cooldoge": {"file": "https://e/doge.png"}}).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn rumble_emotes_become_pictures_not_codes() {
+        let body = RowBody::Rumble(RumbleMsg { text: "wow :r+thisisfine: and :r+cooldoge:".into(), ..Default::default() });
+        assert_eq!(
+            card_pieces(&body, None, &rumble_emotes()),
+            vec![
+                CardPiece::Text("wow ".into()),
+                CardPiece::Image { url: "https://e/fine.png".into(), alt: ":r+thisisfine:".into(), label: "Rumble".into() },
+                CardPiece::Text(" and ".into()),
+                CardPiece::Image { url: "https://e/doge.png".into(), alt: ":r+cooldoge:".into(), label: "Rumble".into() },
+            ]
+        );
+        // a code the chat doesn't know stays text
+        let unknown = RowBody::Rumble(RumbleMsg { text: ":nope:".into(), ..Default::default() });
+        assert_eq!(card_pieces(&unknown, None, &rumble_emotes()), vec![CardPiece::Text(":nope:".into())]);
+    }
+
+    #[test]
+    fn kick_markup_becomes_emote_parts() {
+        let body = RowBody::Kick(KickMsg { text: "hi [emote:37226:KEKW] there".into(), ..Default::default() });
+        let CardPiece::Parts(p) = &card_pieces(&body, None, &Default::default())[0] else { panic!() };
+        assert!(p.iter().any(|x| matches!(x, MsgPart::Emote { name, id, .. } if name == "KEKW" && id == "37226")));
+    }
+
+    #[test]
+    fn youtube_emoji_become_pictures() {
+        let parts = vec![YouTubePart { t: "text".into(), v: "hey ".into(), ..Default::default() }, YouTubePart { t: "emoji".into(), u: "https://y/e.png".into(), a: ":smile:".into(), ..Default::default() }];
+        let body = RowBody::YouTube(YouTubeMsg { parts, text: "hey :smile:".into(), ..Default::default() });
+        assert_eq!(card_pieces(&body, None, &Default::default()), vec![CardPiece::Text("hey ".into()), CardPiece::Image { url: "https://y/e.png".into(), alt: ":smile:".into(), label: "YouTube".into() }]);
+        let plain = RowBody::YouTube(YouTubeMsg { text: "just text".into(), ..Default::default() });
+        assert_eq!(card_pieces(&plain, None, &Default::default()), vec![CardPiece::Text("just text".into())]);
+    }
+}

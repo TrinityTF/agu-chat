@@ -206,6 +206,8 @@ pub struct Hover {
     pub reply: Option<ReplyTarget>,
     pub pin: Option<(String, String)>,
     pub delete: Option<RowAction>,
+    /// Rumble: pin this line right away (Twitch's `pin` opens the "Pin for" menu instead)
+    pub pin_now: Option<RowAction>,
 }
 
 #[derive(Clone)]
@@ -919,6 +921,7 @@ pub fn twitch_message_row(inp: &TwitchInput) -> BuiltRow {
         reply: Some(ReplyTarget { sk: sk.clone(), platform: Platform::Twitch, id: msg.id.clone(), user: msg.user.name.clone(), text: msg.text.clone() }),
         pin: caps.pin.then(|| (sk.clone(), msg.id.clone())),
         delete: can_delete.then(|| RowAction::Delete { sk: sk.clone(), id: msg.id.clone() }),
+        pin_now: None,
     };
 
     // wrapped in the redeem / cheer frame when it is one
@@ -1242,8 +1245,10 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
     let mut actions = Vec::new();
-    if ctx.mod_buttons && can_mod {
-        let can = |b: &ModButton| b.action != "command" && b.action != "warn";
+    // Rumble lets a moderator delete any line (their own and the owner's too); muting follows `can_mod`
+    let can_delete = env.caps.can_moderate && !m.deleted;
+    if ctx.mod_buttons && (can_mod || can_delete) {
+        let can = |b: &ModButton| if b.action == "delete" { can_delete } else { b.action != "command" && b.action != "warn" && can_mod };
         let run = |b: &ModButton| RowAction::RumbleMod { sk: sk.clone(), action: if b.action == "ban" { "ban" } else if b.action == "timeout" { "timeout" } else { "delete" }, msg: Box::new(m.clone()), seconds: b.seconds };
         mod_button_items(&mut f, ctx.mod_list, &can, &run, &mut actions);
     }
@@ -1286,7 +1291,7 @@ pub fn rumble_row(row: &Row, m: &RumbleMsg, ctx: &RowCtx, env: &CoEnv, rule: Opt
     } else {
         co_frame_style(&mut spec, rule);
     }
-    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::RumbleMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: 300 }), ..Default::default() };
+    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_delete.then(|| RowAction::RumbleMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: 300 }), pin_now: (can_delete && m.notice.is_none()).then(|| RowAction::RumbleMod { sk: sk.clone(), action: "pin", msg: Box::new(m.clone()), seconds: 300 }), ..Default::default() };
     with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
 }
@@ -1500,6 +1505,7 @@ pub fn kick_row(row: &Row, m: &KickMsg, ctx: &RowCtx, env: &CoEnv, rule: Option<
         reply: (env.can_send && !m.deleted && !gift_line).then(|| ReplyTarget { sk: sk.clone(), platform: Platform::Kick, id: m.id.clone(), user: if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() }, text: m.text.clone() }),
         delete: can_delete.then(|| RowAction::KickMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()), seconds: None }),
         pin: None,
+        pin_now: None,
     };
     with_link(&mut spec, ctx, m.deleted);
     BuiltRow::Frame(spec)
@@ -1516,11 +1522,13 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
         return member_row(row, m, ctx, env, rule);
     }
     let can_mod = youtube_can_mod(m, env);
+    // YouTube's menu offers the removal for any line to a moderator, their own included
+    let can_delete = super::mod_caps::youtube_can_delete(env.caps.connected, m.menu.as_deref().unwrap_or(""));
     let sk = row.sk.clone();
     let mut f = Flow::new(base);
     let mut actions = Vec::new();
-    if ctx.mod_buttons && can_mod {
-        let can = |b: &ModButton| b.action != "command" && b.action != "warn";
+    if ctx.mod_buttons && (can_mod || can_delete) {
+        let can = |b: &ModButton| if b.action == "delete" { can_delete } else { b.action != "command" && b.action != "warn" && can_mod };
         let run = |b: &ModButton| RowAction::YoutubeMod { sk: sk.clone(), action: match b.action.as_str() { "ban" => "ban", "timeout" => "timeout", _ => "delete" }, msg: Box::new(m.clone()) };
         mod_button_items(&mut f, ctx.mod_list, &can, &run, &mut actions);
     }
@@ -1576,7 +1584,7 @@ pub fn youtube_row(row: &Row, m: &YouTubeMsg, ctx: &RowCtx, env: &CoEnv, rule: O
     } else {
         co_frame_style(&mut spec, rule);
     }
-    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_mod.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), ..Default::default() };
+    spec.hover = Hover { copy: Some(m.text.clone()), delete: can_delete.then(|| RowAction::YoutubeMod { sk: sk.clone(), action: "delete", msg: Box::new(m.clone()) }), ..Default::default() };
     with_link(&mut spec, ctx, false);
     BuiltRow::Frame(spec)
 }

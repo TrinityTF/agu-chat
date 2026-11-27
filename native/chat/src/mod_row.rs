@@ -4,7 +4,7 @@
 use agu_chat_core::protocol::Platform;
 
 use super::mod_actions::ModTarget;
-use super::mod_caps::{co_reach, mod_reach, youtube_can_mod, CoCaps, ModCaps, ModViewer};
+use super::mod_caps::{co_reach, mod_reach, youtube_can_delete, youtube_can_mod, CoCaps, ModCaps, ModViewer};
 use super::types::{Row, RowBody};
 
 /// What the viewer's account is, in the row's channel.
@@ -60,13 +60,15 @@ pub struct RowMod {
     pub warn: bool,
     pub delete: bool,
     pub unban: bool,
+    /// Rumble: "Pin this message" (a moderator or the owner may pin any line)
+    pub pin: bool,
     /// a command button (`/announce ...`) may run: any moderator on Twitch
     pub cmd: bool,
 }
 
 impl RowMod {
     pub fn any(&self) -> bool {
-        self.ban || self.timeout || self.warn || self.delete || self.unban || self.cmd
+        self.ban || self.timeout || self.warn || self.delete || self.unban || self.pin || self.cmd
     }
 }
 
@@ -79,6 +81,7 @@ fn twitch_mod(env: &ModEnv, target: ModTarget, badges: &str, deleted: bool, dele
         warn: c.warn && reach.warn && !deleted,
         delete: c.delete && reach.delete && !deleted && deletable,
         unban: c.ban && reach.ban,
+        pin: false,
         cmd: c.ban || c.delete || c.warn,
         target,
     }
@@ -99,8 +102,19 @@ pub fn row_mod(row: &Row, env: &ModEnv) -> Option<RowMod> {
         (RowBody::Rumble(m), Platform::Rumble) => {
             let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
             let badges: Vec<&str> = m.badges.iter().map(|b| b.as_str()).collect();
+            // Banning and timing out follow co_reach (nobody mutes the owner or themselves); deleting and pinning do
+            // not: Rumble lets a moderator or the owner delete any line, their own and the owner's included.
             let ok = env.co.can_moderate && !m.deleted && co_reach(Platform::Rumble, &env.viewer_login, &env.channel, target, &badges).ban;
-            RowMod { target: ModTarget { id: m.id.clone(), user_id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), menu: None }, ban: ok, timeout: ok, delete: ok, ..Default::default() }
+            let any_line = env.co.can_moderate && !m.deleted;
+            RowMod {
+                target: ModTarget { id: m.id.clone(), user_id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), menu: None },
+                ban: ok,
+                timeout: ok,
+                unban: ok,
+                delete: any_line,
+                pin: any_line && !m.notice.is_some(),
+                ..Default::default()
+            }
         }
         (RowBody::Kick(m), Platform::Kick) => {
             let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
@@ -119,7 +133,9 @@ pub fn row_mod(row: &Row, env: &ModEnv) -> Option<RowMod> {
         (RowBody::YouTube(m), Platform::Youtube) => {
             let owner = m.badges.iter().any(|b| b.icon == "OWNER");
             let ok = youtube_can_mod(env.co.connected, m.menu.as_deref().unwrap_or(""), owner, &env.viewer_id, &env.viewer_login, &m.user.id, &m.user.name);
-            RowMod { target: ModTarget { id: m.id.clone(), user_id: m.user.id.clone(), login: String::new(), name: m.user.name.clone(), menu: m.menu.clone() }, ban: ok, timeout: ok, delete: ok, ..Default::default() }
+            // YouTube's own menu for the line says whether it can be removed, and a moderator may remove their own
+            let delete = youtube_can_delete(env.co.connected, m.menu.as_deref().unwrap_or(""));
+            RowMod { target: ModTarget { id: m.id.clone(), user_id: m.user.id.clone(), login: String::new(), name: m.user.name.clone(), menu: m.menu.clone() }, ban: ok, timeout: ok, delete, ..Default::default() }
         }
         _ => return None,
     };
@@ -214,11 +230,41 @@ mod tests {
     }
 
     #[test]
-    fn rumble_has_ban_timeout_and_delete_only() {
+    fn rumble_has_mute_delete_and_pin_but_no_warn() {
         let env = ModEnv { platform: Some(Platform::Rumble), co: CoCaps { connected: true, can_moderate: true, can_delete: true }, viewer_login: "me".into(), channel: "streamer".into(), ..Default::default() };
         let f = json!({"type": "chat", "msg": {"id": "r1", "ts": 1, "text": "hi", "user": {"id": "7", "login": "viewer", "name": "Viewer"}, "badges": []}});
         let r = row_mod(&row(Platform::Rumble, "streamer", f), &env).unwrap();
-        assert!(r.ban && r.timeout && r.delete && !r.warn && !r.unban);
+        assert!(r.ban && r.timeout && r.delete && r.unban && r.pin && !r.warn);
+    }
+
+    #[test]
+    fn rumble_lets_a_moderator_delete_any_line_including_their_own_and_the_owners() {
+        let env = ModEnv { platform: Some(Platform::Rumble), co: CoCaps { connected: true, can_moderate: true, can_delete: true }, viewer_login: "me".into(), channel: "streamer".into(), ..Default::default() };
+        let f = |login: &str, badges: serde_json::Value| json!({"type": "chat", "msg": {"id": "r1", "ts": 1, "text": "hi", "user": {"id": "7", "login": login, "name": login}, "badges": badges}});
+        // my own line: delete and pin, but no mute
+        let own = row_mod(&row(Platform::Rumble, "streamer", f("me", json!([]))), &env).unwrap();
+        assert!(own.delete && own.pin && !own.ban && !own.timeout);
+        // the owner's line, by name and by badge
+        let owner = row_mod(&row(Platform::Rumble, "streamer", f("streamer", json!([]))), &env).unwrap();
+        assert!(owner.delete && !owner.ban);
+        let badge = row_mod(&row(Platform::Rumble, "streamer", f("someone", json!(["streamer"]))), &env).unwrap();
+        assert!(badge.delete && !badge.timeout);
+        // another moderator: delete yes, mute no (only the owner mutes a moderator)
+        let other = row_mod(&row(Platform::Rumble, "streamer", f("modbob", json!(["moderator"]))), &env).unwrap();
+        assert!(other.delete && !other.ban);
+        // not a moderator: nothing; a deleted line: nothing
+        assert!(row_mod(&row(Platform::Rumble, "streamer", f("me", json!([]))), &ModEnv { co: CoCaps::default(), ..env.clone() }).is_none());
+        let mut gone = f("viewer", json!([]));
+        gone["msg"]["deleted"] = json!(true);
+        assert!(row_mod(&row(Platform::Rumble, "streamer", gone), &env).is_none());
+    }
+
+    #[test]
+    fn youtube_lets_a_moderator_delete_their_own_line() {
+        let env = ModEnv { platform: Some(Platform::Youtube), co: CoCaps { connected: true, can_moderate: true, can_delete: true }, viewer_id: "UC1".into(), ..Default::default() };
+        let f = json!({"type": "chat", "messages": [{"id": "y1", "ts": 1, "text": "hi", "user": {"id": "UC1", "name": "Me"}, "badges": [], "parts": [], "menu": "m"}]});
+        let r = row_mod(&row(Platform::Youtube, "vid", f), &env).unwrap();
+        assert!(r.delete && !r.ban && !r.timeout);
     }
 
     #[test]

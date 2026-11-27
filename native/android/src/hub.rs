@@ -127,6 +127,11 @@ impl Hub {
         self.sources.contains_key(sk)
     }
 
+    /// Every channel any view holds: (source key, source).
+    pub fn all_sources(&self) -> Vec<(String, SourceRef)> {
+        self.sources.iter().map(|(k, h)| (k.clone(), h.source.clone())).collect()
+    }
+
     pub fn view_ids(&self) -> Vec<String> {
         self.views.keys().cloned().collect()
     }

@@ -7,7 +7,7 @@ const val ALL = "*"
 
 /** One chat of a tab as the send picker lists it. [reason] says why it can't be written in. */
 @Immutable
-data class SendOption(val sk: String, val platform: String, val channel: String, val canSend: Boolean, val reason: String?)
+data class SendOption(val sk: String, val platform: String, val channel: String, val canSend: Boolean, val reason: String?, val whisper: Boolean = false)
 
 /**
  * The chats of a tab and whether you can write in each: the connection's own word (a chat that is not heard from yet
@@ -24,7 +24,7 @@ fun sendOptions(tab: Tab, conns: Map<String, Conn>): List<SendOption> = tab.chan
         conn?.live == false && ch.platform != "twitch" && ch.platform != "kick" -> "offline"
         else -> "read-only"
     }
-    SendOption(sk, ch.platform, ch.channel, can, reason)
+    SendOption(sk, ch.platform, ch.shown(), can, reason, ch.isWhisper())
 }
 
 /**

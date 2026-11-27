@@ -12,6 +12,7 @@ class AguApp : Application(), SingletonImageLoader.Factory {
     override fun onCreate() {
         super.onCreate()
         Core.start(this)
+        AlertCenter.start(this)
     }
 
     /** Emotes and badges: animated WebP / GIF decoded by the platform, a memory cache sized for a busy chat. */

@@ -44,6 +44,12 @@ pub struct CardCtx {
     /// the person has a name to ignore by
     pub can_ignore: bool,
     pub emotes: Option<Arc<EmoteSets>>,
+    /// Rumble: the chat's own emote list (`:r+name:` codes)
+    pub rumble_emotes: RumbleEmotes,
+    /// the signed-in account's name on this platform (who "mine" is for Rumble's mute rules)
+    pub co_login: String,
+    /// Rumble: the id of the pinned message
+    pub pinned_id: Option<String>,
     /// newest first, at most `RECENT_MAX`
     pub recent: Vec<RowRef>,
     /// every line of the person the pane holds (the Messages count)
@@ -57,7 +63,7 @@ pub struct CardCtx {
 }
 
 #[allow(unused_imports)]
-pub use agu_chat_model::user_card::{ordinal, fmt_secs, fmt_stamp, kick_default_avatar, local_date, local_time, long_date, parse_mod_user, profile_url, sub_info, suspicious_details, CardBadge, ModUser, SubInfo};
+pub use agu_chat_model::user_card::{card_pieces, CardPiece, ordinal, fmt_secs, fmt_stamp, kick_default_avatar, local_date, local_time, long_date, parse_mod_user, profile_url, sub_info, suspicious_details, CardBadge, ModUser, SubInfo};
 
 pub const RECENT_MAX: usize = 30;
 
@@ -161,6 +167,10 @@ pub struct UserCardView {
     fitted_h: f32,
     fitted_w: f32,
     user_sized: bool,
+    /// Rumble: who is muted in this chat (None until the list came), and the "Muted users" view
+    muted: Option<Vec<mod_actions::MutedUser>>,
+    muted_open: bool,
+    muted_error: Option<String>,
     focus: gpui::FocusHandle,
     _subs: Vec<gpui::Subscription>,
 }
@@ -216,6 +226,9 @@ impl UserCardView {
             relogin: false,
             reason_mode: false,
             kick_ban_ask: false,
+            muted: None,
+            muted_open: false,
+            muted_error: None,
             reason_in,
             busy: false,
             warn_open: false,
@@ -380,7 +393,62 @@ impl UserCardView {
         let _ = self.pane.update(cx, |p, cx| p.show_toast(t, cx));
     }
 
+    /// Rumble: ask who is muted in this chat (a moderator's own read of the chat; nothing is changed).
+    fn load_muted(&mut self, cx: &mut Context<Self>) {
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        if self.platform != Platform::Rumble || !ctx.co_can_moderate {
+            return;
+        }
+        let bridge = cx.global::<Services>().bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let r = mod_actions::rumble_muted_users(&bridge, &ctx.source).await;
+            let _ = this.update(cx, |v, cx| {
+                match r {
+                    Ok(list) => {
+                        v.muted = Some(list);
+                        v.muted_error = None;
+                    }
+                    Err(e) => v.muted_error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rumble: one mute lifted from the list (or from the card's Unmute button), then the list again.
+    fn unmute(&mut self, who: mod_actions::MutedUser, cx: &mut Context<Self>) {
+        let Some(ctx) = self.pane_ctx(cx) else { return };
+        let bridge = cx.global::<Services>().bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let (done, t) = mod_actions::rumble_unmute(&bridge, &ctx.source, &who).await;
+            let _ = this.update(cx, |v, cx| {
+                v.toast(t, cx);
+                if done {
+                    if let Some(list) = v.muted.as_mut() {
+                        list.retain(|u| !u.name.eq_ignore_ascii_case(&who.name));
+                    }
+                    v.load_muted(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rumble: the muted list again a moment after a mute (Rumble applies it a beat later).
+    fn reload_muted_soon(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |v, cx| v.load_muted(cx));
+        })
+        .detach();
+    }
+
     fn load(&mut self, cx: &mut Context<Self>) {
+        if self.platform == Platform::Rumble {
+            self.load_muted(cx);
+        }
         if self.platform == Platform::Kick && !self.user.name.is_empty() {
             self.load_kick(cx);
             return;
@@ -626,44 +694,26 @@ impl UserCardView {
     fn recent_text(&self, r: &Row, ctx: &CardCtx, cx: &mut Context<Self>) -> AnyElement {
         match &r.body {
             RowBody::Msg(m) => self.twitch_line(&m.text, &m.emotes, m.gifs.as_deref().unwrap_or(""), ctx, theme::MUTED, cx),
-            RowBody::Kick(m) => div().child(SharedString::from(kick_plain(&m.text))).into_any_element(),
-            RowBody::Rumble(m) => div().child(SharedString::from(rumble_plain(&m.text))).into_any_element(),
-            RowBody::YouTube(m) => div().child(SharedString::from(m.text.clone())).into_any_element(),
-            RowBody::X(m) => div().child(SharedString::from(m.text.clone())).into_any_element(),
+            // every other platform draws its emotes and emoji as pictures, the way its chat rows do
+            RowBody::Kick(_) | RowBody::Rumble(_) | RowBody::YouTube(_) | RowBody::X(_) => {
+                let pieces = card_pieces(&r.body, ctx.emotes.as_deref(), &ctx.rumble_emotes);
+                let mut b = InlineContentBuilder::new(12.0).ratio(16.0 / 12.0);
+                b.pieces(&pieces, SizeOpt::Small, ctx.emotes.as_deref(), token(theme::MUTED), FontWeight::NORMAL);
+                let pane = self.pane.clone();
+                inline_flow(b.finish())
+                    .on_act(Rc::new(move |act, _rect, _w, cx| {
+                        if let super::inline::Act::Url(u) = act {
+                            let _ = pane.update(cx, |p, _| p.open_url(u));
+                        }
+                    }))
+                    .into_any_element()
+            }
             _ => div().into_any_element(),
         }
     }
 }
 
 use std::rc::Rc;
-
-/// `splitKickEmotes` joined back: "[emote:id:name]" shows as its name.
-fn kick_plain(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("[emote:") {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i..];
-        if let Some(j) = tail.find(']') {
-            let inner = &tail[7..j];
-            match inner.split_once(':') {
-                Some((_, name)) => out.push_str(name),
-                None => out.push_str(&tail[..=j]),
-            }
-            rest = &tail[j + 1..];
-        } else {
-            out.push_str(tail);
-            rest = "";
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Rumble lines: ":name:" emotes are dropped from the text, like the DOM's text-only join.
-fn rumble_plain(text: &str) -> String {
-    text.to_string()
-}
 
 impl Render for UserCardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1085,28 +1135,90 @@ impl Render for UserCardView {
 
         // ---- Rumble / Kick mod
         let last = ctx.recent.first().cloned();
-        if self.platform == Platform::Rumble && ctx.co_can_moderate && ctx.reach.ban {
-            if let Some(Row { body: RowBody::Rumble(m), .. }) = last.as_deref() {
+        if self.platform == Platform::Rumble && ctx.co_can_moderate {
+            // Rumble's own mod menu: Mute user (for 5 minutes / for this livestream / forever), Pin, Delete, Manage.
+            let newest = ctx.recent.iter().find_map(|r| if let RowBody::Rumble(m) = &r.body { Some(m.clone()) } else { None });
+            let live_msg = ctx.recent.iter().find_map(|r| match &r.body {
+                RowBody::Rumble(m) if !m.deleted => Some(m.clone()),
+                _ => None,
+            });
+            let can_mute = newest.as_ref().map_or(false, |m| {
+                let target = if m.user.login.is_empty() { &m.user.name } else { &m.user.login };
+                let badges: Vec<&str> = m.badges.iter().map(|b| b.as_str()).collect();
+                super::mod_caps::co_reach(Platform::Rumble, &ctx.co_login, &ctx.source.channel, target, &badges).ban
+            });
+            let me_names: Vec<String> = [self.user.login.as_str(), self.user.name.as_str()].iter().filter(|n| !n.is_empty()).map(|n| n.to_lowercase()).collect();
+            let muted_now = self.muted.as_ref().and_then(|l| l.iter().find(|u| me_names.contains(&u.name.to_lowercase())).cloned());
+            let mut section = div().flex().flex_col().gap(px(8.)).border_b_1().border_color(c(theme::LINE)).p(px(10.));
+            if let (true, Some(m)) = (can_mute, newest.clone()) {
+                let mut row = div().flex().flex_wrap().gap(px(6.));
+                for (i, (label, action, secs)) in mod_actions::RUMBLE_MUTE_CHOICES.iter().copied().enumerate() {
+                    let (sk, m) = (self.sk.clone(), m.clone());
+                    row = row.child(btn(("r-mute", i), label, if action == "ban" { BtnOpts::danger() } else { BtnOpts::default() }).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let (sk, m) = (sk.clone(), m.clone());
+                        let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action, msg: Box::new(m), seconds: secs }, cx));
+                        this.reload_muted_soon(cx);
+                    })));
+                }
+                if let Some(u) = muted_now.clone() {
+                    row = row.child(btn("r-unmute", "Unmute", BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.unmute(u.clone(), cx))));
+                }
+                section = section.child(div().child(Self::heading("Mute user")).child(row));
+            }
+            if let Some(m) = live_msg {
+                let pinned = ctx.pinned_id.as_deref() == Some(m.id.as_str());
                 let (sk1, m1, sk2, m2) = (self.sk.clone(), m.clone(), self.sk.clone(), m.clone());
-                card = card.child(
+                let (pin_label, pin_action) = if pinned { ("Unpin this message", "unpin") } else { ("Pin this message", "pin") };
+                section = section
+                    .child(div().child(Self::heading("Pin")).child(btn("r-pin", pin_label, BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let (sk, m) = (sk1.clone(), m1.clone());
+                        let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action: pin_action, msg: Box::new(m), seconds: 300 }, cx));
+                    }))))
+                    .child(div().child(Self::heading("Delete")).child(btn("r-del", "Delete this message", BtnOpts::danger()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        let (sk, m) = (sk2.clone(), m2.clone());
+                        let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action: "delete", msg: Box::new(m), seconds: 300 }, cx));
+                    }))));
+            }
+            let open = self.muted_open;
+            section = section.child(
+                div().child(Self::heading("Manage")).child(
                     div()
                         .flex()
                         .flex_wrap()
                         .gap(px(6.))
-                        .border_b_1()
-                        .border_color(c(theme::LINE))
-                        .p(px(10.))
-                        .child(btn("r-to", "Timeout 5m", BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                            let (sk, m) = (sk1.clone(), m1.clone());
-                            let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action: "timeout", msg: Box::new(m), seconds: 300 }, cx));
-                        })))
-                        .child(btn("r-ban", "Ban", BtnOpts::danger()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                            let (sk, m) = (sk2.clone(), m2.clone());
-                            let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action: "ban", msg: Box::new(m), seconds: 300 }, cx));
+                        .child(btn("r-muted", if open { "Hide muted users" } else { "Muted users" }, BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.muted_open = !this.muted_open;
+                            if this.muted_open {
+                                this.load_muted(cx);
+                            }
+                            cx.notify();
                         })))
                         .children(ignore_slot.take()),
-                );
+                ),
+            );
+            if open {
+                let mut list = div().flex().flex_col().gap(px(4.));
+                match (&self.muted, &self.muted_error) {
+                    (Some(l), _) if l.is_empty() => list = list.child(div().text_size(px(12.)).text_color(c(theme::FAINT)).child("No muted users.")),
+                    (Some(l), _) => {
+                        for (i, u) in l.iter().enumerate() {
+                            let who = u.clone();
+                            list = list.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(div().min_w_0().flex_1().text_size(px(12.)).text_color(c(theme::TEXT)).child(SharedString::from(if u.scope == "video" { format!("{} (this livestream)", u.name) } else { u.name.clone() })))
+                                    .child(btn(("r-unmute-row", i), "Unmute", BtnOpts::default()).on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| this.unmute(who.clone(), cx)))),
+                            );
+                        }
+                    }
+                    (None, Some(e)) => list = list.child(div().text_size(px(12.)).text_color(c(theme::AMBER_300)).child(SharedString::from(e.clone()))),
+                    (None, None) => list = list.child(div().text_size(px(12.)).text_color(c(theme::FAINT)).child("Loading...")),
+                }
+                section = section.child(div().child(Self::heading("Muted users")).child(list));
             }
+            card = card.child(section);
         }
         if self.platform == Platform::Kick && ctx.co_can_moderate && ctx.reach.ban && !self.user.id.is_empty() {
             if let Some(Row { body: RowBody::Kick(m), .. }) = last.as_deref() {
@@ -1294,7 +1406,7 @@ impl Render for UserCardView {
                             RowBody::Kick(m) => m.deleted,
                             _ => false,
                         };
-                        let can_del = matches!(&r.body, RowBody::Msg(_)) && ctx.caps.delete && ctx.reach.delete && !deleted;
+                        let can_del = (matches!(&r.body, RowBody::Msg(_)) && ctx.caps.delete && ctx.reach.delete && !deleted) || (matches!(&r.body, RowBody::Rumble(_)) && ctx.co_can_moderate && !deleted);
                         let mut line = div()
                             .id(("recent", i))
                             .group("recent-row")
@@ -1306,6 +1418,25 @@ impl Render for UserCardView {
                             .child(div().flex_none().text_color(c(theme::FAINT)).child(SharedString::from(fmt_time(r.ts, false))))
                             .child(div().min_w_0().flex_1().child(self.recent_text(r, &ctx, cx)));
                         if can_del {
+                            if let RowBody::Rumble(m) = &r.body {
+                                let (sk, m) = (self.sk.clone(), m.clone());
+                                line = line.child(
+                                    div()
+                                        .id(("recent-del", i))
+                                        .flex_none()
+                                        .rounded(px(2.))
+                                        .p(px(2.))
+                                        .text_color(c(theme::FAINT))
+                                        .opacity(0.)
+                                        .group_hover("recent-row", |s| s.opacity(1.))
+                                        .hover(|s| s.text_color(c(theme::RED_400)))
+                                        .child(icon(icons::TRASH, 14.))
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                                            let (sk, m) = (sk.clone(), m.clone());
+                                            let _ = this.pane.update(cx, |p, cx| p.run_action(RowAction::RumbleMod { sk, action: "delete", msg: Box::new(m), seconds: 300 }, cx));
+                                        })),
+                                );
+                            }
                             if let RowBody::Msg(m) = &r.body {
                                 let (sk, mid) = (self.sk.clone(), m.id.clone());
                                 line = line.child(

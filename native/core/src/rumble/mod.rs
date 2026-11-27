@@ -34,7 +34,7 @@ use crate::protocol::{AccountState, AccountUser, Frame, Platform};
 use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, js_string, js_to_number, js_trim, now_ms, truthy, Timer};
 use ua::set_user_agent;
-use vendor::rumble::{drain_frames, fetch_can_moderate, fetch_rumble_emotes, parse_rumble_source, resolve_rumble_source, rumble_fetch, rumble_source_key, rumble_source_url, to_rumble_chat_msg, RumbleSource};
+use vendor::rumble::{drain_frames, fetch_can_moderate, fetch_init, fetch_rumble_emotes, muted_users_from_init, pinned_from_init, parse_rumble_source, resolve_rumble_source, rumble_fetch, rumble_source_key, rumble_source_url, to_rumble_chat_msg, RumbleSource};
 use vendor::rumble_auth::{self as auth, LoginResult, RumbleError, TwoFactor};
 use vendor::rumble_hosts::{hosts_for, mark_host};
 
@@ -272,11 +272,27 @@ async fn route_action(req: RouteReq) -> Result<RouteRes, RouteError> {
                 }
                 auth::ban_user(&g.session, &g.chat_id, &username).await?;
             }
-            "unban" => {
+            // "For this livestream": muted on this broadcast, no end
+            "mutestream" => {
                 if username.is_empty() {
                     return Ok(bad("missing username"));
                 }
-                auth::unban_user().await?;
+                auth::mute_for_stream(&g.session, &g.chat_id, &username).await?;
+            }
+            // "unmute" is the Muted users list's word; "unban" is the card's. `scope`: "total" | "video" | absent
+            "unban" | "unmute" => {
+                if username.is_empty() {
+                    return Ok(bad("missing username"));
+                }
+                let scope = js_str_or_empty(Some(&b["scope"]));
+                auth::unmute_user(&g.session, &g.chat_id, &username, Some(scope.as_str()).filter(|s| !s.is_empty())).await?;
+            }
+            "pin" | "unpin" => {
+                let message_id = js_str_or_empty(Some(&b["messageId"]));
+                if message_id.is_empty() {
+                    return Ok(bad("missing messageId"));
+                }
+                auth::pin_message(&g.session, &g.chat_id, &message_id, action == "pin").await?;
             }
             "delete" => {
                 let message_id = js_str_or_empty(Some(&b["messageId"]));
@@ -309,6 +325,21 @@ async fn route_caps(req: RouteReq) -> Result<RouteRes, RouteError> {
     let can = fetch_can_moderate(&session, &chat_id).await;
     CAPS_CACHE.lock().unwrap().insert(chat_id, (can, now_ms()));
     Ok(RouteRes { status: 200, body: json!({"connected": true, "canModerate": can}) })
+}
+
+/// GET /api/rumble/muted: the people muted in this chat, `{muted: [{name, id, scope}]}`. Only a moderator's own
+/// read of the chat carries the list, so this asks Rumble fresh each time (the card's "Muted users" view).
+async fn route_muted(req: RouteReq) -> Result<RouteRes, RouteError> {
+    let r: Result<RouteRes, Fail> = async {
+        let g = require_actor(&req.source.channel).await?;
+        let Some(init) = fetch_init(&g.session, &g.chat_id).await else { return Err(Fail::Http(502, "Couldn't read the muted users from Rumble".into())) };
+        if !truthy(&init["can_moderate"]) {
+            return Err(Fail::Http(403, "Only moderators can see the muted users".into()));
+        }
+        Ok(RouteRes { status: 200, body: json!({"muted": muted_users_from_init(&init)}) })
+    }
+    .await;
+    Ok(r.unwrap_or_else(|f| fail_res(f, "Couldn't read the muted users")))
 }
 
 fn handler<F, Fut>(f: F) -> Handler
@@ -346,6 +377,7 @@ impl PlatformModule for Rumble {
             ("POST /api/rumble/send".into(), handler(route_send)),
             ("POST /api/rumble/action".into(), handler(route_action)),
             ("GET /api/rumble/caps".into(), handler(route_caps)),
+            ("GET /api/rumble/muted".into(), handler(route_muted)),
         ]
     }
 
@@ -378,6 +410,8 @@ struct St {
     backlog: Vec<Value>,
     badges: Value,
     emotes: Value,
+    // the pinned message (a chat msg), or null
+    pinned: Value,
     // Rumble only re-sends a user with the message that mentions them, so the side tables accumulate per chat id.
     users: HashMap<String, Value>,
     channels: HashMap<String, Value>,
@@ -480,6 +514,7 @@ impl RumbleSource_ {
                 backlog: Vec::new(),
                 badges: json!({}),
                 emotes: json!({}),
+                pinned: Value::Null,
                 users: HashMap::new(),
                 channels: HashMap::new(),
                 stream_state: Stream::Off,
@@ -536,6 +571,7 @@ impl RumbleSource_ {
             "status": Value::Object(st.status.clone()),
             "badges": st.badges,
             "emotes": st.emotes,
+            "pinned": st.pinned,
             "messages": st.backlog,
         })
     }
@@ -932,6 +968,9 @@ impl RumbleSource_ {
                 }
                 let msgs: Vec<Value> = data["messages"].as_array().cloned().unwrap_or_default();
                 self.seed_backlog(&msgs);
+                if let Some(p) = pinned_from_init(data) {
+                    self.set_pinned(to_msg(&p));
+                }
                 self.set_status(vec![("canModerate", json!(truthy(&data["can_moderate"])))]);
             }
             "messages" => {
@@ -946,13 +985,24 @@ impl RumbleSource_ {
             "mute_users" => self.apply_mutes(data["user_ids"].as_array().cloned().unwrap_or_default()),
             "pin_message" => {
                 let msg = if truthy(&data["message"]) { to_msg(&data["message"]) } else { Value::Null };
-                self.broadcast(json!({"type": "pin", "msg": msg}));
+                self.set_pinned(msg);
             }
-            "unpin_message" => self.broadcast(json!({"type": "pin", "msg": null})),
+            "unpin_message" => self.set_pinned(Value::Null),
             // Rumble ships new event types (raids, gifted subs, live gates) without warning; ignoring the unknown
             // ones is the whole reason this is a match and not an assertion.
             _ => {}
         }
+    }
+
+    fn set_pinned(&self, msg: Value) {
+        {
+            let mut st = self.st.lock().unwrap();
+            if st.pinned == msg {
+                return;
+            }
+            st.pinned = msg.clone();
+        }
+        self.broadcast(json!({"type": "pin", "msg": msg}));
     }
 
     fn seed_backlog(&self, raw_messages: &[Value]) {

@@ -169,6 +169,12 @@ pub fn co_reach(platform: Platform, viewer_login: &str, channel: &str, target_lo
     REACH_ALL
 }
 
+/// YouTube: whether the line can be removed. YouTube's own menu for the line (`menu`) offers the removal to a moderator
+/// or the owner, their own lines and the owner's included, so only a login and the menu are needed.
+pub fn youtube_can_delete(connected: bool, menu: &str) -> bool {
+    connected && !menu.is_empty()
+}
+
 /// YouTube: whether the account may moderate this line. It needs the message's context menu (`menu`), a login, and
 /// the line neither the channel owner's nor the account's own.
 pub fn youtube_can_mod(connected: bool, menu: &str, owner_badge: bool, viewer_id: &str, viewer_login: &str, user_id: &str, user_name: &str) -> bool {

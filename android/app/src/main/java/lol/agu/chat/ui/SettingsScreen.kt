@@ -79,7 +79,7 @@ fun SettingsScreen(vm: ChatViewModel, start: String, onClose: () -> Unit) {
 
 // ---- Appearance and chat ---------------------------------------------------------------------------------------------
 
-/** The desktop's labels, hints and order. Left out as desktop-only: Window (always on top, start with Windows) and Pause chat (mouse or Alt). */
+/** The desktop's labels, hints and order. Left out as desktop-only: Window (always on top, start with Windows) and Pause chat (mouse or Alt). Background is the phone's own. */
 @Composable
 private fun AppearanceSettings(vm: ChatViewModel, onBack: () -> Unit) {
     val s = vm.settings
@@ -93,6 +93,11 @@ private fun AppearanceSettings(vm: ChatViewModel, onBack: () -> Unit) {
             SwitchRow("Readable name colors", "Lighten dark name colors so they stay legible", s.bool("readableColors", true)) { vm.patchSettings(jo("readableColors" to it)) }
             SwitchRow("Platform marks on rows", "A small platform icon in merged co-chats", s.bool("showPlatformMarks", true)) { vm.patchSettings(jo("showPlatformMarks" to it)) }
             SwitchRow("Link previews", "A card with the title and picture under Twitch clip, YouTube, X, Streamable and Instagram links", s.bool("linkPreviews", true)) { vm.patchSettings(jo("linkPreviews" to it)) }
+            SwitchRow("Hype train bar", "Twitch's hype train at the top of the chat while one is going: level, time left and progress", s.bool("hypeTrain", true)) { vm.patchSettings(jo("hypeTrain" to it)) }
+        }
+        SettingsHeading("Background")
+        SettingsCard {
+            SwitchRow("Stay connected in the background", "Keeps your chats connected with a small notification, so mentions and highlights still alert you. Off lets the phone pause the app", vm.stayConnected) { vm.changeStayConnected(it) }
         }
         SettingsHeading("Emotes and badges")
         SettingsCard {

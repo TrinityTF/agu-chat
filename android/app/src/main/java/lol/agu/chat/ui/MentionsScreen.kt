@@ -59,7 +59,7 @@ fun MentionsScreen(vm: ChatViewModel) {
                     val go = { if (!vm.jumpToMention(e)) Toast.makeText(ctx, "That chat is no longer open", Toast.LENGTH_SHORT).show() }
                     Column(Modifier.fillMaxWidth().clickable(onClick = go).padding(vertical = 4.dp)) {
                         Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(15.dp)) { PlatformMark(e.platform) }
+                            Box(Modifier.size(15.dp), contentAlignment = Alignment.Center) { if (e.whisper) MailIcon(14) else PlatformMark(e.platform) }
                             Text(
                                 if (e.whisper) "Whisper: ${e.channel}" else e.channel,
                                 color = AguColors.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,

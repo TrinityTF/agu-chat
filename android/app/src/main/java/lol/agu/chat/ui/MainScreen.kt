@@ -1,8 +1,11 @@
 package lol.agu.chat.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -96,8 +99,8 @@ fun MainScreen(vm: ChatViewModel) {
     }
 }
 
-/** Where the add-channel dialog puts the channel: a new tab, or merged into [tab]. */
-private class AddTo(val tab: Tab?)
+/** Where the add-channel dialog puts the channel: a new tab, or merged into [tab]. [whisper] opens it on the whisper choice. */
+private class AddTo(val tab: Tab?, val whisper: Boolean = false)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -128,11 +131,20 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
 
     val current = tabs.getOrNull(pager.currentPage)
 
-    // Jump to a newly added tab (but not when the saved tabs are first restored).
-    var prevCount by remember { mutableStateOf(tabs.size) }
-    LaunchedEffect(tabs.size) {
-        if (tabs.size > prevCount && prevCount > 0) pager.animateScrollToPage(tabs.size - 1)
-        prevCount = tabs.size
+    // Jump to a tab you just added (a tab a whisper opens stays in the background, and so do restored ones).
+    val focus = vm.focusTab
+    LaunchedEffect(focus) {
+        val i = tabs.indexOfFirst { it.id == focus }
+        if (focus != null && i >= 0) pager.animateScrollToPage(i)
+        if (focus != null) vm.focusDone(focus)
+    }
+    // The first chat you open is the moment to ask for the notification permission (mentions while the app is closed).
+    val askPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(vm.askNotifications) {
+        if (vm.askNotifications) {
+            vm.notificationsAsked()
+            if (android.os.Build.VERSION.SDK_INT >= 33) runCatching { askPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        }
     }
     // Each tab keeps its own draft; replying is per tab too. The tab you look at has seen its messages.
     LaunchedEffect(current?.id) { replyTo = null; vm.select(current?.id); query = queries[current?.id].orEmpty() }
@@ -179,6 +191,14 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
                         Modifier.size(56.dp).clip(CircleShape).background(AguColors.Brand).clickable { adding = AddTo(null) },
                         contentAlignment = Alignment.Center,
                     ) { Text("+", color = Color.White, fontSize = 30.sp) }
+                    // like the desktop's empty tab: a whisper can be started from here too
+                    Row(
+                        Modifier.clip(RoundedCornerShape(22.dp)).background(AguColors.Surface2).clickable { adding = AddTo(null, whisper = true) }.padding(horizontal = 18.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        MailIcon(16)
+                        Text("Whisper", color = AguColors.Text, fontSize = 15.sp)
+                    }
                 }
             }
         } else {
@@ -212,7 +232,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
     }
 
     adding?.let { a ->
-        AddChannelDialog(vm, into = a.tab, mergeInto = current, onDismiss = { adding = null })
+        AddChannelDialog(vm, into = a.tab, mergeInto = current, startWhisper = a.whisper, onDismiss = { adding = null })
     }
 
     tabMenu?.let { tab ->
@@ -221,8 +241,10 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
                 Text(tab.title(full = true), color = AguColors.Muted, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 SheetItem("Rename") { renaming = tab; tabMenu = null }
                 SheetItem("Add a channel to this tab") { adding = AddTo(tab); tabMenu = null }
+                if (!tab.whisperOnly) SheetItem("Reload emotes") { vm.reloadEmotes(tab); tabMenu = null }
+                for (ch in tab.channels) if (!ch.isWhisper()) SheetItem("Stream link: ${ch.label()}") { vm.openStream(ch); tabMenu = null }
                 if (tab.channels.size > 1) for (ch in tab.channels) {
-                    SheetItem("Remove ${platformLabel(ch.platform)} ${ch.channel}") { vm.removeChannel(tab, ch); tabMenu = null }
+                    SheetItem("Remove ${ch.label()}") { vm.removeChannel(tab, ch); tabMenu = null }
                 }
                 SheetItem("Close tab", color = AguColors.Danger) { vm.closeTab(tab); tabMenu = null }
             }
@@ -252,7 +274,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
     menuRow?.let { row ->
         RowActionsSheet(
             mod, row,
-            onReply = if (row.kind == "msg" || row.kind == "notice") ({ replyTo = row; menuRow = null }) else null,
+            onReply = if ((row.kind == "msg" || row.kind == "notice") && !isWhisperSk(row.sk)) ({ replyTo = row; menuRow = null }) else null,
             onCopy = { copyText(ctx, row.plainText()); menuRow = null },
             onDismiss = { menuRow = null },
         )
@@ -439,7 +461,8 @@ private fun TabStrip(tabs: List<Tab>, selected: Int, vm: ChatViewModel, onSelect
                             ),
                         )
                     }
-                    for (ch in tab.channels.take(3)) Box(Modifier.padding(end = 3.dp).size(7.dp).clip(CircleShape).background(platformColor(ch.platform)))
+                    if (tab.whisperOnly) MailIcon(13, modifier = Modifier.padding(end = 3.dp))
+                    else for (ch in tab.channels.take(3)) Box(Modifier.padding(end = 3.dp).size(7.dp).clip(CircleShape).background(platformColor(ch.platform)))
                     Text(
                         tab.title(), color = if (sel) AguColors.Text else AguColors.Muted, fontSize = 14.sp,
                         fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.padding(start = 4.dp),
@@ -495,6 +518,9 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
     val modOn = vm.modMode[tab.id] == true && LocalDisplay.current.showModButtons
     CompositionLocalProvider(LocalModTab provides tab, LocalModMode provides modOn) {
     Column(Modifier.fillMaxSize()) {
+        // the hype train bars (a tap opens one's details, drawn over the list below)
+        var hypeOpen by remember { mutableStateOf<String?>(null) }
+        HypeBars(tab, vm.hype, setOfNotNull(hypeOpen)) { sk -> hypeOpen = if (hypeOpen == sk) null else sk }
         // channels that are not connected say so (named by platform when several are merged)
         val lines = tab.channels.mapNotNull { ch ->
             val conn = vm.conns[ch.sk()] ?: return@mapNotNull null
@@ -506,7 +532,7 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
                 "unavailable" -> "Unavailable"
                 else -> conn.state
             }
-            Triple(if (merged) "${platformLabel(ch.platform)}: $label" else label, conn.detail, ch.sk())
+            Triple(if (merged) "${if (ch.isWhisper()) "Whisper" else platformLabel(ch.platform)}: $label" else label, conn.detail, ch.sk())
         }
         if (lines.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().background(AguColors.Surface).padding(horizontal = 14.dp, vertical = 6.dp)) {
@@ -521,6 +547,11 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
             items(rows, key = { it.key }) { row ->
                 MessageRow(row, onLongPress, showMark = merged && LocalDisplay.current.showPlatformMarks, flash = row.key == flashKey, onReplyNotice = onReplyNotice)
             }
+        }
+        run {
+            val bars = tab.channels.count { !it.isWhisper() && vm.hype.containsKey(it.sk()) }
+            // the details sit under the bars (the bars are 52 dp each, 6 dp apart, 6 dp from the top) and over the messages: the box starts above the list by that much
+            if (bars > 0) HypeDetails(tab, vm.hype, setOfNotNull(hypeOpen), 0, Modifier.align(Alignment.TopCenter))
         }
         if (!stuck && !atBottom && rows.isNotEmpty()) {
             val more = pausedAt?.let { (rows.size - it).coerceAtLeast(0) } ?: 0
@@ -537,16 +568,20 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
     }
 }
 
-/** Add a channel: to a new tab, or merged into the tab you are on ([mergeInto]; [into] starts it on that choice). */
+/**
+ * Add a channel: to a new tab, or merged into the tab you are on ([mergeInto]; [into] starts it on that choice). The
+ * Whisper choice opens a Twitch whisper conversation with a username instead ([startWhisper] starts on it).
+ */
 @Composable
-private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, onDismiss: () -> Unit) {
-    var platform by rememberSaveable { mutableStateOf("twitch") }
+private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, startWhisper: Boolean, onDismiss: () -> Unit) {
+    var platform by rememberSaveable { mutableStateOf(if (startWhisper) "whisper" else "twitch") }
     var channel by rememberSaveable { mutableStateOf("") }
     var merge by rememberSaveable { mutableStateOf(into != null) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val dest = into ?: mergeInto
+    val whisper = platform == "whisper"
 
     fun submit() {
         if (busy) return
@@ -560,7 +595,7 @@ private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, onD
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add channel") },
+        title = { Text(if (whisper) "Whisper someone" else "Add channel") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (dest != null) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -569,25 +604,28 @@ private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, onD
                     FilterChip(selected = merge, onClick = { merge = true }, label = { Text("Merge into ${dest.title()}", maxLines = 1) }, colors = colors)
                 }
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AguColors.Surface2, selectedLabelColor = AguColors.Text)
                     for (p in platforms) FilterChip(
                         selected = platform == p, onClick = { platform = p },
                         label = { Text(platformLabel(p)) },
                         leadingIcon = { Box(Modifier.size(8.dp).clip(CircleShape).background(platformColor(p))) },
-                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AguColors.Surface2, selectedLabelColor = AguColors.Text),
+                        colors = colors,
                     )
+                    FilterChip(selected = whisper, onClick = { platform = "whisper" }, label = { Text("Whisper") }, leadingIcon = { MailIcon(14) }, colors = colors)
                 }
                 Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(AguColors.Surface2).padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    if (channel.isEmpty()) Text("Channel name", color = AguColors.Muted, fontSize = 15.sp)
+                    if (channel.isEmpty()) Text(if (whisper) "username" else "Channel name", color = AguColors.Muted, fontSize = 15.sp)
                     BasicTextField(
                         channel, { channel = it }, singleLine = true,
                         textStyle = TextStyle(color = AguColors.Text, fontSize = 15.sp),
                         cursorBrush = SolidColor(AguColors.Accent), modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                if (whisper) Text(WHISPER_HINT, color = AguColors.Muted, fontSize = 12.sp)
                 error?.let { Text(it, color = AguColors.Danger, fontSize = 13.sp) }
             }
         },
-        confirmButton = { TextButton(onClick = ::submit, enabled = !busy) { Text(if (busy) "Adding…" else "Add", color = AguColors.Accent) } },
+        confirmButton = { TextButton(onClick = ::submit, enabled = !busy) { Text(if (busy) "Adding…" else if (whisper) "Open" else "Add", color = AguColors.Accent) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = AguColors.Muted) } },
     )
 }

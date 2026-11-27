@@ -152,6 +152,7 @@ fun ComposerHost(
         locked -> gates[chosen]?.text.orEmpty()
         replyName != null -> "Reply to @$replyName"
         chosen == ALL -> "Send to " + broadcast.joinToString(" + ") { platformLabel(it.substringBefore(':')) }
+        chosenOpt?.whisper == true -> "Whisper ${chosenOpt.channel}"
         else -> "Message " + (if (chosenOpt?.platform == "twitch") "#" else "") + chosenOpt?.channel.orEmpty()
     }
 

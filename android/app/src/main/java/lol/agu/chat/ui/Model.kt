@@ -256,6 +256,18 @@ data class SavedTab(val name: String = "", val channels: List<ChannelRef> = empt
 /** The core's source key of a channel (Twitch and Kick names are kept lowercase). */
 fun ChannelRef.sk(): String = "$platform:${if (platform == "twitch" || platform == "kick") channel.lowercase() else channel}"
 
+/** A Twitch whisper conversation is a reserved channel, `whisper:<login>` (the core's `twitch/whisper.rs`). */
+fun ChannelRef.isWhisper(): Boolean = platform == "twitch" && channel.startsWith("whisper:")
+
+/** What a channel is called on screen: a whisper conversation shows the other person. */
+fun ChannelRef.shown(): String = if (isWhisper()) channel.removePrefix("whisper:") else channel
+
+/** `isWhisper` for a source key (`twitch:whisper:bob`). */
+fun isWhisperSk(sk: String): Boolean = sk.startsWith("twitch:whisper:")
+
+/** The channel in a sentence ("Twitch agu", "whisper bob"). */
+fun ChannelRef.label(): String = if (isWhisper()) "whisper ${shown()}" else "${platformLabel(platform)} $channel"
+
 /**
  * An open tab: one or more channels from any platforms merged into one list. [id] is the core's view key; [name] is
  * the user's own title ("" shows the channels' names).
@@ -267,9 +279,12 @@ data class Tab(val id: String, val name: String, val channels: List<ChannelRef>)
     /** The title in the tab strip: the name, else the first channel (and "…" when there are more). */
     fun title(full: Boolean = false): String = when {
         name.isNotBlank() -> name
-        full || channels.size < 2 -> channels.joinToString(", ") { it.channel }
-        else -> channels.first().channel + ", …"
+        full || channels.size < 2 -> channels.joinToString(", ") { it.shown() }
+        else -> channels.first().shown() + ", …"
     }
+
+    /** A tab that holds nothing but whisper conversations (its mark is an envelope). */
+    val whisperOnly get() = channels.isNotEmpty() && channels.all { it.isWhisper() }
 }
 
 /** What a tab's small circle says; a mention beats live, live beats new messages. */
@@ -278,6 +293,33 @@ enum class Dot { Message, Live, Highlight }
 /** One line of the Mentions screen. */
 @Immutable
 data class MentionEntry(val id: String, val vk: String, val sk: String, val channel: String, val platform: String, val ts: Long, val read: Boolean, val whisper: Boolean, val row: Row)
+
+/** One Twitch channel's hype train bar (the core's `hype` event, see `hype_json` in native/android/src/session.rs). */
+@Serializable
+@Immutable
+data class HypeEmoteInfo(val token: String = "", val url: String = "")
+
+@Serializable
+@Immutable
+data class HypeConductor(val name: String = "", val avatar: String = "", val what: String = "")
+
+@Serializable
+@Immutable
+data class HypeTrain(
+    val id: String = "",
+    val level: Int = 1,
+    val percent: Int = 0,
+    /** unix ms; null when Twitch sent no end time */
+    val expiresMs: Long? = null,
+    /** the bar's fill, `#rrggbb` */
+    val fill: String = "#9147ff",
+    /** what is left of the level, as text: "3,300 Bits", "7 Subs" */
+    val bits: String = "",
+    val subs: String = "",
+    val emotes: List<HypeEmoteInfo> = emptyList(),
+    val info: List<String> = emptyList(),
+    val conductors: List<HypeConductor> = emptyList(),
+)
 
 /** Show this row of this tab (a tapped mention), once. */
 @Immutable

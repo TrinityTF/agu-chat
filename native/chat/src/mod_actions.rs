@@ -148,8 +148,11 @@ impl ModTarget {
 }
 
 /// Rumble moderation targets the PERSON (`user.login`), not the channel a message was posted under.
+///
+/// Actions: "timeout" (`seconds`), "ban" (forever), "mutestream" (for this livestream), "unban" / "unmute"
+/// (lift a mute), "delete", "pin" / "unpin" (a message). The relay's `/api/rumble/action` takes these bodies.
 pub fn rumble_body(action: &str, message_id: &str, who: &str, seconds: u32) -> Value {
-    if action == "delete" {
+    if matches!(action, "delete" | "pin" | "unpin") {
         json!({"action": action, "messageId": message_id})
     } else if action == "timeout" {
         json!({"action": action, "username": who, "seconds": seconds})
@@ -220,7 +223,7 @@ pub fn plan(platform: Platform, action: &str, t: &ModTarget, seconds: Option<u32
             (ModRequest { path: "/api/mod/action", method: "POST", body }, ok)
         }
         Platform::Rumble => {
-            if !matches!(action, "ban" | "timeout" | "delete") {
+            if !matches!(action, "ban" | "timeout" | "delete" | "mutestream" | "unban" | "unmute" | "pin" | "unpin") {
                 return Err("Rumble can't do that".into());
             }
             let who = t.rumble_who();
@@ -228,6 +231,10 @@ pub fn plan(platform: Platform, action: &str, t: &ModTarget, seconds: Option<u32
             let ok = match action {
                 "timeout" => format!("timed out {who} on Rumble ({})", format_duration(secs as i64)),
                 "ban" => format!("banned {who} on Rumble"),
+                "mutestream" => format!("muted {who} for this livestream on Rumble"),
+                "unban" | "unmute" => format!("unmuted {who} on Rumble"),
+                "pin" => "pinned on Rumble".to_string(),
+                "unpin" => "unpinned on Rumble".to_string(),
                 _ => "deleted on Rumble".to_string(),
             };
             (ModRequest { path: "/api/rumble/action", method: "POST", body: rumble_body(action, &t.id, &who, secs) }, Some(ok))
@@ -306,6 +313,52 @@ pub fn plan_result(p: &ModPlan, r: &RelayResponse) -> (bool, ToastMsg) {
 async fn run(bridge: &Arc<dyn AguBridge>, source: &SourceRef, p: &ModPlan) -> (bool, ToastMsg) {
     let r = relay_api(bridge, source, p.req.path, Some(p.req.method), Some(p.req.body.clone())).await;
     plan_result(p, &r)
+}
+
+/// Rumble's mod menu, in its own words: the mute choices as (label, action, seconds).
+pub const RUMBLE_MUTE_CHOICES: [(&str, &str, u32); 3] = [("For 5 minutes", "timeout", 300), ("For this livestream", "mutestream", 0), ("Forever", "ban", 0)];
+
+/// One entry of Rumble's "Muted users" list. `scope` is "video" (this livestream) or "total".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MutedUser {
+    pub name: String,
+    pub id: String,
+    pub scope: String,
+}
+
+/// The list request (`GET /api/rumble/muted`) and its answer `{muted: [{name, id, scope}]}`.
+pub const RUMBLE_MUTED_PATH: &str = "/api/rumble/muted";
+
+pub fn parse_muted(body: &Value) -> Vec<MutedUser> {
+    let s = |u: &Value, k: &str| u.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    body.get("muted").and_then(|m| m.as_array()).into_iter().flatten().map(|u| MutedUser { name: s(u, "name"), id: s(u, "id"), scope: s(u, "scope") }).filter(|u| !u.name.is_empty()).collect()
+}
+
+/// The body that lifts one entry of the muted list (its scope picks the right Rumble call).
+pub fn unmute_body(u: &MutedUser) -> Value {
+    let mut b = json!({"action": "unmute", "username": u.name});
+    if !u.scope.is_empty() {
+        b["scope"] = json!(u.scope);
+    }
+    b
+}
+
+/// Rumble's "Muted users": (ok, the list or the toast saying why not).
+pub async fn rumble_muted_users(bridge: &Arc<dyn AguBridge>, source: &SourceRef) -> Result<Vec<MutedUser>, String> {
+    let r = relay_api(bridge, source, RUMBLE_MUTED_PATH, Some("GET"), None).await;
+    if !r.ok {
+        return Err(fail_text(&r, "Couldn't read the muted users"));
+    }
+    Ok(parse_muted(&r.body))
+}
+
+/// Lifts one mute from the list.
+pub async fn rumble_unmute(bridge: &Arc<dyn AguBridge>, source: &SourceRef, u: &MutedUser) -> (bool, ToastMsg) {
+    let r = relay_api(bridge, source, "/api/rumble/action", Some("POST"), Some(unmute_body(u))).await;
+    if !r.ok {
+        return (false, warn(fail_text(&r, "Rumble rejected the action")));
+    }
+    (true, ok_toast(format!("unmuted {} on Rumble", u.name)))
 }
 
 pub async fn rumble_mod_action(bridge: &Arc<dyn AguBridge>, source: &SourceRef, action: &str, msg: &RumbleMsg, seconds: u32) -> ToastMsg {
@@ -410,7 +463,24 @@ mod plan_tests {
         assert_eq!(p(Platform::Rumble, "delete", None, "").req.body, json!({"action": "delete", "messageId": "m1"}));
         assert_eq!(p(Platform::Rumble, "timeout", Some(300), "").ok.as_deref(), Some("timed out bob on Rumble (5m)"));
         assert_eq!(p(Platform::Rumble, "ban", None, "").ok.as_deref(), Some("banned bob on Rumble"));
-        assert!(plan(Platform::Rumble, "unban", &t(), None, "", true).is_err());
+        assert!(plan(Platform::Rumble, "warn", &t(), None, "", true).is_err());
+        assert_eq!(p(Platform::Rumble, "mutestream", None, "").req.body, json!({"action": "mutestream", "username": "bob"}));
+        assert_eq!(p(Platform::Rumble, "unban", None, "").req.body, json!({"action": "unban", "username": "bob"}));
+        assert_eq!(p(Platform::Rumble, "pin", None, "").req.body, json!({"action": "pin", "messageId": "m1"}));
+        assert_eq!(p(Platform::Rumble, "unpin", None, "").req.body, json!({"action": "unpin", "messageId": "m1"}));
+        assert_eq!(p(Platform::Rumble, "mutestream", None, "").ok.as_deref(), Some("muted bob for this livestream on Rumble"));
+        assert_eq!(p(Platform::Rumble, "unban", None, "").ok.as_deref(), Some("unmuted bob on Rumble"));
+        assert_eq!(p(Platform::Rumble, "pin", None, "").ok.as_deref(), Some("pinned on Rumble"));
+        assert_eq!(RUMBLE_MUTE_CHOICES.map(|c| c.0), ["For 5 minutes", "For this livestream", "Forever"]);
+    }
+
+    #[test]
+    fn the_muted_list_parses_and_unmutes_by_scope() {
+        let l = parse_muted(&json!({"muted": [{"name": "Bob", "id": "7", "scope": "video"}, {"name": "", "id": "1"}, {"name": "Al"}]}));
+        assert_eq!(l, vec![MutedUser { name: "Bob".into(), id: "7".into(), scope: "video".into() }, MutedUser { name: "Al".into(), ..Default::default() }]);
+        assert_eq!(unmute_body(&l[0]), json!({"action": "unmute", "username": "Bob", "scope": "video"}));
+        assert_eq!(unmute_body(&l[1]), json!({"action": "unmute", "username": "Al"}));
+        assert!(parse_muted(&json!({})).is_empty());
     }
 
     #[test]

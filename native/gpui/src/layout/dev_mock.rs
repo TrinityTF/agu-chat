@@ -214,7 +214,8 @@ fn harness_log(platform: Platform) -> Value {
         Platform::Rumble => json!({ "type": "chatlog", "messages": [
             { "platform": "rumble", "id": "r1", "ts": now - 25000, "user": { "id": "ru1", "login": "rumbler", "name": "Rumbler", "color": "#85c742", "avatar": "" }, "badges": [], "text": "hey from rumble :r+cooldoge: yo", "emotes": "", "action": false, "firstMsg": false, "reply": null, "isFollower": true, "channel": null, "rant": null, "notice": null },
             { "platform": "rumble", "id": "r2", "ts": now - 18000, "user": { "id": "ru2", "login": "rich", "name": "Rich", "color": "#ffaa00", "avatar": "" }, "badges": [], "text": "have a rant", "emotes": "", "action": false, "firstMsg": false, "reply": null, "isFollower": true, "channel": null, "rant": { "cents": 500, "duration": 60, "expiresAt": now + 60000 }, "notice": null }
-        ], "status": { "live": true }, "emotes": {}, "badges": {} }),
+        ], "status": { "live": true }, "emotes": { "r+cooldoge": { "file": "https://ctrl.rumble.com/emotes/cooldoge.png" } }, "badges": {},
+        "pinned": { "platform": "rumble", "id": "r0", "ts": now - 60000, "user": { "id": "ru0", "login": "rumblemod", "name": "RumbleMod", "color": "#ffffff", "avatar": "" }, "badges": ["moderator"], "text": "be nice :r+cooldoge:", "emotes": "", "action": false, "firstMsg": false, "reply": null, "isFollower": true, "channel": null, "rant": null, "notice": null } }),
         Platform::Kick => json!({ "type": "chatlog", "messages": [
             { "platform": "kick", "id": "k1", "ts": now - 22000, "user": { "id": "ki1", "login": "kicker", "name": "Kicker", "color": "#53fc18", "avatar": "", "verified": true, "anonymous": false }, "badges": [{ "type": "moderator", "text": "Moderator", "count": 0 }, { "type": "subscriber", "text": "Subscriber", "count": 3 }], "text": "kick message [emote:37226:KEKW] nice", "reply": null, "action": false, "notice": null },
             { "platform": "kick", "id": "k2", "ts": now - 20000, "user": { "id": "ki2", "login": "replier", "name": "Replier", "color": "#ff7a59", "avatar": "", "verified": false, "anonymous": false }, "badges": [], "text": "fair point", "reply": { "id": "o1", "text": "my take on it", "name": "MockKick" }, "action": false, "notice": null }
@@ -407,6 +408,7 @@ impl AguBridge for MockBridge {
                 }
                 "/api/twitch/card/comment" => ok(json!({ "comment": { "id": "c3", "ts": chrono::Utc::now().to_rfc3339(), "text": "(mock) comment", "by": "a_g_u__", "byName": "a_g_u__", "byId": "1" }, "ok": true })),
                 "/api/mod/caps" => ok(json!({ "pin": true, "modes": true, "shield": true, "terms": true, "ban": true, "warn": true, "delete": true, "automod": true, "loggedIn": true, "isMod": true })),
+                "/api/rumble/muted" => ok(json!({ "muted": [{ "name": "Spammer", "id": "9", "scope": "total" }, { "name": "Loudguy", "id": "", "scope": "video" }] })),
                 "/api/rumble/caps" | "/api/kick/caps" => ok(json!({ "connected": true, "canModerate": true, "canDelete": true })),
                 "/api/chat/badges" if std::env::var("AGU_HARNESS").is_ok() => ok(json!({ "channelId": "12826", "global": [
                     { "set_id": "moderator", "versions": [{ "id": "1", "image_url_2x": "https://static-cdn.jtvnw.net/badges/v1/3267646d-33f0-4b17-b3df-f923a41db1d0/2", "title": "Moderator" }] },

@@ -8,6 +8,10 @@
 //! - `activity` `{vk, kind}`: new messages in a view ("message", or "highlight" for a mention / highlight rule).
 //! - `alert`    `{sound: {file, volume} | null, vibrate}`: play the sound / vibrate for a highlight.
 //! - `mentions` `{unread, total}`: the bell's count (the list is the `mentions.list` call).
+//! - `notify`   `{vk, key, sk, channel, user, text, whisper}`: a mention or highlight that came while the app was in the
+//!              background (the app posts a notification; tapping it opens that message).
+//! - `whisper`  `{login, name}`: someone whispered the account and it is not an ignored user (the app opens a tab).
+//! - `hype`     `{sk, train: {...} | null}`: a Twitch channel's hype train, or none (the bar).
 //! - `accounts` the `AccountsState` map; `settings` the settings object.
 //! - `login.webview` / `login.show` / `login.close` / `login.forget`: the cookie logins' sign-in screen (`login.rs`).
 //!
@@ -25,8 +29,9 @@ use agu_chat_core::protocol::{AccountsState, AguBridge, Platform, Settings, Sour
 use agu_chat_core::twitch::whisper;
 use agu_chat_core::{AppMeta, Backend};
 use agu_chat_model::alerts::ping_samples;
-use agu_chat_model::ignores::IgnoreCache;
-use agu_chat_model::mentions::{classify, mention_id, row_deleted, Alert, Mentions};
+use agu_chat_model::hype_train::{contributes, expired, fill_color, info_lines, parse as parse_hype, HypeState, HypeTrain, ACTIVE_POLL, ERROR_POLL, IDLE_POLL, SOON};
+use agu_chat_model::ignores::{is_user_ignored, IgnoreCache};
+use agu_chat_model::mentions::{classify, is_whisper_key, mention_id, row_deleted, Alert, Mentions};
 use agu_chat_core::chat_rules::{chat_gate, GateLevel};
 use agu_chat_core::protocol::ConnFrame;
 use agu_chat_model::input::autocomplete::{chatters, suggest, ChangeCtx};
@@ -36,7 +41,7 @@ use agu_chat_model::input::slash::{confirmed_command, post_json, Confirmed};
 use agu_chat_model::mod_caps::{fetch_mod_caps, relay_api, CoCaps, ModCaps};
 use agu_chat_model::types::RowBody;
 use agu_chat_model::net::Net;
-use agu_chat_model::search::{parse_search, SearchQuery};
+use agu_chat_model::search::{parse_search, row_text, SearchQuery};
 use agu_chat_model::store::{source_key, ChatStore};
 use agu_chat_model::twitch::badges::BadgeMap;
 use agu_chat_model::twitch::cheermotes::{load_cheermotes, Cheermotes};
@@ -61,6 +66,8 @@ use moderation::{build_mod_env, DevRelay};
 pub type Sink = Arc<dyn Fn(&str, &Value) + Send + Sync>;
 
 const FLUSH_MS: u64 = 60;
+/// The source key of the whisper inbox (core's reserved `whisper:*` channel): it only says who whispered.
+const INBOX_SK: &str = "twitch:whisper:*";
 
 /// What is known of one channel, whichever views show it.
 #[derive(Default)]
@@ -115,11 +122,14 @@ struct View {
     search: Option<SearchQuery>,
     /// chatters whose 7TV style just arrived: their rows are sent again
     restyle: HashSet<String>,
+    /// a whisper opened this tab: its conversation comes in as a snapshot (never news by itself), whose newest line
+    /// is the mention
+    whisper_pending: bool,
 }
 
 impl View {
     fn new() -> Self {
-        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new() }
+        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new(), whisper_pending: false }
     }
 
     /// The rows event since the last one, or None when nothing changed.
@@ -191,6 +201,37 @@ fn whisper_or_channel(s: &SourceRef) -> String {
     s.channel.clone()
 }
 
+/// The `hype` event: the bar of one Twitch channel, or `null` when its train is over.
+fn hype_json(sk: &str, t: Option<&HypeTrain>) -> Value {
+    use agu_chat_model::hype_train::plural;
+    let train = t.map(|t| {
+        json!({
+            "id": t.id, "level": t.level, "percent": t.percent, "expiresMs": t.expires_ms,
+            "fill": format!("#{:06x}", fill_color(t.color)),
+            "bits": plural(t.bits, "Bit", "Bits"), "subs": plural(t.subs, "Sub", "Subs"),
+            "emotes": t.emotes.iter().map(|e| json!({"token": e.token, "url": e.url})).collect::<Vec<_>>(),
+            "info": info_lines(t),
+            "conductors": t.conductors.iter().map(|c| json!({"name": c.name, "avatar": c.avatar, "what": if c.source == "BITS" { plural(c.quantity, "Bit", "Bits") } else { plural(c.quantity, "Sub", "Subs") }})).collect::<Vec<_>>(),
+        })
+    });
+    json!({"sk": sk, "train": train})
+}
+
+/// The "notify" event for a mention or highlight: who said what, for the background notification.
+fn notify_json(vk: &str, r: &agu_chat_model::types::Row, channel: &str) -> Value {
+    let user = match &r.body {
+        RowBody::Msg(m) => if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() },
+        RowBody::Rumble(m) => m.user.name.clone(),
+        RowBody::Kick(m) => m.user.name.clone(),
+        RowBody::X(m) => m.user.name.clone(),
+        RowBody::YouTube(m) => m.user.name.clone(),
+        RowBody::Notice(n) => n.user.name.clone(),
+        RowBody::Automod(h) => h.user.name.clone(),
+        RowBody::ModFeed(_) => String::new(),
+    };
+    json!({"vk": vk, "key": r.key, "sk": r.sk, "channel": channel, "user": user, "text": row_text(r), "whisper": is_whisper_key(&r.sk)})
+}
+
 struct State {
     hub: Hub,
     views: HashMap<String, View>,
@@ -216,13 +257,15 @@ struct State {
     personal_requested: HashSet<String>,
     /// counts every change of emote data: an inventory built for an older count is built again
     inv_gen: u64,
+    /// per Twitch channel: its hype train and when to ask next
+    hype: HashMap<String, HypeState>,
 }
 
 type Out = Vec<(&'static str, Value)>;
 
 impl State {
     fn new() -> State {
-        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0, personal: Vec::new(), personal_requested: HashSet::new(), inv_gen: 0 }
+        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0, personal: Vec::new(), personal_requested: HashSet::new(), inv_gen: 0, hype: HashMap::new() }
     }
 
     /// Everything shown depends on these (settings, accounts): draw all rows again.
@@ -273,6 +316,19 @@ impl State {
         let now = Instant::now();
         let mut max_ord = view.seen_ord;
         let mut activity: Option<&str> = None;
+        // A whisper that opened its tab came in with the conversation's snapshot: its newest line is the news.
+        if view.whisper_pending {
+            if let Some(r) = view.store.rows().iter().rev().find(|r| is_whisper_key(&r.sk) && matches!(r.body, RowBody::Msg(_))).cloned() {
+                view.whisper_pending = false;
+                if !rules.is_own(&r) && !row_deleted(&r) && !rules.hidden(&r) {
+                    activity = Some("highlight");
+                    let channel = hub.source(&r.sk).map(|s| whisper_or_channel(&s)).unwrap_or_default();
+                    if mentions.add(vk, &channel, r.clone(), *mentions_open) && !*active && (rules.settings.mention_sound || rules.settings.mention_flash) {
+                        out.push(("notify", notify_json(vk, &r, &channel)));
+                    }
+                }
+            }
+        }
         for r in view.store.rows().iter() {
             if r.ord <= view.seen_ord {
                 continue;
@@ -281,16 +337,23 @@ impl State {
             let (own, hidden) = (rules.is_own(r), rules.hidden(r));
             let Some(alert) = classify(r, own, hidden, rules.me_login(), rules.kick_me(), || rules.rule_of(r)) else { continue };
             activity = activity.or(Some("message"));
-            if alert.red() {
+            let red = alert.red();
+            let mut news = false;
+            let mut channel = String::new();
+            if red {
                 activity = Some("highlight");
-                let channel = hub.source(&r.sk).map(|s| whisper_or_channel(&s)).unwrap_or_default();
-                mentions.add(vk, &channel, r.clone(), *mentions_open);
+                channel = hub.source(&r.sk).map(|s| whisper_or_channel(&s)).unwrap_or_default();
+                news = mentions.add(vk, &channel, r.clone(), *mentions_open);
             }
             let wants = match alert {
                 Alert::Plain => continue,
                 Alert::Mention => Wants { sound: rules.settings.mention_sound, sound_file: String::new(), flash: rules.settings.mention_flash },
                 Alert::Rule(rule) => Wants { sound: rule.sound, sound_file: rule.sound_file.clone(), flash: rule.flash },
             };
+            // in the background a mention or highlight that alerts at all also becomes a notification
+            if news && !*active && (wants.sound || wants.flash) {
+                out.push(("notify", notify_json(vk, r, &channel)));
+            }
             if let Some(f) = alerter.once(&mention_id(r), &wants, &rules.settings, *active, now) {
                 out.push(("alert", json!({"sound": f.sound.map(|(file, volume)| json!({"file": file, "volume": volume})), "vibrate": f.vibrate})));
             }
@@ -396,6 +459,66 @@ impl State {
         Some(json!({"level": match g.level { GateLevel::Blocked => "blocked", GateLevel::Restricted => "restricted", GateLevel::Info => "info" }, "text": g.text}))
     }
 
+    // ---- hype train ----------------------------------------------------------------------------
+
+    /// A sub or Bits in this Twitch chat: look for a train soon.
+    fn hype_poke(&mut self, sk: &str) {
+        if let Some(s) = self.hype.get_mut(sk) {
+            let soon = Instant::now() + SOON;
+            if s.next.map(|n| n > soon).unwrap_or(true) {
+                s.next = Some(soon);
+            }
+        }
+    }
+
+    /// One tick of the hype loop: drops what is over (events into `out`) and returns the channels that are due to be
+    /// asked, marked busy until [`State::hype_answer`].
+    fn hype_step(&mut self, now: Instant, now_ms: i64, out: &mut Out) -> Vec<(String, SourceRef)> {
+        let sources: Vec<(String, SourceRef)> = if self.rules.settings.hype_train {
+            self.hub.all_sources().into_iter().filter(|(_, s)| s.platform == Platform::Twitch && whisper::login_of(&s.channel).is_none()).collect()
+        } else {
+            Vec::new()
+        };
+        let gone: Vec<String> = self.hype.keys().filter(|k| !sources.iter().any(|(sk, _)| sk == *k)).cloned().collect();
+        for k in gone {
+            if self.hype.remove(&k).is_some_and(|s| s.train.is_some()) {
+                out.push(("hype", hype_json(&k, None)));
+            }
+        }
+        let mut due = Vec::new();
+        for (sk, src) in sources {
+            let s = self.hype.entry(sk.clone()).or_default();
+            if s.train.as_ref().is_some_and(|t| expired(t, now_ms)) {
+                s.train = None;
+                s.next = Some(now);
+                out.push(("hype", hype_json(&sk, None)));
+            }
+            if s.busy || s.next.is_some_and(|n| n > now) {
+                continue;
+            }
+            s.busy = true;
+            due.push((sk, src));
+        }
+        due
+    }
+
+    /// The core's answer for a channel's train: the `hype` event when what the bar shows changed.
+    fn hype_answer(&mut self, sk: &str, ok: bool, body: &Value, now: Instant) -> Option<(&'static str, Value)> {
+        let s = self.hype.get_mut(sk)?;
+        s.busy = false;
+        if !ok {
+            s.next = Some(now + ERROR_POLL);
+            return None;
+        }
+        let t = parse_hype(body);
+        s.next = Some(now + if t.is_some() { ACTIVE_POLL } else { IDLE_POLL });
+        if s.train == t {
+            return None;
+        }
+        s.train = t;
+        Some(("hype", hype_json(sk, s.train.as_ref())))
+    }
+
     /// A `mentions` event when the bell's numbers changed.
     fn mentions_event(&mut self, out: &mut Out) {
         let now = (self.mentions.unread(), self.mentions.len());
@@ -450,6 +573,24 @@ fn kick_owner_id(status: &Value) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         _ => None,
     }
+}
+
+/// The relay request that sends `text` to a chat: where it goes and its body. A Twitch whisper conversation is sent
+/// through the same route as a channel's chat (the core turns it into Helix's whisper call); it has nothing to reply to.
+fn send_request(source: &SourceRef, text: &str, reply_to: Option<&str>) -> (&'static str, Value) {
+    let path = match source.platform {
+        Platform::Twitch => "/api/chat/send",
+        Platform::Rumble => "/api/rumble/send",
+        Platform::Kick => "/api/kick/send",
+        Platform::X => "/api/x/send",
+        Platform::Youtube => "/api/youtube/send",
+    };
+    let mut body = json!({"text": text});
+    let whisper = source.platform == Platform::Twitch && whisper::login_of(&source.channel).is_some();
+    if let Some(r) = reply_to.filter(|r| !r.is_empty() && !whisper) {
+        body["replyTo"] = json!(r);
+    }
+    (path, body)
 }
 
 fn platform_of(v: &Value) -> Result<Platform, String> {
@@ -577,6 +718,10 @@ impl Session {
         let session = Session { inner };
         let s = session.clone();
         net.rt.spawn(async move { s.pump(rx).await });
+        let s = session.clone();
+        net.rt.spawn(async move { s.listen_whispers().await });
+        let s = session.clone();
+        net.rt.spawn(async move { s.hype_loop().await });
         // the accounts are needed to tell your own lines and your name apart
         let s = session.clone();
         net.rt.spawn(async move {
@@ -590,6 +735,49 @@ impl Session {
             s.refresh_account_data().await;
         });
         session
+    }
+
+    /// The whisper inbox, for the app's whole life: whispers from people with no tab open yet come through it.
+    async fn listen_whispers(&self) {
+        let source = SourceRef { platform: Platform::Twitch, channel: whisper::inbox_channel().into() };
+        self.inner.routes.lock().unwrap().inflight += 1;
+        let res = self.inner.bridge.subscribe(source).await;
+        let mut r = self.inner.routes.lock().unwrap();
+        r.inflight -= 1;
+        if let Ok(id) = &res {
+            r.subs.insert(id.clone(), INBOX_SK.to_string());
+            for f in r.pending.remove(id).unwrap_or_default() {
+                let _ = self.inner.inbox.send(Inbox::Frame { sk: INBOX_SK.to_string(), only: None, f });
+            }
+        }
+        if r.inflight == 0 {
+            r.pending.clear();
+        }
+    }
+
+    /// The hype train bars: once a second, drop trains that ran out and ask the core for the channels that are due.
+    async fn hype_loop(self) {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let mut out: Out = Vec::new();
+            let due = {
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                self.inner.st.lock().unwrap().hype_step(Instant::now(), now_ms, &mut out)
+            };
+            self.emit(out);
+            for (sk, source) in due {
+                let s = self.clone();
+                self.inner.net.rt.spawn(async move {
+                    let r = relay_api(&s.inner.bridge, &source, "/api/twitch/hype-train", None, None).await;
+                    let ev = s.inner.st.lock().unwrap().hype_answer(&sk, r.ok, &r.body, Instant::now());
+                    if let Some((kind, v)) = ev {
+                        (s.inner.sink)(kind, &v);
+                    }
+                });
+            }
+        }
     }
 
     async fn pump(self, mut rx: mpsc::UnboundedReceiver<Inbox>) {
@@ -620,6 +808,21 @@ impl Session {
             self.on_seven(ev);
             return;
         }
+        // the whisper inbox: someone whispered the account
+        if let Inbox::Frame { sk, f, .. } = &m {
+            if sk == INBOX_SK {
+                if f.get("type").and_then(|t| t.as_str()) == Some("whisper") {
+                    if let Some(login) = f.get("login").and_then(|l| l.as_str()).filter(|l| !l.is_empty()) {
+                        // an ignored user's whispers are kept out of sight like their chat: no tab pops up
+                        let ignored = is_user_ignored(&self.inner.st.lock().unwrap().rules.settings.ignored_users, Platform::Twitch, login);
+                        if !ignored {
+                            (self.inner.sink)("whisper", &json!({"login": login, "name": f.get("name").and_then(|n| n.as_str()).unwrap_or(login)}));
+                        }
+                    }
+                }
+                return;
+            }
+        }
         let mut out: Out = Vec::new();
         {
             let mut guard = self.inner.st.lock().unwrap();
@@ -636,6 +839,10 @@ impl Session {
                     }
                 }
                 Inbox::Frame { sk, only, f } => {
+                    // a sub or Bits can start a train: ask the core soon
+                    if only.is_none() && contributes(&f) {
+                        st.hype_poke(&sk);
+                    }
                     if f.get("type").and_then(|t| t.as_str()) == Some("conn") {
                         if only.is_none() {
                             // a replayed snapshot's conn is the one the app already has
@@ -1312,17 +1519,7 @@ impl Session {
 
     async fn send(&self, sk: &str, text: &str, reply_to: Option<&str>) -> Result<Value, String> {
         let source = self.source_of(sk)?;
-        let path = match source.platform {
-            Platform::Twitch => "/api/chat/send",
-            Platform::Rumble => "/api/rumble/send",
-            Platform::Kick => "/api/kick/send",
-            Platform::X => "/api/x/send",
-            Platform::Youtube => "/api/youtube/send",
-        };
-        let mut body = json!({"text": text});
-        if let Some(r) = reply_to.filter(|r| !r.is_empty()) {
-            body["replyTo"] = json!(r);
-        }
+        let (path, body) = send_request(&source, text, reply_to);
         let r = relay_api(&self.inner.bridge, &source, path, Some("POST"), Some(body)).await;
         if r.ok {
             return Ok(json!({"ok": true}));
@@ -1503,7 +1700,25 @@ impl Session {
                     }
                     let lenient = args.get("lenient").and_then(|l| l.as_bool()).unwrap_or(false);
                     s.ensure_defs();
-                    s.set_view(vk, channels_arg(&args)?, lenient).await
+                    let whisper_opened = args.get("whisper").and_then(|w| w.as_bool()).unwrap_or(false);
+                    let r = s.set_view(vk, channels_arg(&args)?, lenient).await?;
+                    // a tab a whisper opened: its newest line is a mention (see `scan`)
+                    if whisper_opened {
+                        let opened = r.get("vk").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(v) = s.inner.st.lock().unwrap().views.get_mut(opened) {
+                            v.whisper_pending = true;
+                        }
+                    }
+                    Ok(r)
+                }
+                // the app's screens came back after being closed while the process lived on (the background service):
+                // its tabs are opened again, so the views the old screens left are closed first
+                "views.reset" => {
+                    let ids: Vec<String> = s.inner.st.lock().unwrap().hub.view_ids();
+                    for vk in ids {
+                        s.close_view(&vk).await;
+                    }
+                    Ok(Value::Null)
                 }
                 // {vk, query}: show only the lines of a tab that match (an empty query shows them all)
                 "view.search" => {
@@ -1625,6 +1840,15 @@ impl Session {
                 "terms.remove" => s.terms(&args, "remove").await,
                 "dev.caps" => s.dev_caps(&args),
                 "dev.relay" => s.dev_relay(&args),
+                // debuggable builds only: show a hype train as if the core had answered, `{sk, body}` (the core's /api/twitch/hype-train answer)
+                "dev.hype" => {
+                    let sk = str_arg(&args, "sk")?.to_string();
+                    let ev = s.inner.st.lock().unwrap().hype_answer(&sk, true, args.get("body").unwrap_or(&Value::Null), Instant::now());
+                    if let Some((kind, v)) = ev {
+                        (s.inner.sink)(kind, &v);
+                    }
+                    Ok(Value::Null)
+                }
                 "dev.frame" => {
                     let sk = str_arg(&args, "sk")?.to_string();
                     let frame = args.get("frame").cloned().ok_or("missing frame")?;
@@ -1676,6 +1900,11 @@ impl Session {
                     st.src.entry(sk).or_default().twitch_emotes = TwitchEmotesResp { channel: list("channel"), global: list("global"), other: Vec::new() };
                     st.inv_gen += 1;
                     Ok(Value::Null)
+                }
+                // {platform, channel}: the page the channel's stream plays on, or null (a whisper has none)
+                "stream.url" => {
+                    let src = SourceRef { platform: platform_of(&args)?, channel: str_arg(&args, "channel")?.to_string() };
+                    Ok(agu_chat_model::stream_link::stream_url(&src).map(Value::from).unwrap_or(Value::Null))
                 }
                 "open.url" => {
                     b.open_external(str_arg(&args, "url")?.to_string());
@@ -1835,5 +2064,198 @@ mod tests {
         st.mentions.mark_all_read();
         st.mentions_event(&mut out);
         assert_eq!(out.last().unwrap().1, json!({"unread": 0, "total": 1}));
+    }
+    fn me_agu() -> AccountsState {
+        let mut acc = AccountsState::new();
+        acc.insert(Platform::Twitch, serde_json::from_value(json!({"connected": true, "user": {"id": "1", "login": "agu", "name": "Agu"}})).unwrap());
+        acc
+    }
+
+    #[test]
+    fn a_channels_stream_link_comes_from_the_shared_rules() {
+        let u = |p, c: &str| agu_chat_model::stream_link::stream_url(&SourceRef { platform: p, channel: c.into() });
+        assert_eq!(u(Platform::Twitch, "A_g_u__").as_deref(), Some("https://www.twitch.tv/a_g_u__"));
+        assert_eq!(u(Platform::Twitch, "whisper:bob"), None);
+        assert_eq!(u(Platform::Kick, "agu").as_deref(), Some("https://kick.com/agu"));
+    }
+
+    #[test]
+    fn a_whisper_is_sent_as_plain_text_through_the_chat_route() {
+        let w = SourceRef { platform: Platform::Twitch, channel: whisper::channel_for("bob") };
+        assert_eq!(send_request(&w, "hi bob", Some("m1")), ("/api/chat/send", json!({"text": "hi bob"})));
+        let c = SourceRef { platform: Platform::Twitch, channel: "agu".into() };
+        assert_eq!(send_request(&c, "hi", Some("m1")), ("/api/chat/send", json!({"text": "hi", "replyTo": "m1"})));
+        assert_eq!(send_request(&c, "hi", Some("")).1, json!({"text": "hi"}));
+    }
+
+    #[test]
+    fn a_mention_in_the_background_becomes_a_notification_once() {
+        let mut st = state_with_two_views();
+        st.rules = Rules::new(Settings::default(), me_agu());
+        st.active = false;
+        feed(&mut st, "twitch:agu", &chat("1", "hello @agu"));
+        feed(&mut st, "twitch:agu", &chat("2", "plain talk"));
+        let mut out: Out = Vec::new();
+        st.scan("v1", &mut out);
+        st.scan("v2", &mut out);
+        let notes: Vec<&Value> = out.iter().filter(|(k, _)| *k == "notify").map(|(_, v)| v).collect();
+        assert_eq!(notes.len(), 1, "two tabs, one message, one notification");
+        assert_eq!((notes[0]["user"].as_str(), notes[0]["text"].as_str(), notes[0]["channel"].as_str()), (Some("Bob"), Some("hello @agu"), Some("agu")));
+        assert_eq!(notes[0]["whisper"], false);
+        assert!(notes[0]["key"].as_str().unwrap().contains('1'), "the key is the row's, for the jump");
+    }
+
+    #[test]
+    fn nothing_is_posted_while_the_app_is_on_screen_or_when_the_alert_is_off() {
+        let mut st = state_with_two_views();
+        st.rules = Rules::new(Settings::default(), me_agu());
+        feed(&mut st, "twitch:agu", &chat("1", "hello @agu"));
+        let mut out: Out = Vec::new();
+        st.scan("v1", &mut out);
+        assert!(out.iter().all(|(k, _)| *k != "notify"), "on screen");
+        assert_eq!(st.mentions.len(), 1);
+
+        let mut st = state_with_two_views();
+        let mut s = Settings::default();
+        s.mention_sound = false;
+        s.mention_flash = false;
+        st.rules = Rules::new(s, me_agu());
+        st.active = false;
+        feed(&mut st, "twitch:agu", &chat("1", "hello @agu"));
+        let mut out: Out = Vec::new();
+        st.scan("v1", &mut out);
+        assert!(out.iter().all(|(k, _)| *k != "notify"), "mention alerts are off");
+        assert_eq!(st.mentions.len(), 1, "it is still a mention");
+    }
+
+    fn whisper_view(login: &str) -> (State, String) {
+        let mut st = State::new();
+        let w = SourceRef { platform: Platform::Twitch, channel: whisper::channel_for(login) };
+        st.hub.set_view("w", std::slice::from_ref(&w));
+        let mut v = View::new();
+        v.store.sync(std::slice::from_ref(&w));
+        v.whisper_pending = true;
+        st.views.insert("w".into(), v);
+        (st, source_key(&w))
+    }
+
+    fn snapshot(from_id: &str, from: &str) -> Value {
+        json!({"type": "chatlog", "channelId": "1", "messages": [
+            {"id": "w1", "ts": 1, "user": {"id": from_id, "login": from, "name": from, "color": ""}, "text": "psst", "emotes": "", "badges": ""}],
+            "pinned": null, "modfeed": [], "automod": [], "suspicious": [], "esub": {"active": false, "reason": null}})
+    }
+
+    #[test]
+    fn a_whisper_that_opened_its_tab_puts_its_newest_line_in_the_mentions() {
+        let (mut st, sk) = whisper_view("bob");
+        st.active = false;
+        feed(&mut st, &sk, &snapshot("9", "bob"));
+        let mut out: Out = Vec::new();
+        st.scan("w", &mut out);
+        assert_eq!(st.mentions.len(), 1);
+        assert!(!st.views["w"].whisper_pending);
+        let note = out.iter().find(|(k, _)| *k == "notify").map(|(_, v)| v.clone()).expect("notified");
+        assert_eq!((note["whisper"].as_bool(), note["channel"].as_str(), note["text"].as_str()), (Some(true), Some("bob"), Some("psst")));
+        assert!(out.iter().any(|(k, v)| *k == "activity" && v["kind"] == "highlight"));
+        // a later whisper in the open tab is a mention too (addressed to you by definition)
+        feed(&mut st, &sk, &json!({"type": "chat", "msg": {"id": "w2", "ts": 2, "user": {"id": "9", "login": "bob", "name": "bob", "color": ""}, "text": "again", "emotes": "", "badges": ""}}));
+        let mut out: Out = Vec::new();
+        st.scan("w", &mut out);
+        assert_eq!(st.mentions.len(), 2);
+    }
+
+    #[test]
+    fn an_ignored_users_whisper_and_your_own_do_not_count() {
+        let (mut st, sk) = whisper_view("bob");
+        let mut s = Settings::default();
+        s.ignored_users = vec![agu_chat_core::protocol::IgnoredUser { platform: Platform::Twitch, login: "bob".into() }];
+        st.rules = Rules::new(s, AccountsState::new());
+        feed(&mut st, &sk, &snapshot("9", "bob"));
+        let mut out: Out = Vec::new();
+        st.scan("w", &mut out);
+        assert!(st.mentions.is_empty());
+
+        let (mut st, sk) = whisper_view("bob");
+        st.rules = Rules::new(Settings::default(), me_agu());
+        feed(&mut st, &sk, &snapshot("1", "agu"));
+        let mut out: Out = Vec::new();
+        st.scan("w", &mut out);
+        assert!(st.mentions.is_empty(), "your own line");
+    }
+
+    fn train_body(percent: u64, expires: &str) -> Value {
+        json!({"active": true, "id": "t1", "level": 2, "percent": percent, "bits": 3300, "subs": 7, "expiresAt": expires,
+            "emotes": [{"id": "e1", "token": "Kitty", "url": "https://x/e1"}], "conductors": [{"source": "BITS", "name": "Cheerer", "avatar": "", "quantity": 500}],
+            "conductorRewards": ["BITS"], "treasure": false, "goldenKappa": false, "shared": false, "color": "ffbf00", "record": {"level": 3}})
+    }
+
+    #[test]
+    fn the_hype_loop_asks_for_twitch_channels_only_and_reports_changes() {
+        let mut st = State::new();
+        let (t, k, w) = (SourceRef { platform: Platform::Twitch, channel: "agu".into() }, SourceRef { platform: Platform::Kick, channel: "agu".into() }, SourceRef { platform: Platform::Twitch, channel: "whisper:bob".into() });
+        st.hub.set_view("v", &[t, k, w]);
+        let now = Instant::now();
+        let mut out: Out = Vec::new();
+        let due = st.hype_step(now, 0, &mut out);
+        assert_eq!(due.iter().map(|(sk, _)| sk.as_str()).collect::<Vec<_>>(), vec!["twitch:agu"], "not Kick, not a whisper");
+        assert!(st.hype_step(now, 0, &mut out).is_empty(), "one request at a time");
+        // a train is on: the bar appears, and the next ask is soon
+        let ev = st.hype_answer("twitch:agu", true, &train_body(17, "2099-01-01T00:00:00Z"), now).expect("event");
+        assert_eq!(ev.0, "hype");
+        assert_eq!((ev.1["train"]["level"].as_u64(), ev.1["train"]["percent"].as_u64()), (Some(2), Some(17)));
+        assert_eq!(ev.1["train"]["bits"], "3,300 Bits");
+        assert_eq!(ev.1["train"]["subs"], "7 Subs");
+        assert_eq!(ev.1["train"]["conductors"][0]["what"], "500 Bits");
+        assert!(ev.1["train"]["fill"].as_str().unwrap().starts_with('#'));
+        assert!(st.hype_step(now + Duration::from_secs(4), 0, &mut out).is_empty());
+        assert_eq!(st.hype_step(now + ACTIVE_POLL, 0, &mut out).len(), 1);
+        // the same answer again changes nothing; a new level is an event
+        assert!(st.hype_answer("twitch:agu", true, &train_body(17, "2099-01-01T00:00:00Z"), now).is_none());
+        assert!(st.hype_answer("twitch:agu", true, &train_body(20, "2099-01-01T00:00:00Z"), now).is_some());
+        // an error keeps the bar and waits longer
+        st.hype.get_mut("twitch:agu").unwrap().busy = true;
+        assert!(st.hype_answer("twitch:agu", false, &Value::Null, now).is_none());
+        assert!(st.hype.get("twitch:agu").unwrap().train.is_some());
+        // the train says it is over
+        let ev = st.hype_answer("twitch:agu", true, &json!({"active": false}), now).unwrap();
+        assert!(ev.1["train"].is_null());
+    }
+
+    #[test]
+    fn a_train_that_ran_out_goes_and_the_setting_turns_the_bars_off() {
+        let mut st = State::new();
+        st.hub.set_view("v", &[SourceRef { platform: Platform::Twitch, channel: "agu".into() }]);
+        let now = Instant::now();
+        let mut out: Out = Vec::new();
+        st.hype_step(now, 0, &mut out);
+        st.hype_answer("twitch:agu", true, &train_body(50, "1970-01-01T00:00:10Z"), now);
+        let mut out: Out = Vec::new();
+        st.hype_step(now, 10_000, &mut out);
+        assert!(out.is_empty(), "still within the grace");
+        st.hype_step(now, 14_000, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1["train"].is_null());
+        // the setting off: no asking, and a bar already up goes
+        st.hype_answer("twitch:agu", true, &train_body(50, "2099-01-01T00:00:00Z"), now);
+        let mut s = Settings::default();
+        s.hype_train = false;
+        st.rules = Rules::new(s, AccountsState::new());
+        let mut out: Out = Vec::new();
+        assert!(st.hype_step(now + Duration::from_secs(60), 0, &mut out).is_empty());
+        assert!(out[0].1["train"].is_null());
+    }
+
+    #[test]
+    fn a_sub_or_bits_pokes_the_next_ask() {
+        let mut st = State::new();
+        st.hub.set_view("v", &[SourceRef { platform: Platform::Twitch, channel: "agu".into() }]);
+        let now = Instant::now();
+        let mut out: Out = Vec::new();
+        st.hype_step(now, 0, &mut out);
+        st.hype_answer("twitch:agu", true, &json!({"active": false}), now);
+        assert!(st.hype.get("twitch:agu").unwrap().next.unwrap() >= now + IDLE_POLL);
+        st.hype_poke("twitch:agu");
+        assert!(st.hype.get("twitch:agu").unwrap().next.unwrap() < now + IDLE_POLL);
+        assert!(contributes(&json!({"type": "chatnotice", "notice": {"msgId": "subgift"}})));
     }
 }

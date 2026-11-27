@@ -34,6 +34,8 @@ pub struct SourceState {
     pub channel_id: Option<String>,
     pub loaded: bool,
     pub pinned: Option<ChatMsg>,
+    /// Rumble's pinned message
+    pub rumble_pinned: Option<RumbleMsg>,
     pub suspicious: HashMap<String, SuspiciousUser>,
     pub esub: EsubStatus,
     pub modes: Option<Value>,
@@ -55,6 +57,7 @@ impl SourceState {
             channel_id: None,
             loaded: false,
             pinned: None,
+            rumble_pinned: None,
             suspicious: HashMap::new(),
             esub: EsubStatus::default(),
             modes: None,
@@ -125,6 +128,7 @@ impl ChatStore {
         let st = self.source_mut(sk).unwrap();
         st.loaded = false;
         st.pinned = None;
+        st.rumble_pinned = None;
         st.suspicious.clear();
     }
 
@@ -478,6 +482,7 @@ impl ChatStore {
                 self.replace_backlog(sk, rows);
                 let st = self.source_mut(sk).unwrap();
                 st.status = f.get("status").filter(|s| !s.is_null()).cloned();
+                st.rumble_pinned = f.get("pinned").filter(|p| !p.is_null()).map(Self::parse::<RumbleMsg>);
                 if let Some(b) = f.get("badges").and_then(|b| b.as_object()) {
                     st.rumble_badges = b.clone();
                 }
@@ -492,6 +497,7 @@ impl ChatStore {
                 self.trim();
             }
             "status" => self.source_mut(sk).unwrap().status = f.get("status").filter(|s| !s.is_null()).cloned(),
+            "pin" => self.source_mut(sk).unwrap().rumble_pinned = f.get("msg").filter(|m| !m.is_null()).map(Self::parse::<RumbleMsg>),
             "badges" => self.source_mut(sk).unwrap().rumble_badges = f.get("badges").and_then(|b| b.as_object()).cloned().unwrap_or_default(),
             "emotes" => self.source_mut(sk).unwrap().rumble_emotes = f.get("emotes").and_then(|b| b.as_object()).cloned().unwrap_or_default(),
             "delete" => {
@@ -981,6 +987,21 @@ mod tests {
         s.apply(&sk, &json!({"type": "automod", "held": {"id": "h1", "ts": 5, "user": {"id": "1", "login": "x", "name": "X"}, "text": "bad Kappa", "emotes": "25:4-8", "reason": "automod", "status": "held"}}));
         let RowBody::Automod(h) = &s.rows()[0].body else { panic!() };
         assert_eq!((h.text.as_str(), h.emotes.as_str()), ("bad Kappa", "25:4-8"));
+    }
+
+    #[test]
+    fn rumble_pins_arrive_in_the_chatlog_and_as_pin_frames() {
+        let mut s = ChatStore::default();
+        let r = SourceRef { platform: Platform::Rumble, channel: "c/streamer".into() };
+        s.sync(&[r.clone()]);
+        let sk = source_key(&r);
+        let m = json!({"id": "9", "ts": 1, "text": "read the rules", "user": {"id": "1", "login": "mod", "name": "Mod"}, "badges": []});
+        s.apply(&sk, &json!({"type": "chatlog", "messages": [], "pinned": m.clone()}));
+        assert_eq!(s.source(&sk).unwrap().rumble_pinned.as_ref().map(|p| p.text.as_str()), Some("read the rules"));
+        s.apply(&sk, &json!({"type": "pin", "msg": null}));
+        assert!(s.source(&sk).unwrap().rumble_pinned.is_none());
+        s.apply(&sk, &json!({"type": "pin", "msg": m}));
+        assert_eq!(s.source(&sk).unwrap().rumble_pinned.as_ref().map(|p| p.id.as_str()), Some("9"));
     }
 
     #[test]

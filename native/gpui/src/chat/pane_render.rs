@@ -300,6 +300,9 @@ impl ChatPane {
                     cx.notify();
                 }));
             }
+            if let Some(act) = h.pin_now.clone().filter(|_| !in_panel) {
+                bar = bar.child(self.toolbar_button(format!("pin-{key}"), icons::PIN, "Pin this message", false, cx, move |p, cx| p.run_action(act.clone(), cx)));
+            }
             if let Some(r) = h.reply.clone() {
                 bar = bar.child(self.toolbar_button(format!("reply-{key}"), icons::REPLY, "Reply", false, cx, move |p, cx| {
                     p.run_action(RowAction::Reply(r.clone()), cx);
@@ -823,6 +826,51 @@ impl ChatPane {
     }
 
     // ---- pinned card ---------------------------------------------------------------------------------------
+
+    /// Rumble's pinned message: one bar with the pin icon, who said it and the line (the chat's own emotes drawn),
+    /// and an Unpin button for a moderator.
+    fn rumble_pinned_el(&mut self, sk: &str, m: &RumbleMsg, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let st = self.store.source(sk)?;
+        let emotes = st.rumble_emotes.clone();
+        let sk_owned = sk.to_string();
+        let can_mod = self.co_caps.get(sk).map(|c| c.can_moderate).unwrap_or(false);
+        let size = super::twitch::emotes::SizeOpt::Small;
+        let mut hf = InlineContentBuilder::new(11.0);
+        hf.icon(icons::PIN, 12.0, token(theme::MUTED));
+        hf.gap(4.0);
+        hf.text("Pinned", token(theme::MUTED), FontWeight::NORMAL);
+        let header = hf.finish();
+        let mut cf = InlineContentBuilder::new(self.settings.font_size);
+        let who = if m.user.name.is_empty() { m.user.login.clone() } else { m.user.name.clone() };
+        cf.text(&format!("{who}: "), token(theme::TEXT), FontWeight::SEMIBOLD);
+        let pieces = agu_chat_model::user_card::card_pieces(&RowBody::Rumble(m.clone()), None, &emotes);
+        cf.pieces(&pieces, size, None, token(theme::TEXT), FontWeight::NORMAL);
+        let content = cf.finish();
+        let key = format!("{sk}|rumble-pin");
+        let text_col = div().min_w_0().flex_1().child(self.flow(&header, Rc::new(vec![]), cx)).child(div().mt(px(2.)).w_full().child(self.flow(&content, Rc::new(vec![]), cx)));
+        let mut row = div().flex().items_start().gap(px(8.)).child(text_col);
+        if can_mod {
+            let msg = m.clone();
+            row = row.child(
+                div()
+                    .id(eid("rumble-unpin-", &key))
+                    .flex_none()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(4.))
+                    .text_size(px(11.))
+                    .line_height(px(16.))
+                    .text_color(c(theme::MUTED))
+                    .hover(|s| s.bg(c(theme::RAISED_2)).text_color(c(theme::TEXT)))
+                    .cursor_pointer()
+                    .child("Unpin")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        this.run_action(RowAction::RumbleMod { sk: sk_owned.clone(), action: "unpin", msg: Box::new(msg.clone()), seconds: 300 }, cx);
+                    })),
+            );
+        }
+        Some(div().id(eid("pin-", &key)).flex_none().mx(px(6.)).mt(px(6.)).rounded(px(4.)).border_1().border_color(c(theme::LINE)).bg(c(theme::RAISED)).px(px(10.)).py(px(6.)).shadow_lg().child(row).into_any_element())
+    }
 
     fn pinned_el(&mut self, sk: &str, p: &ChatMsg, multi: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let env = self.envs.get(sk)?.clone();
@@ -1539,6 +1587,12 @@ impl Render for ChatPane {
                 cards.push(el);
             }
         }
+        let rumble_pins: Vec<(String, RumbleMsg)> = self.store.sources.iter().filter_map(|s| s.rumble_pinned.clone().map(|p| (s.sk.clone(), p))).collect();
+        for (sk, p) in &rumble_pins {
+            if let Some(el) = self.rumble_pinned_el(sk, p, cx) {
+                cards.push(el);
+            }
+        }
         if needs_tick {
             self.ensure_pin_tick(cx);
         }
@@ -1667,6 +1721,34 @@ impl InlineContentBuilder {
             }
         }
         self.items.extend(f);
+    }
+    /// A line from `agu_chat_model::user_card::card_pieces`: text, the platform's own emote pictures and the chat's
+    /// message parts (Twitch / Kick emotes), the way the chat rows draw them.
+    pub fn pieces(&mut self, pieces: &[agu_chat_model::user_card::CardPiece], size: super::twitch::emotes::SizeOpt, emotes: Option<&super::twitch::emotes::EmoteSets>, color: Hsla, w: FontWeight) {
+        use agu_chat_model::user_card::CardPiece;
+        for p in pieces {
+            match p {
+                CardPiece::Text(t) => self.text(t, color, w),
+                CardPiece::Parts(parts) => self.message(parts, size, emotes, color, w),
+                CardPiece::Image { url, alt, label } => {
+                    let (px, max_w, vm) = super::rows::emote_box(self.base, size);
+                    self.items.push(Item::Image(ImageItem {
+                        url: url.clone().into(),
+                        max_w,
+                        max_h: px,
+                        fixed: false,
+                        wrap: false,
+                        vmargin: vm,
+                        margin_x: 1.0,
+                        valign: VAlign::Middle,
+                        tip: Some(Rc::new(Tip::new(url.clone(), alt.clone(), label.clone()))),
+                        overlays: vec![],
+                        radius: 0.0,
+                        act: None,
+                    }));
+                }
+            }
+        }
     }
     /// line-height as a multiple of the font size (`text-xs` is 16/12)
     pub fn ratio(mut self, r: f32) -> Self {

@@ -112,7 +112,14 @@ private sealed interface Inl {
     class Emoji(val text: String, val overlays: List<String>, val tip: Tip?) : Inl
     class PaintName(val name: String, val paint: Paint, val base: Color, val onClick: (() -> Unit)? = null) : Inl
     class Gif(val url: String) : Inl
+    /** a mod mode button at the start of the line (the desktop draws them inline too) */
+    class ModBtn(val b: ModButtonCfg, val onClick: () -> Unit) : Inl
 }
+
+/** Mod mode on a chat line: the buttons go inline at the start of its text, like the desktop's. */
+private class InlineMod(val buttons: List<ModButtonCfg>, val run: (ModButtonCfg) -> Unit)
+
+private val LocalInlineMod = androidx.compose.runtime.compositionLocalOf<InlineMod?> { null }
 
 private class Built(val text: AnnotatedString, val inline: Map<String, Inl>)
 
@@ -172,12 +179,16 @@ private fun AnnotatedString.Builder.badges(b: Bld, list: List<Badge>, d: Display
 }
 
 /** A chat line: time, platform mark, badges, name, then the message. [full] false leaves the name off (a note). */
-private fun build(row: Row, d: Display, showMark: Boolean, time: String?, onUser: (() -> Unit)? = null): Built {
+private fun build(row: Row, d: Display, showMark: Boolean, time: String?, onUser: (() -> Unit)? = null, mod: InlineMod? = null): Built {
     val b = Bld(d)
     val nameColor = parseColor(row.user?.color) ?: AguColors.Text
     val name = row.user?.name?.takeIf { it.isNotEmpty() } ?: row.user?.login
     val grey = row.deleted && d.deletedMessages == "strike"
     val text = buildAnnotatedString {
+        mod?.let { m ->
+            for (btn in m.buttons) appendInlineContent(b.add("m", Inl.ModBtn(btn) { m.run(btn) }), "■")
+            if (m.buttons.isNotEmpty()) append(" ")
+        }
         if (time != null) withStyle(SpanStyle(color = Faint, fontSize = (d.bodySp * 0.85f).sp)) { append(time); append(" ") }
         // in a merged tab every line says which platform it came from
         if (showMark && row.platform.isNotEmpty()) {
@@ -298,6 +309,15 @@ private fun inlineContent(spec: Map<String, Inl>, density: Density, d: Display, 
                     EmoteImage(s.url, d.animatedEmotes, Modifier.fillMaxSize(), onSuccess = { aspects[s.url] = it })
                 }
             }
+            is Inl.ModBtn -> {
+                val wDp = if (s.b.label.isNotEmpty()) maxOf(ModBtnDp, s.b.label.length * 7f + 10f) else ModBtnDp
+                InlineTextContent(Placeholder(with(density) { wDp.dp.toSp() }, with(density) { ModBtnDp.dp.toSp() }, PlaceholderVerticalAlign.TextCenter)) {
+                    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(5.dp)).clickable(onClick = s.onClick), contentAlignment = Alignment.Center) {
+                        if (s.b.label.isNotEmpty()) Text(s.b.label, color = tone(s.b), fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, lineHeight = 10.sp)
+                        else ModIcon(s.b.icon.ifEmpty { s.b.action }, tone(s.b), 17)
+                    }
+                }
+            }
             is Inl.PaintName -> {
                 val style = TextStyle(fontSize = bodyDp.sp, fontWeight = FontWeight.Bold)
                 val size = measurer.measure(AnnotatedString(s.name), style, maxLines = 1).size
@@ -382,12 +402,24 @@ fun MessageRow(
     val mod = LocalMod.current
     val modTab = LocalModTab.current
     val strip = mod != null && modTab != null && LocalModMode.current && row.mod != null && row.kind != "modfeed"
-    if (strip) LayoutRow(Modifier.fillMaxWidth()) {
+    if (strip && isPlainLine(row)) {
+        val shown = d.modButtons.filter { allowed(it, row.mod!!) }
+        val ctl = mod!!
+        val vk = modTab!!.id
+        val inline = remember(shown, row.key, ctl, vk) { InlineMod(shown) { b -> ctl.button(vk, row, b) } }
+        androidx.compose.runtime.CompositionLocalProvider(LocalInlineMod provides inline) { RowContent(row, d, frame, showMark, onTip, onReplyNotice) }
+    } else if (strip) LayoutRow(Modifier.fillMaxWidth()) {
         ModStrip(row, modTab!!.id, mod!!)
         RowContent(row, d, frame, showMark, onTip, onReplyNotice)
     } else RowContent(row, d, frame, showMark, onTip, onReplyNotice)
     tip?.let { TipDialog(it, d) { tip = null } }
 }
+
+/** A plain chat line (drawn by [LineRow]); its mod buttons go inline. */
+private fun isPlainLine(row: Row) = row.kind != "modfeed" && row.kind != "automod" && row.notice?.seventv == null && row.kind != "notice" && row.event == null
+
+/** One mod button's square, in dp (it sets the height of the line it sits on). */
+private const val ModBtnDp = 26f
 
 @Composable
 private fun RowContent(row: Row, d: Display, frame: Modifier, showMark: Boolean, onTip: (Tip) -> Unit, onReplyNotice: ((Row) -> Unit)?) {
@@ -414,7 +446,8 @@ private fun LineText(row: Row, d: Display, showMark: Boolean, onTip: (Tip) -> Un
     val time = if (d.timestamps) formatTime(row.ts, d.timestampSeconds, is24Hour(ctx)) else null
     // tapping the name opens the user card
     val mod = LocalMod.current
-    val built = remember(row, d, showMark, time, mod) { build(row, d, showMark, time, mod?.takeIf { row.user != null && row.kind != "modfeed" }?.let { c -> { c.openCard(row) } }) }
+    val inlineMod = LocalInlineMod.current
+    val built = remember(row, d, showMark, time, mod, inlineMod?.buttons) { build(row, d, showMark, time, mod?.takeIf { row.user != null && row.kind != "modfeed" }?.let { c -> { c.openCard(row) } }, inlineMod) }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     Column(modifier) {

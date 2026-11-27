@@ -402,8 +402,14 @@ pub fn drain_frames(buf: &mut Vec<u8>) -> Vec<String> {
 /// Returns false rather than failing on any problem: an expired session should hide the mod buttons, not
 /// break the page.
 pub async fn fetch_can_moderate(session: &str, chat_id: &str) -> bool {
+    fetch_init(session, chat_id).await.map(|d| truthy(&d["can_moderate"])).unwrap_or(false)
+}
+
+/// The `data` of the chat's `init` event, read with the account's session (for a moderator it also carries
+/// `muted_users`). None on any problem.
+pub async fn fetch_init(session: &str, chat_id: &str) -> Option<Value> {
     if session.is_empty() || chat_id.is_empty() {
-        return false;
+        return None;
     }
     let read = async {
         let mut o = FetchOpts::new(0).header("Accept", "text/event-stream").header("Cookie", &format!("u_s={session}"));
@@ -421,7 +427,7 @@ pub async fn fetch_can_moderate(session: &str, chat_id: &str) -> bool {
                     let Some(rest) = line.strip_prefix("data:") else { continue };
                     if let Ok(ev) = serde_json::from_str::<Value>(js_trim(rest)) {
                         if ev["type"] == "init" {
-                            return Some(truthy(&ev["data"]["can_moderate"]));
+                            return Some(ev["data"].clone());
                         }
                     }
                     // keep reading: a partial frame is not a verdict
@@ -435,7 +441,30 @@ pub async fn fetch_can_moderate(session: &str, chat_id: &str) -> bool {
         None
     };
     // Dropping the future on timeout hangs up the connection.
-    tokio::time::timeout(std::time::Duration::from_secs(15), read).await.ok().flatten().unwrap_or(false)
+    tokio::time::timeout(std::time::Duration::from_secs(15), read).await.ok().flatten()
+}
+
+/// The muted people of an init payload as `[{name, id, scope}]`: `name` is the account name to unmute by, `scope`
+/// "video" for a mute on this stream and "total" otherwise. The entries' exact shape is only partly known
+/// (`username` is the one field seen), so the other names are tried leniently.
+pub fn muted_users_from_init(data: &Value) -> Vec<Value> {
+    let pick = |u: &Value, keys: &[&str]| keys.iter().map(|k| js_str_or_empty(Some(&u[*k]))).find(|s| !s.is_empty()).unwrap_or_default();
+    let mut out: Vec<Value> = Vec::new();
+    for u in data["muted_users"].as_array().into_iter().flatten() {
+        let name = if u.is_string() { js_str_or_empty(Some(u)) } else { pick(u, &["username", "user_name", "name"]) };
+        if name.is_empty() || out.iter().any(|o| o["name"] == json!(name)) {
+            continue;
+        }
+        let kind = pick(u, &["type", "mute_type", "scope"]);
+        out.push(json!({"name": name, "id": pick(u, &["id", "user_id"]), "scope": if kind == "video" { "video" } else { "total" }}));
+    }
+    out
+}
+
+/// The pinned message of an init payload (raw, as Rumble sends it), if any.
+pub fn pinned_from_init(data: &Value) -> Option<Value> {
+    let p = &data["pinned_message"];
+    truthy(p).then(|| p.clone())
 }
 
 #[cfg(test)]
@@ -539,6 +568,16 @@ mod tests {
         let f = drain_frames(&mut buf);
         assert_eq!(f, vec!["data: {\"a\":1}", ": hb"]);
         assert_eq!(buf, b"data: par");
+    }
+
+    #[test]
+    fn muted_users_and_pin_of_an_init_payload() {
+        let d = json!({"muted_users": [{"username": "Bob", "id": 7}, {"username": "Bob"}, {"user_name": "Al", "type": "video"}, "Cy", {"id": 3}], "pinned_message": {"id": 5, "text": "hi"}});
+        let m = muted_users_from_init(&d);
+        assert_eq!(m, vec![json!({"name": "Bob", "id": "7", "scope": "total"}), json!({"name": "Al", "id": "", "scope": "video"}), json!({"name": "Cy", "id": "", "scope": "total"})]);
+        assert_eq!(pinned_from_init(&d).unwrap()["id"], 5);
+        assert!(pinned_from_init(&json!({"pinned_message": null})).is_none());
+        assert!(muted_users_from_init(&json!({})).is_empty());
     }
 }
 

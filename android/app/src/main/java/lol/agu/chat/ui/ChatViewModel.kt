@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -23,8 +24,12 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import lol.agu.chat.AlertCenter
+import lol.agu.chat.ChatService
 import lol.agu.chat.Core
 import lol.agu.chat.CoreError
+import lol.agu.chat.Notifier
+import lol.agu.chat.Prefs
 
 /** State holder for the whole app: tabs, per-tab rows, connection states and accounts. Main-thread state only. */
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
@@ -35,6 +40,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val caps = mutableStateMapOf<String, Caps>()
     /** Mod mode per tab: every line gets the mod buttons. */
     val modMode = mutableStateMapOf<String, Boolean>()
+    /** Hype trains going on, by Twitch channel (source key): the bar at the top of that chat. */
+    val hype = mutableStateMapOf<String, HypeTrain>()
+    /** The tab to bring forward (one you just added); the screen scrolls to it and calls [focusDone]. A tab a whisper opens never gets it. */
+    var focusTab by mutableStateOf<String?>(null)
+        private set
+    /** Keep the chats connected while the app is in the background (a foreground service with a notification). */
+    var stayConnected by mutableStateOf(Prefs.stayConnected(app))
+        private set
+    /** The screen should ask for the notification permission now (the first chat was just opened). */
+    var askNotifications by mutableStateOf(false)
+        private set
     /** What happened in a tab you are not looking at: new messages, or a mention / highlight. */
     val unread = mutableStateMapOf<String, Dot>()
     /** The bell's count: unread mentions and highlights in any open chat. */
@@ -72,7 +88,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Platforms with a login call in flight (Rumble's password or code is being checked). */
     val loginBusy = mutableStateMapOf<String, Boolean>()
 
-    private val alerts = Alerts(app)
+    private val alerts = AlertCenter.alerts
     private var selectedId: String? = null
 
     private val rowLists = HashMap<String, SnapshotStateList<Row>>()
@@ -89,7 +105,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "conn" -> onConn(e.data)
                     "caps" -> onCaps(e.data)
                     "activity" -> onActivity(e.data)
-                    "alert" -> alerts.fire(e.data)
+                    "whisper" -> onWhisper(e.data)
+                    "hype" -> onHype(e.data)
                     "mentions" -> onMentions(e.data)
                     "settings" -> withContext(Dispatchers.Main) {
                         (e.data as? JsonObject)?.let { settings = it }
@@ -109,11 +126,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+        // the background service runs while at least one chat is open (and the setting is on)
+        viewModelScope.launch {
+            snapshotFlow { tabs.flatMap { it.sks }.toSet().size to stayConnected }.collect { (chats, on) -> ChatService.sync(getApplication(), chats, on) }
+        }
         viewModelScope.launch {
             runCatching { Core.call("settings.get") }.getOrNull()?.let { (it as? JsonObject)?.let { o -> settings = o }; display = Display.parse(it, display) }
             runCatching { Core.call("settings.meta") }.getOrNull()?.let { (it as? JsonObject)?.let { o -> settingsMeta = o } }
             runCatching { Core.call("updater.get") }.getOrNull()?.let { updater = UpdaterInfo.parse(it) }
-            alerts.prepare()
             restoreTabs()
             refreshAccounts()
             runCatching { Core.call("app.info").jsonObject["version"]?.jsonPrimitive?.contentOrNull }
@@ -194,6 +214,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) { previews.cards[p.key] = p }
     }
 
+    private suspend fun onHype(data: JsonElement) {
+        val o = data as? JsonObject ?: return
+        val sk = o["sk"]?.jsonPrimitive?.contentOrNull ?: return
+        val train = (o["train"] as? JsonObject)?.let { runCatching { Core.json.decodeFromJsonElement(HypeTrain.serializer(), it) }.getOrNull() }
+        withContext(Dispatchers.Main) { if (train == null) hype.remove(sk) else hype[sk] = train }
+    }
+
+    /**
+     * Someone whispered you (never an ignored user: the core leaves those out). A conversation with no tab yet gets one in
+     * the background, marked like any tab with news: it never takes the selection or the focus.
+     */
+    private suspend fun onWhisper(data: JsonElement) {
+        val login = (data as? JsonObject)?.get("login")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() } ?: return
+        val tab = withContext(Dispatchers.Main) {
+            val ref = ChannelRef("twitch", "whisper:" + login.lowercase())
+            if (tabs.any { t -> t.channels.any { it.sk() == ref.sk() } }) return@withContext null
+            Tab(newId(), "", listOf(ref)).also { tabs.add(it); unread[it.id] = Dot.Highlight }
+        } ?: return
+        openView(tab, lenient = true, whisper = true)
+        saveTabs()
+    }
+
     private suspend fun onMentions(data: JsonElement) {
         val n = (data as? JsonObject)?.get("unread")?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: return
         withContext(Dispatchers.Main) { mentionsUnread = n }
@@ -218,6 +260,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun restoreTabs() {
+        // the screen can come back after being closed while the background service kept the chats: those views are
+        // closed first, the tabs below open again
+        runCatching { Core.call("views.reset") }
         val saved = runCatching {
             Core.json.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(SavedTab.serializer()), Core.call("tabs.get"))
         }.getOrElse { emptyList() }
@@ -229,11 +274,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         for (t in restored) viewModelScope.launch { openView(t, lenient = true) }
     }
 
-    private suspend fun openView(tab: Tab, lenient: Boolean = false): String? = try {
+    private suspend fun openView(tab: Tab, lenient: Boolean = false, whisper: Boolean = false): String? = try {
         Core.call("view.open", buildJsonObject {
             put("vk", tab.id)
             put("channels", channelsJson(tab.channels))
             if (lenient) put("lenient", true)
+            if (whisper) put("whisper", true)
         })
         null
     } catch (e: CoreError) {
@@ -245,23 +291,52 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun clean(channelRaw: String) = channelRaw.trim().trimStart('#', '@')
 
-    /** Opens a chat in a new tab; returns an error message to show, or null on success. */
+    /** The channel the add dialog means: "whisper" is a Twitch whisper conversation (the core's reserved channel). */
+    private fun refOf(platform: String, raw: String): ChannelRef {
+        val c = clean(raw)
+        return if (platform == "whisper") ChannelRef("twitch", "whisper:$c") else ChannelRef(platform, c)
+    }
+
+    private fun emptyName(platform: String) = if (platform == "whisper") "Enter a Twitch username" else "Enter a channel name"
+
+    /** Opens a chat in a new tab; returns an error message to show, or null on success. [platform] "whisper" starts a whisper. */
     suspend fun addTab(platform: String, channelRaw: String): String? {
-        val channel = clean(channelRaw)
-        if (channel.isEmpty()) return "Enter a channel name"
-        val tab = Tab(newId(), "", listOf(ChannelRef(platform, channel)))
+        if (clean(channelRaw).isEmpty()) return emptyName(platform)
+        val tab = Tab(newId(), "", listOf(refOf(platform, channelRaw)))
         openView(tab)?.let { return it }
         tabs.add(tab)
+        focusTab = tab.id
         saveTabs()
+        // the first moment notifications matter: a chat is open, and the app can tell you about mentions
+        if (!Notifier.allowed(getApplication()) && !Prefs.askedNotifications(getApplication())) askNotifications = true
         return null
+    }
+
+    /** The screen has scrolled to the tab it was told to. */
+    fun focusDone(id: String) {
+        if (focusTab == id) focusTab = null
+    }
+
+    /** The permission question was put to the person (once; the phone asks at most twice anyway). */
+    fun notificationsAsked() {
+        askNotifications = false
+        Prefs.setAskedNotifications(getApplication())
+    }
+
+    /** "Stay connected in the background" on or off (the service follows). Turning it on is another moment to ask for notifications. */
+    fun changeStayConnected(on: Boolean) {
+        Prefs.setStayConnected(getApplication(), on)
+        stayConnected = on
+        if (on && !Notifier.allowed(getApplication()) && !Prefs.askedNotifications(getApplication())) askNotifications = true
     }
 
     /** Adds a channel to a tab (merged into its list); returns an error message to show, or null on success. */
     suspend fun addChannel(tab: Tab, platform: String, channelRaw: String): String? {
-        val channel = clean(channelRaw)
-        if (channel.isEmpty()) return "Enter a channel name"
-        val ref = ChannelRef(platform, channel)
+        if (clean(channelRaw).isEmpty()) return emptyName(platform)
+        val ref = refOf(platform, channelRaw)
         if (tab.channels.any { it.sk() == ref.sk() }) return "That channel is already in this tab"
+        // like the desktop: a whisper is its own list, it never shares one with channels
+        if (tab.channels.any { it.isWhisper() != ref.isWhisper() }) return "A whisper can't share a split with channels."
         return changeChannels(tab, tab.channels + ref)
     }
 
@@ -357,6 +432,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    /** A tapped notification: bring that message's tab forward ([vk] while it is open, else any tab with [sk]) and show the line. */
+    fun openFromNotification(vk: String, sk: String, key: String) {
+        val tab = tabs.firstOrNull { it.id == vk } ?: tabs.firstOrNull { sk in it.sks } ?: return
+        if (mentionsOpen) closeMentions()
+        jump = Jump(tab.id, key, System.nanoTime())
+    }
+
     fun jumpDone(j: Jump) {
         if (jump == j) jump = null
     }
@@ -371,6 +453,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val answer = runCatching { Core.call("settings.set", buildJsonObject { put("patch", patch) }) }.getOrNull() as? JsonObject ?: return@launch
             settings = answer
             display = Display.parse(answer, display)
+        }
+    }
+
+    /** The desktop's "Reload emotes": every emote set the tab's chats draw with is fetched again, past the cache. */
+    fun reloadEmotes(tab: Tab) {
+        viewModelScope.launch { for (ch in tab.channels) if (!ch.isWhisper()) runCatching { Core.call("chat.reloadEmotes", buildJsonObject { put("sk", ch.sk()) }) } }
+    }
+
+    /** The desktop's "Stream link": opens the page the channel's stream plays on (the core knows how each platform's channel maps to one). */
+    fun openStream(ch: ChannelRef) {
+        viewModelScope.launch {
+            val url = runCatching { Core.call("stream.url", buildJsonObject { put("platform", ch.platform); put("channel", ch.channel) }).jsonPrimitive.contentOrNull }.getOrNull() ?: return@launch
+            runCatching { Core.call("open.url", buildJsonObject { put("url", url) }) }
         }
     }
 

@@ -1,0 +1,254 @@
+//! The hype train bar at the top of a Twitch chat, like twitch.tv's: collapsed it is a progress bar ("Hype Train",
+//! "Lvl N", time left, percent of the level), expanded it adds what is left to finish the level in Bits or subs,
+//! the level's emotes, a few lines of info and the conductors (top sub gifter / top cheerer).
+//!
+//! Data: `GET /api/twitch/hype-train` of the core (public gql.twitch.tv fields, see core `twitch/hype_train.rs`).
+//! Each pane asks for its Twitch channels on a timer: every `ACTIVE_POLL` while a train is on, every `IDLE_POLL`
+//! otherwise, and a few seconds after a sub or Bits show up in chat (what starts a train). The bar goes away when
+//! the core says the train is over, or on its own once the time runs out. Setting `hypeTrain` turns it all off.
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+pub const ACTIVE_POLL: Duration = Duration::from_secs(5);
+pub const IDLE_POLL: Duration = Duration::from_secs(45);
+pub const ERROR_POLL: Duration = Duration::from_secs(30);
+/// after a sub or Bits in chat: check this soon
+pub const SOON: Duration = Duration::from_secs(3);
+/// Twitch's own hype train purple, when the channel has no color of its own
+pub const DEFAULT_COLOR: u32 = 0x9147ff;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HypeEmote {
+    pub id: String,
+    pub token: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Conductor {
+    /// "SUBS" | "BITS"
+    pub source: String,
+    pub name: String,
+    pub avatar: String,
+    pub quantity: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HypeTrain {
+    pub id: String,
+    pub level: u64,
+    pub percent: u64,
+    pub bits: u64,
+    pub subs: u64,
+    /// unix ms; None when Twitch sent no end time
+    pub expires_ms: Option<i64>,
+    pub emotes: Vec<HypeEmote>,
+    pub conductors: Vec<Conductor>,
+    /// sources whose top contributor gets the conductor badge ("BITS", "SUBS")
+    pub conductor_rewards: Vec<String>,
+    pub treasure: bool,
+    pub golden_kappa: bool,
+    pub shared: bool,
+    pub color: Option<u32>,
+    pub record_level: u64,
+}
+
+fn u(v: &Value, k: &str) -> u64 {
+    v[k].as_u64().unwrap_or(0)
+}
+
+fn st(v: &Value, k: &str) -> String {
+    v[k].as_str().unwrap_or("").to_string()
+}
+
+/// The core's answer -> the train, None when there is none going.
+pub fn parse(v: &Value) -> Option<HypeTrain> {
+    if v["active"].as_bool() != Some(true) {
+        return None;
+    }
+    let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+    Some(HypeTrain {
+        id: st(v, "id"),
+        level: u(v, "level").max(1),
+        percent: u(v, "percent").min(100),
+        bits: u(v, "bits"),
+        subs: u(v, "subs"),
+        expires_ms: v["expiresAt"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis()),
+        emotes: list("emotes").iter().filter(|e| !st(e, "url").is_empty()).map(|e| HypeEmote { id: st(e, "id"), token: st(e, "token"), url: st(e, "url") }).collect(),
+        conductors: list("conductors").iter().map(|c| Conductor { source: st(c, "source"), name: st(c, "name"), avatar: st(c, "avatar"), quantity: u(c, "quantity") }).collect(),
+        conductor_rewards: list("conductorRewards").iter().filter_map(|s| s.as_str().map(String::from)).collect(),
+        treasure: v["treasure"].as_bool().unwrap_or(false),
+        golden_kappa: v["goldenKappa"].as_bool().unwrap_or(false),
+        shared: v["shared"].as_bool().unwrap_or(false),
+        color: v["color"].as_str().and_then(|h| u32::from_str_radix(h, 16).ok()),
+        record_level: v.pointer("/record/level").and_then(|l| l.as_u64()).unwrap_or(0),
+    })
+}
+
+/// "4:40": minutes and seconds left, never below 0:00.
+pub fn time_left(expires_ms: i64, now_ms: i64) -> String {
+    let s = ((expires_ms - now_ms) as f64 / 1000.0).ceil().max(0.0) as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Over: the time ran out (a level-up would have moved it; a short grace covers clock skew and the next answer).
+pub fn expired(t: &HypeTrain, now_ms: i64) -> bool {
+    t.expires_ms.map(|e| now_ms > e + 3000).unwrap_or(false)
+}
+
+/// The bar's fill: the channel's color, darkened when white text would not read on it.
+pub fn fill_color(color: Option<u32>) -> u32 {
+    let c = color.unwrap_or(DEFAULT_COLOR);
+    let (r, g, b) = (((c >> 16) & 0xff) as f32, ((c >> 8) & 0xff) as f32, (c & 0xff) as f32);
+    let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+    if lum <= 0.55 {
+        return c;
+    }
+    let k = 0.55 / lum;
+    let d = |x: f32| ((x * k).round() as u32).min(255);
+    (d(r) << 16) | (d(g) << 8) | d(b)
+}
+
+/// "1,234"
+pub fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+pub fn plural(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", thousands(n), if n == 1 { one } else { many })
+}
+
+/// The lines under "Info".
+pub fn info_lines(t: &HypeTrain) -> Vec<String> {
+    let mut v = Vec::new();
+    let subs = t.conductor_rewards.iter().any(|s| s == "SUBS");
+    let bits = t.conductor_rewards.iter().any(|s| s == "BITS");
+    match (subs, bits) {
+        (true, true) => v.push("The top sub gifter and the top cheerer get a conductor badge".to_string()),
+        (true, false) => v.push("The top sub gifter gets a conductor badge".to_string()),
+        (false, true) => v.push("The top cheerer gets a conductor badge".to_string()),
+        _ => {}
+    }
+    if t.golden_kappa {
+        v.push("Golden Kappa Train".to_string());
+    }
+    if t.treasure {
+        v.push("Treasure Train".to_string());
+    }
+    if t.shared {
+        v.push("Shared with other channels".to_string());
+    }
+    if t.record_level > 0 {
+        v.push(format!("Channel record: Level {}", t.record_level));
+    }
+    v
+}
+
+/// A live chat frame that can start or move a train: a sub / gift / Bits.
+pub fn contributes(f: &Value) -> bool {
+    match f["type"].as_str() {
+        Some("chat") => f["msg"]["bits"].as_f64().or_else(|| f["message"]["bits"].as_f64()).map(|b| b > 0.0).unwrap_or(false),
+        Some("chatnotice") => matches!(f["notice"]["msgId"].as_str(), Some("sub" | "resub" | "subgift" | "submysterygift" | "anonsubgift" | "anonsubmysterygift" | "giftpaidupgrade" | "primepaidupgrade")),
+        _ => false,
+    }
+}
+
+/// One Twitch source's bar: the train and when to ask next.
+#[derive(Default)]
+pub struct HypeState {
+    pub train: Option<HypeTrain>,
+    pub next: Option<Instant>,
+    pub busy: bool,
+}
+
+/// per pane: one state per Twitch source key
+pub type HypeMap = HashMap<String, HypeState>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn answer() -> Value {
+        json!({"active": true, "id": "t1", "level": 2, "percent": 17, "bits": 3300, "subs": 7, "expiresAt": "2026-11-19T01:00:07Z",
+            "emotes": [{"id": "e1", "token": "KittyHype", "url": "https://static-cdn.jtvnw.net/emoticons/v2/e1/default/dark/2.0"}, {"id": "e2", "token": "x", "url": ""}],
+            "conductors": [{"source": "BITS", "login": "c", "name": "Cheerer", "avatar": "", "quantity": 500}],
+            "conductorRewards": ["BITS", "SUBS"], "treasure": true, "goldenKappa": false, "shared": false, "color": "ffbf00", "record": {"level": 16}})
+    }
+
+    #[test]
+    fn parses_the_core_answer() {
+        let t = parse(&answer()).unwrap();
+        assert_eq!(t.level, 2);
+        assert_eq!(t.percent, 17);
+        assert_eq!((t.bits, t.subs), (3300, 7));
+        assert_eq!(t.expires_ms, Some(chrono::DateTime::parse_from_rfc3339("2026-11-19T01:00:07Z").unwrap().timestamp_millis()));
+        assert_eq!(t.emotes.len(), 1, "an emote without a picture is left out");
+        assert_eq!(t.conductors[0].name, "Cheerer");
+        assert_eq!(t.color, Some(0xffbf00));
+        assert_eq!(t.record_level, 16);
+        assert!(parse(&json!({"active": false})).is_none());
+        assert!(parse(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn countdown() {
+        assert_eq!(time_left(280_000, 0), "4:40");
+        assert_eq!(time_left(5_200, 0), "0:06");
+        assert_eq!(time_left(0, 10_000), "0:00");
+        assert_eq!(time_left(3_600_000, 0), "60:00");
+    }
+
+    #[test]
+    fn ends_when_time_runs_out() {
+        let t = HypeTrain { expires_ms: Some(10_000), ..Default::default() };
+        assert!(!expired(&t, 10_000));
+        assert!(!expired(&t, 12_000));
+        assert!(expired(&t, 13_001));
+        assert!(!expired(&HypeTrain::default(), i64::MAX));
+    }
+
+    #[test]
+    fn fill_keeps_dark_colors_and_darkens_light_ones() {
+        assert_eq!(fill_color(None), DEFAULT_COLOR);
+        assert_eq!(fill_color(Some(0xd64545)), 0xd64545);
+        let f = fill_color(Some(0xffbf00));
+        assert_ne!(f, 0xffbf00);
+        let (r, g, b) = (((f >> 16) & 0xff) as f32, ((f >> 8) & 0xff) as f32, (f & 0xff) as f32);
+        assert!((0.299 * r + 0.587 * g + 0.114 * b) / 255.0 <= 0.56);
+        assert!(r > g && g > b, "the hue stays");
+    }
+
+    #[test]
+    fn info_from_flags() {
+        let t = parse(&answer()).unwrap();
+        assert_eq!(info_lines(&t), vec!["The top sub gifter and the top cheerer get a conductor badge", "Treasure Train", "Channel record: Level 16"]);
+        assert!(info_lines(&HypeTrain::default()).is_empty());
+    }
+
+    #[test]
+    fn subs_and_bits_poke_the_poll() {
+        assert!(contributes(&json!({"type": "chatnotice", "notice": {"msgId": "subgift"}})));
+        assert!(contributes(&json!({"type": "chat", "msg": {"bits": 100}})));
+        assert!(!contributes(&json!({"type": "chat", "msg": {"text": "hi"}})));
+        assert!(!contributes(&json!({"type": "chatnotice", "notice": {"msgId": "raid"}})));
+        assert!(!contributes(&json!({"type": "conn"})));
+    }
+
+    #[test]
+    fn numbers() {
+        assert_eq!(thousands(1234567), "1,234,567");
+        assert_eq!(plural(1, "Sub", "Subs"), "1 Sub");
+        assert_eq!(plural(3300, "Bit", "Bits"), "3,300 Bits");
+    }
+}

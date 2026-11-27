@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -148,13 +150,13 @@ private val BanRed = Color(0xFFF87171)
 private val AmberTone = Color(0xFFFBBF24)
 private val CmdTone = Color(0xFFA970FF)
 
-private fun tone(b: ModButtonCfg) = when (b.action) {
+internal fun tone(b: ModButtonCfg) = when (b.action) {
     "timeout", "warn" -> AmberTone
     "command" -> CmdTone
     else -> BanRed
 }
 
-private fun allowed(b: ModButtonCfg, m: ModInfo) = when (b.action) {
+internal fun allowed(b: ModButtonCfg, m: ModInfo) = when (b.action) {
     "ban" -> m.ban
     "timeout" -> m.timeout
     "warn" -> m.warn
@@ -162,18 +164,23 @@ private fun allowed(b: ModButtonCfg, m: ModInfo) = when (b.action) {
     else -> m.cmd
 }
 
-/** The mod mode buttons at the start of a line: compact icons (a label when the button has one), 32 dp to tap. */
-@OptIn(ExperimentalLayoutApi::class)
+/** The most the mod buttons take of a line's width: more buttons than fit scroll sideways (they never wrap). */
+private val StripMax = 156.dp
+
+/**
+ * The mod mode buttons at the start of a line, in one compact row like the desktop's: small icons (a label when the
+ * button has one) in 36 dp touch targets. Too many for [StripMax] scroll sideways instead of wrapping.
+ */
 @Composable
 fun ModStrip(row: Row, vk: String, ctrl: ModController, modifier: Modifier = Modifier) {
     val m = row.mod ?: return
     val shown = LocalDisplay.current.modButtons.filter { allowed(it, m) }
     if (shown.isEmpty()) return
-    FlowRow(modifier.width((minOf(shown.size, 4) * 32 + 4).dp).padding(start = 2.dp, end = 2.dp), maxItemsInEachRow = 4) {
+    Row(modifier.widthIn(max = StripMax).horizontalScroll(rememberScrollState()).padding(start = 2.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         for (b in shown) {
-            Box(Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).clickable { ctrl.button(vk, row, b) }, contentAlignment = Alignment.Center) {
+            Box(Modifier.size(36.dp).clip(RoundedCornerShape(6.dp)).clickable { ctrl.button(vk, row, b) }, contentAlignment = Alignment.Center) {
                 if (b.label.isNotEmpty()) Text(b.label, color = tone(b), fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                else ModIcon(b.icon.ifEmpty { b.action }, tone(b), 18)
+                else ModIcon(b.icon.ifEmpty { b.action }, tone(b), 16)
             }
         }
     }
@@ -344,7 +351,6 @@ fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCo
                 if (m.delete) SheetRow("Delete message", AguColors.Danger) { onDismiss(); ctrl.delete(row.sk, m.t) }
                 if (m.warn) SheetRow("Warn…") { onDismiss(); ctrl.warn(row.sk, m.t) }
                 if (m.ban) SheetRow("Ban…", AguColors.Danger) { onDismiss(); ctrl.ban(row.sk, row.platform, m.t) }
-                if (m.unban) SheetRow("Unban") { onDismiss(); ctrl.act(row.sk, "unban", m.t) }
             }
         }
     }
