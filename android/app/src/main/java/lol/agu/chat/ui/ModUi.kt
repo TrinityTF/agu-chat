@@ -69,6 +69,10 @@ sealed interface ModDialog {
     class Timeout(val sk: String, val t: ModTarget, val name: String, val platform: String, val choices: List<Pair<String, Int>>) : ModDialog
     /** Rumble: mute for 5 minutes, this livestream or forever ((label, action, seconds)). */
     class Mute(val sk: String, val t: ModTarget, val name: String, val choices: List<Triple<String, String, Int>>) : ModDialog
+    /** Twitch: the "Pin for" choices of a message ((label, seconds; null = until unpinned or the stream ends)). */
+    class PinFor(val sk: String, val t: ModTarget, val choices: List<Pair<String, Int?>>) : ModDialog
+    /** Twitch: "Unpin After" on the pinned message [id]; [endsAtMs] is when it ends now. */
+    class UnpinAfter(val sk: String, val id: String, val endsAtMs: Long?, val start: ChatViewModel.UnpinStart) : ModDialog
     /** Kick, Rumble and YouTube ask before a ban; a command may ask too (`/clear`, `/raid`). */
     class Ask(val text: String, val yes: String, val run: () -> Unit) : ModDialog
 }
@@ -127,6 +131,22 @@ class ModController(private val vm: ChatViewModel, private val scope: CoroutineS
     /** Rumble: pin a line, or unpin the pinned one. */
     fun pin(sk: String, t: ModTarget, unpin: Boolean = false) = act(sk, if (unpin) "unpin" else "pin", t)
 
+    /** Twitch: the "Pin for" menu of a message; choosing a time pins it for that long. */
+    fun pinFor(sk: String, t: ModTarget) {
+        scope.launch {
+            val choices = vm.pinChoices()
+            if (choices.isNotEmpty()) dialog = ModDialog.PinFor(sk, t, choices)
+        }
+    }
+
+    /** Twitch: unpin the pinned message [id]. */
+    fun unpinTwitch(sk: String, id: String) = act(sk, "unpin", ModTarget(id = id))
+
+    /** Twitch: "Unpin After" for the pinned message [id]. */
+    fun unpinAfter(sk: String, id: String, endsAtMs: Long?) {
+        scope.launch { dialog = ModDialog.UnpinAfter(sk, id, endsAtMs, vm.pinStart(endsAtMs)) }
+    }
+
     /** The id of the line pinned in a Rumble chat. */
     fun pinnedId(sk: String): String? = vm.pins[sk]?.row?.id?.content
 
@@ -157,6 +177,9 @@ class ModController(private val vm: ChatViewModel, private val scope: CoroutineS
     }
 
     suspend fun rules(sk: String) = vm.modRules(sk)
+
+    /** The seconds a customized "Unpin After" time means, or null when Twitch would not take it. */
+    suspend fun pinSecs(amount: String, unitMin: Boolean) = vm.pinSecs(amount, unitMin)
 }
 
 // ---- the buttons ---------------------------------------------------------------------------------------
@@ -294,6 +317,21 @@ fun ModDialogs(ctrl: ModController) {
             )
         }
         is ModDialog.Warn -> WarnDialog(ctrl, d)
+        is ModDialog.PinFor -> ModalBottomSheet(onDismissRequest = { ctrl.dialog = null }, containerColor = AguColors.Surface) {
+            Column(Modifier.navigationBarsPadding().padding(start = 20.dp, end = 20.dp, bottom = 16.dp)) {
+                Text("Pin for", color = AguColors.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for ((label, secs) in d.choices) {
+                        Text(
+                            label, color = AguColors.Text, fontSize = 15.sp,
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp)).border(1.dp, AguColors.Surface2, RoundedCornerShape(8.dp))
+                                .clickable { ctrl.dialog = null; ctrl.act(d.sk, "pin", d.t, seconds = secs) }.padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+            }
+        }
+        is ModDialog.UnpinAfter -> UnpinAfterDialog(ctrl, d)
         is ModDialog.Ask -> AlertDialog(
             onDismissRequest = { ctrl.dialog = null },
             title = { Text(d.text) },
@@ -331,6 +369,49 @@ fun ModDialogs(ctrl: ModController) {
     }
 }
 
+/** "Unpin After": a customized time (30 seconds to 30 minutes) or until it is unpinned by hand or the stream ends. */
+@Composable
+private fun UnpinAfterDialog(ctrl: ModController, d: ModDialog.UnpinAfter) {
+    var timeMode by remember(d) { mutableStateOf(d.start.timeMode) }
+    var unitMin by remember(d) { mutableStateOf(d.start.unitMin) }
+    var amount by remember(d) { mutableStateOf(d.start.amount) }
+    var secs by remember(d) { mutableStateOf<Int?>(null) }
+    // the core says whether the amount is one Twitch takes
+    LaunchedEffect(d, amount, unitMin) { secs = ctrl.pinSecs(amount, unitMin) }
+    val valid = !timeMode || secs != null
+    @Composable
+    fun Radio(on: Boolean, label: String, set: () -> Unit) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = set).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.size(18.dp).clip(CircleShape).border(1.5.dp, if (on) AguColors.Accent else AguColors.Muted, CircleShape), contentAlignment = Alignment.Center) {
+                if (on) Box(Modifier.size(9.dp).clip(CircleShape).background(AguColors.Accent))
+            }
+            Text(label, color = AguColors.Text, fontSize = 15.sp, modifier = Modifier.weight(1f))
+        }
+    }
+    AlertDialog(
+        onDismissRequest = { ctrl.dialog = null },
+        title = { Text("Unpin After") },
+        text = {
+            Column {
+                Radio(timeMode, "Customized time") { timeMode = true }
+                Row(Modifier.padding(start = 28.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FieldBox(amount, { amount = it.filter { c -> c.isDigit() || c == '.' }.take(6); timeMode = true }, "20", Modifier.width(96.dp))
+                    Text(
+                        if (unitMin) "min ▾" else "sec ▾", color = AguColors.Text, fontSize = 15.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).border(1.dp, AguColors.Surface2, RoundedCornerShape(8.dp)).clickable { unitMin = !unitMin; timeMode = true }.padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                }
+                if (timeMode && !valid) Text(d.start.hint, color = Color(0xFFFBBF24), fontSize = 12.sp, modifier = Modifier.padding(start = 28.dp, bottom = 4.dp))
+                Radio(!timeMode, "Manually unpinned or end of stream") { timeMode = false }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = { ctrl.dialog = null; ctrl.act(d.sk, "pinduration", ModTarget(id = d.id), seconds = if (timeMode) secs else null) }) { Text("Save", color = if (valid) AguColors.Accent else AguColors.Muted) }
+        },
+        dismissButton = { TextButton(onClick = { ctrl.dialog = null }) { Text("Cancel", color = AguColors.Muted) } },
+    )
+}
+
 /** A warning: tick the chat rules that were broken and/or write a reason (at least one). */
 @Composable
 private fun WarnDialog(ctrl: ModController, d: ModDialog.Warn) {
@@ -364,7 +445,7 @@ private fun WarnDialog(ctrl: ModController, d: ModDialog.Warn) {
 /** What a long-press on a line offers: Reply, Copy, the user card, and for a moderator what the core allows on that line. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCopy: () -> Unit, onDismiss: () -> Unit) {
+fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCopy: () -> Unit, onDismiss: () -> Unit, onThread: (() -> Unit)? = null) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = AguColors.Surface) {
         Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
             // the line itself, drawn as in chat (emotes as pictures), without mod buttons and not tappable
@@ -374,13 +455,16 @@ fun RowActionsSheet(ctrl: ModController?, row: Row, onReply: (() -> Unit)?, onCo
                 }
             }
             if (onReply != null) SheetRow("Reply", onClick = onReply)
+            if (onThread != null) SheetRow("Reply in thread", onClick = onThread)
             SheetRow("Copy text", onClick = onCopy)
             if (ctrl != null && row.user != null && row.kind != "modfeed") SheetRow("Open user card") { onDismiss(); ctrl.openCard(row) }
             val m = row.mod
             if (ctrl != null && m != null) {
                 if (m.timeout && m.muteChoices.isNotEmpty()) SheetRow("Mute user…") { onDismiss(); ctrl.mute(row.sk, m) }
                 else if (m.timeout) SheetRow("Timeout…") { onDismiss(); ctrl.timeout(row.sk, row.platform, m) }
-                if (m.pin) {
+                // Twitch pins for a time of your choice; Rumble pins (or unpins) at once
+                if (m.pin && row.platform == "twitch") SheetRow("Pin for…") { onDismiss(); ctrl.pinFor(row.sk, m.t) }
+                else if (m.pin) {
                     val pinned = row.id?.content == ctrl.pinnedId(row.sk)
                     SheetRow(if (pinned) "Unpin this message" else "Pin this message") { onDismiss(); ctrl.pin(row.sk, m.t, unpin = pinned) }
                 }

@@ -38,6 +38,7 @@ pub enum Section {
     Appearance,
     Highlights,
     Ignores,
+    Commands,
     Hotkeys,
     ModButtons,
     Updates,
@@ -45,11 +46,12 @@ pub enum Section {
     About,
 }
 
-const SECTIONS: [(Section, &str); 9] = [
+const SECTIONS: [(Section, &str); 10] = [
     (Section::Accounts, "Accounts"),
     (Section::Appearance, "Appearance and chat"),
     (Section::Highlights, "Highlights"),
     (Section::Ignores, "Ignores"),
+    (Section::Commands, "Commands"),
     (Section::Hotkeys, "Hotkeys"),
     (Section::ModButtons, "Mod buttons"),
     (Section::Updates, "Updates"),
@@ -65,6 +67,7 @@ impl Section {
             "appearance" => Section::Appearance,
             "highlights" => Section::Highlights,
             "ignores" => Section::Ignores,
+            "commands" => Section::Commands,
             "hotkeys" => Section::Hotkeys,
             "modbuttons" => Section::ModButtons,
             "updates" => Section::Updates,
@@ -119,6 +122,9 @@ pub struct SettingsDialog {
     // ignores
     ignore_platform: Platform,
     new_phrase: IgnoredPhrase,
+    // commands
+    pub(super) cmd_status: Option<(String, bool)>,
+    pub(super) cmd_new_menu: bool,
     // hotkeys
     recording: Option<HotkeyAction>,
     hk_hint: String,
@@ -275,6 +281,8 @@ impl SettingsDialog {
             rumble_need_code: false,
             copied: false,
             ignore_platform: Platform::Twitch,
+            cmd_status: None,
+            cmd_new_menu: false,
             new_phrase: IgnoredPhrase { pattern: String::new(), regex: false, case_sensitive: false, action: "hide".into(), replacement: String::new() },
             recording: None,
             hk_hint: String::new(),
@@ -387,6 +395,15 @@ impl SettingsDialog {
                 }
             } else if let Ok(i) = idx.parse::<usize>() {
                 self.commit_phrase(i, cx);
+            }
+        } else if let Some(rest) = key.strip_prefix("cmd.") {
+            let idx = rest.split('.').next().unwrap_or("");
+            if idx == "new" {
+                if enter && rest.ends_with(".name") {
+                    self.add_command(cx);
+                }
+            } else if let Ok(i) = idx.parse::<usize>() {
+                self.commit_command(i, cx);
             }
         } else if let Some(id) = key.strip_prefix("mb.").and_then(|r| r.strip_suffix(".secs")) {
             let text = self.text_of(key, cx);
@@ -1807,6 +1824,7 @@ impl Render for SettingsDialog {
             Section::Appearance => self.render_appearance(cx),
             Section::Highlights => self.render_highlights(window, cx),
             Section::Ignores => self.render_ignores(window, cx),
+            Section::Commands => self.render_commands(window, cx),
             Section::Hotkeys => self.render_hotkeys(cx),
             Section::ModButtons => self.render_mod_buttons(window, cx),
             Section::Updates => self.render_updates(cx),

@@ -59,6 +59,7 @@ pub fn default_settings() -> Map<String, Value> {
         "highlightSoundFocused": true,
         "ignoredUsers": [], // [{ platform, login }] (see settings_sanitize.rs)
         "ignoredPhrases": [], // [{ pattern, regex, caseSensitive, action: "hide" | "replace", replacement }]
+        "customCommands": [], // [{ name, text, inMenu }]
     });
     match v {
         Value::Object(m) => m,

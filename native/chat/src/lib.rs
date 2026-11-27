@@ -9,6 +9,7 @@ pub mod hype_train;
 pub mod ignores;
 pub mod input;
 pub mod mod_actions;
+pub mod pins;
 pub mod mod_buttons;
 pub mod mentions;
 pub mod mod_caps;

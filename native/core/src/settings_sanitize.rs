@@ -67,10 +67,35 @@ pub fn sanitize_ignored_phrases(list: &Value) -> Option<Value> {
     Some(Value::Array(out))
 }
 
+/// `[{ name, text, inMenu }]`: names are one word (no spaces), duplicates (ignoring case) and empty texts
+/// are dropped.
+pub fn sanitize_custom_commands(list: &Value) -> Option<Value> {
+    let list = list.as_array()?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for e in list {
+        let Some(o) = e.as_object() else { continue };
+        let name = js_trim(&str_of(o.get("name"), 40)).to_string();
+        let text = str_of(o.get("text"), 2000);
+        if name.is_empty() || name.contains(char::is_whitespace) || js_trim(&text).is_empty() {
+            continue;
+        }
+        if !seen.insert(name.to_lowercase()) {
+            continue;
+        }
+        out.push(json!({"name": name, "text": text, "inMenu": o.get("inMenu") == Some(&Value::Bool(true))}));
+        if out.len() >= 300 {
+            break;
+        }
+    }
+    Some(Value::Array(out))
+}
+
 fn list_sanitizer(key: &str) -> Option<fn(&Value) -> Option<Value>> {
     match key {
         "ignoredUsers" => Some(sanitize_ignored_users),
         "ignoredPhrases" => Some(sanitize_ignored_phrases),
+        "customCommands" => Some(sanitize_custom_commands),
         _ => None,
     }
 }

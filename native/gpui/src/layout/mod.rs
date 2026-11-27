@@ -4,6 +4,7 @@ pub mod channel_dialog;
 pub mod channel_modes;
 
 pub mod dev_mock;
+pub mod commands_section;
 pub mod highlights_section;
 pub mod hotkeys;
 pub mod mentions_panel;

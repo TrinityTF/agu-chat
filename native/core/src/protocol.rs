@@ -162,6 +162,17 @@ pub struct ModButton {
     pub command: String,
 }
 
+/// A name the send box replaces with saved text (agu_chat_model::input::custom_commands). `in_menu` also
+/// lists it in a message's menu, where it can fill in that message's sender, id and text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomCommand {
+    pub name: String,
+    pub text: String,
+    #[serde(default)]
+    pub in_menu: bool,
+}
+
 /// Keep in sync with DEFAULT_SETTINGS in src/main/store.js (the backend's store port owns the defaults
 /// and validation; `Default` here must equal them).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -207,6 +218,7 @@ pub struct Settings {
     pub highlight_sound_focused: bool,
     pub ignored_users: Vec<IgnoredUser>,
     pub ignored_phrases: Vec<IgnoredPhrase>,
+    pub custom_commands: Vec<CustomCommand>,
 }
 
 impl Default for Settings {
@@ -259,6 +271,7 @@ impl Default for Settings {
             highlight_sound_focused: true,
             ignored_users: Vec::new(),
             ignored_phrases: Vec::new(),
+            custom_commands: Vec::new(),
         }
     }
 }

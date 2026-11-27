@@ -125,13 +125,15 @@ struct View {
     /// a whisper opened this tab: its conversation comes in as a snapshot (never news by itself), whose newest line
     /// is the mention
     whisper_pending: bool,
-    /// the pinned-message bars the app was last sent (Rumble)
+    /// the pinned-message bars the app was last sent
     pins_sent: Vec<Value>,
+    /// the Twitch pins the user hid for themselves (the newest are remembered)
+    hidden_pins: Vec<String>,
 }
 
 impl View {
     fn new() -> Self {
-        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new(), whisper_pending: false, pins_sent: Vec::new() }
+        View { store: ChatStore::default(), sent: HashMap::new(), sent_order: Vec::new(), ignore_cache: IgnoreCache::default(), dirty: true, full: true, seen_ord: 0, search: None, restyle: HashSet::new(), whisper_pending: false, pins_sent: Vec::new(), hidden_pins: Vec::new() }
     }
 
     /// The rows event since the last one, or None when nothing changed.
@@ -178,20 +180,40 @@ impl View {
         Some(ev)
     }
 
-    /// Rumble's pinned message of each Rumble channel here, drawn like a chat line (`{sk, row, canMod}`; `row` is null
-    /// when nothing is pinned). `canMod`: the account may unpin it.
+    /// The pinned message of each Rumble and Twitch channel here, drawn like a chat line (`row` is null when nothing
+    /// is pinned, or the pin is hidden or over). `canMod`: the account may unpin it.
     fn pins(&self, cx: &Ctx) -> Vec<Value> {
+        let now = agu_chat_model::pins::now_ms();
         self.store
             .sources
             .iter()
-            .filter(|s| s.source.platform == Platform::Rumble)
-            .map(|s| {
+            .filter_map(|s| {
                 let env = env_of(&s.sk, cx, Some(&self.store));
-                let row = s.rumble_pinned.as_ref().map(|m| {
-                    let r = agu_chat_model::types::Row { key: format!("{}|pin", s.sk), ts: m.ts, sk: s.sk.clone(), platform: Platform::Rumble, ord: 0, backlog: true, body: RowBody::Rumble(m.clone()) };
-                    row_json(&r, &env)
-                });
-                json!({"sk": s.sk, "row": row, "canMod": env.mods.as_ref().map(|m| m.can_moderate()).unwrap_or(false)})
+                match s.source.platform {
+                    Platform::Rumble => {
+                        let row = s.rumble_pinned.as_ref().map(|m| {
+                            let r = agu_chat_model::types::Row { key: format!("{}|pin", s.sk), ts: m.ts, sk: s.sk.clone(), platform: Platform::Rumble, ord: 0, backlog: true, body: RowBody::Rumble(m.clone()) };
+                            row_json(&r, &env)
+                        });
+                        Some(json!({"sk": s.sk, "row": row, "canMod": env.mods.as_ref().map(|m| m.can_moderate()).unwrap_or(false)}))
+                    }
+                    Platform::Twitch if agu_chat_core::twitch::whisper::login_of(&s.source.channel).is_none() => {
+                        let shown = s.pinned.as_ref().filter(|p| !agu_chat_model::pins::pin_expired(p, now) && !self.hidden_pins.contains(&p.id));
+                        Some(match shown {
+                            Some(p) => {
+                                let by_id = p.pin.as_ref().map(|x| x.by.id.as_str()).unwrap_or("");
+                                // the pinner's badges come from their latest line in this chat
+                                let badges = self.store.rows().iter().rev().find_map(|r| match &r.body {
+                                    RowBody::Msg(m) if r.sk == s.sk && !by_id.is_empty() && m.user.id == by_id => Some(m.badges.clone()),
+                                    _ => None,
+                                });
+                                crate::view::pin_json(&s.sk, p, badges.as_deref().unwrap_or(""), env.mods.as_ref().map(|m| m.twitch.pin).unwrap_or(false), &env)
+                            }
+                            None => json!({"sk": s.sk, "kind": "twitch", "row": null, "canMod": false}),
+                        })
+                    }
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -286,13 +308,40 @@ struct State {
     inv_gen: u64,
     /// per Twitch channel: its hype train and when to ask next
     hype: HashMap<String, HypeState>,
+    /// the Twitch pins hidden for the user, newest last (kept in `hidden-pins.json` like the desktop)
+    hidden_pins: Vec<String>,
 }
 
 type Out = Vec<(&'static str, Value)>;
 
 impl State {
     fn new() -> State {
-        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0, personal: Vec::new(), personal_requested: HashSet::new(), inv_gen: 0, hype: HashMap::new() }
+        State { hub: Hub::default(), views: HashMap::new(), src: HashMap::new(), rules: Rules::default(), alerter: Alerter::default(), mentions: Mentions::default(), mentions_open: false, mentions_sent: (0, 0), active: true, defs: None, defs_requested: false, defs_failures: 0, book: Arc::new(StyleBook::default()), previews: PreviewCache::new(), seven_seq: 0, personal: Vec::new(), personal_requested: HashSet::new(), inv_gen: 0, hype: HashMap::new(), hidden_pins: Vec::new() }
+    }
+
+    /// `{vk, sk, parent, thread}`: the lines of the reply thread a reply belongs to (its first message when the chat
+    /// still has it, then every reply), drawn like the chat's rows. `{root, hasRoot, canReply, rows}`.
+    fn thread_json(&self, args: &Value) -> Result<Value, String> {
+        use agu_chat_model::thread::{can_reply, reply_link, thread_root, thread_rows};
+        let (vk, sk) = (str_arg(args, "vk")?, str_arg(args, "sk")?);
+        let st = self;
+        let v = st.views.get(vk).ok_or("that tab is not open")?;
+        let all = v.store.rows();
+        let root = thread_root(all, sk, args.get("parent").and_then(|p| p.as_str()).unwrap_or(""), args.get("thread").and_then(|p| p.as_str()).unwrap_or(""));
+        let list = thread_rows(all, sk, &root);
+        let cx = Ctx { src: &st.src, rules: &st.rules, defs: st.defs.clone(), book: &st.book };
+        let env = env_of(sk, &cx, Some(&v.store));
+        let rows: Vec<Value> = list
+            .iter()
+            .map(|r| {
+                let mut j = row_json(r, &env);
+                st.rules.decorate(&mut j, r);
+                j
+            })
+            .collect();
+        let has_root = !root.is_empty() && list.first().and_then(|r| reply_link(r)).map(|l| l.id == root).unwrap_or(false);
+        let can = st.hub.source(sk).map(|s| can_reply(s.platform, st.src.get(sk).and_then(|d| d.conn.as_ref()).and_then(|c| c.get("canSend")).and_then(|c| c.as_bool()))).unwrap_or(false);
+        Ok(json!({"root": root, "hasRoot": has_root, "canReply": can, "rows": rows}))
     }
 
     /// Everything shown depends on these (settings, accounts): draw all rows again.
@@ -620,6 +669,26 @@ fn send_request(source: &SourceRef, text: &str, reply_to: Option<&str>) -> (&'st
     (path, body)
 }
 
+/// `{endsAtMs?}` -> `{left, text, over}`: what is left on a pin ("5 min", "30s"); `left` is null for a pin without an end.
+fn pin_left(args: &Value) -> Value {
+    let now = agu_chat_model::pins::now_ms();
+    match args.get("endsAtMs").and_then(|e| e.as_i64()) {
+        Some(e) => {
+            let left = agu_chat_model::pins::pin_left_secs(e, now);
+            json!({"left": left, "text": agu_chat_model::pins::left_text(left), "over": e <= now})
+        }
+        None => json!({"left": null, "text": null, "over": false}),
+    }
+}
+
+/// `{endsAtMs?}` -> where "Unpin after" starts: `{timeMode, unitMin, amount, hint}`.
+fn pin_start(args: &Value) -> Value {
+    let now = agu_chat_model::pins::now_ms();
+    let left = args.get("endsAtMs").and_then(|e| e.as_i64()).map(|e| agu_chat_model::pins::pin_left_secs(e, now));
+    let (time_mode, unit_min, amount) = agu_chat_model::pins::unpin_after_start(left);
+    json!({"timeMode": time_mode, "unitMin": unit_min, "amount": amount, "hint": agu_chat_model::pins::PIN_RANGE_HINT})
+}
+
 fn platform_of(v: &Value) -> Result<Platform, String> {
     serde_json::from_value(v.get("platform").cloned().unwrap_or(Value::Null)).map_err(|_| "unknown platform".to_string())
 }
@@ -693,6 +762,7 @@ impl Session {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = State::new();
         state.rules = Rules::new(bridge.settings_get(), AccountsState::new());
+        state.hidden_pins = std::fs::read(data_dir.join("hidden-pins.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let txs = tx.clone();
         let seven = SevenSocket::new(&net, Arc::new(move |ev| {
             let _ = txs.send(Inbox::Seven(ev));
@@ -1467,7 +1537,8 @@ impl Session {
             let before = st.hub.sources_of(&vk);
             let change = st.hub.set_view(&vk, &channels);
             let sources = st.hub.sources_of(&vk);
-            let view = st.views.entry(vk.clone()).or_insert_with(View::new);
+            let hidden = st.hidden_pins.clone();
+            let view = st.views.entry(vk.clone()).or_insert_with(|| View { hidden_pins: hidden, ..View::new() });
             view.store.sync(&sources);
             view.dirty = true;
             view.full = true;
@@ -1547,7 +1618,7 @@ impl Session {
     async fn send(&self, sk: &str, text: &str, reply_to: Option<&str>) -> Result<Value, String> {
         let source = self.source_of(sk)?;
         let (path, body) = send_request(&source, text, reply_to);
-        let r = relay_api(&self.inner.bridge, &source, path, Some("POST"), Some(body)).await;
+        let r = self.relay(&source, path, Some("POST"), Some(body)).await;
         if r.ok {
             return Ok(json!({"ok": true}));
         }
@@ -1665,6 +1736,24 @@ impl Session {
             Ok(None) => json!({"clear": true}),
             Err(e) => json!({"toast": e, "warn": true, "clear": false}),
         })
+    }
+
+    /// `{id}`: "Hide for yourself" on a Twitch pin: gone from every tab, and remembered.
+    fn pin_hide(&self, id: &str) {
+        let mut guard = self.inner.st.lock().unwrap();
+        let st = &mut *guard;
+        agu_chat_model::pins::hide_pin(&mut st.hidden_pins, id);
+        if let Ok(b) = serde_json::to_vec(&st.hidden_pins) {
+            let _ = std::fs::write(self.inner.data_dir.join("hidden-pins.json"), b);
+        }
+        for v in st.views.values_mut() {
+            v.hidden_pins = st.hidden_pins.clone();
+            v.dirty = true;
+        }
+    }
+
+    fn thread_rows(&self, args: &Value) -> Result<Value, String> {
+        self.inner.st.lock().unwrap().thread_json(args)
     }
 
     /// The Mentions screen's list, newest first.
@@ -1798,6 +1887,16 @@ impl Session {
                     Ok(Value::Null)
                 }
                 "mentions.list" => Ok(s.mentions_list()),
+                "thread.rows" => s.thread_rows(&args),
+                // Twitch's pinned message: hide it for the user, what is left of it, the "Pin for" and "Unpin after" choices
+                "pin.hide" => {
+                    s.pin_hide(str_arg(&args, "id")?);
+                    Ok(Value::Null)
+                }
+                "pin.left" => Ok(pin_left(&args)),
+                "pin.choices" => Ok(json!(agu_chat_model::mod_actions::PIN_CHOICES.iter().map(|(l, s)| json!([l, s])).collect::<Vec<_>>())),
+                "pin.start" => Ok(pin_start(&args)),
+                "pin.secs" => Ok(json!(agu_chat_model::pins::unpin_secs(str_arg(&args, "amount")?, args.get("unitMin").and_then(|u| u.as_bool()).unwrap_or(true)))),
                 // the built-in alert sound: 16-bit mono PCM
                 // Settings screens
                 "settings.meta" => Ok(crate::settings_api::meta(&b.app_info().version)),
@@ -2075,6 +2174,69 @@ mod tests {
         feed(&mut st, "rumble:agu", &json!({"type": "pin", "msg": null}));
         assert!(ev(&mut st).unwrap()["pins"][0]["row"].is_null());
     }
+    fn pin_frame(id: &str, by_id: &str, ends: Option<&str>) -> Value {
+        json!({"type": "pin", "msg": {"id": id, "ts": 1, "user": {"id": "9", "login": "bob", "name": "Bob", "color": ""}, "text": "read this Kappa", "emotes": "25:10-14", "badges": "",
+            "pin": {"by": {"id": by_id, "login": "mod", "name": "Mod"}, "startsAt": "2026-01-01T00:00:00Z", "endsAt": ends}}})
+    }
+
+    #[test]
+    fn a_twitch_pin_is_sent_with_its_pinner_end_and_goes_when_hidden_or_cleared() {
+        let mut st = state_with_two_views();
+        // the pinner's latest line gives the badges
+        let mut line = chat("m0", "hi");
+        line["msg"]["user"] = json!({"id": "7", "login": "mod", "name": "Mod", "color": ""});
+        line["msg"]["badges"] = json!("moderator/1");
+        feed(&mut st, "twitch:agu", &line);
+        feed(&mut st, "twitch:agu", &pin_frame("p1", "7", Some("2099-01-01T00:00:00Z")));
+        let ev = |st: &mut State| {
+            let State { views, rules, src, defs, book, .. } = st;
+            let cx = Ctx { src, rules, defs: defs.clone(), book };
+            views.get_mut("v1").unwrap().diff("v1", &cx)
+        };
+        let e = ev(&mut st).unwrap();
+        let pin = &e["pins"][0];
+        assert_eq!((pin["kind"].clone(), pin["sk"].clone(), pin["id"].clone()), (json!("twitch"), json!("twitch:agu"), json!("p1")));
+        assert_eq!(pin["by"]["name"], "Mod");
+        assert!(pin["endsAtMs"].as_i64().unwrap() > 4_000_000_000_000);
+        assert_eq!(pin["row"]["id"], "p1");
+        assert_eq!(pin["canMod"], false);
+        // hiding it for myself takes it out of the tab it was hidden in
+        let hidden = vec!["p1".to_string()];
+        st.views.get_mut("v1").unwrap().hidden_pins = hidden;
+        st.views.get_mut("v1").unwrap().dirty = true;
+        assert!(ev(&mut st).unwrap()["pins"][0]["row"].is_null());
+        // an ended pin is not shown either, and a cleared one is gone
+        feed(&mut st, "twitch:agu", &pin_frame("p2", "7", Some("2020-01-01T00:00:00Z")));
+        st.views.get_mut("v2").unwrap().dirty = true;
+        let State { views, rules, src, defs, book, .. } = &mut st;
+        let cx = Ctx { src, rules, defs: defs.clone(), book };
+        assert!(views.get_mut("v2").unwrap().diff("v2", &cx).unwrap()["pins"][0]["row"].is_null());
+    }
+
+    #[test]
+    fn a_reply_thread_lists_its_root_and_every_reply_and_only_those() {
+        let mut st = state_with_two_views();
+        let reply = |id: &str, parent: &str| {
+            let mut m = chat(id, "re");
+            m["msg"]["reply"] = json!({"user": "Bob", "text": "orig", "login": "bob", "parentId": parent, "threadId": "r1"});
+            m
+        };
+        feed(&mut st, "twitch:agu", &chat("r1", "root"));
+        feed(&mut st, "twitch:agu", &chat("x", "elsewhere"));
+        feed(&mut st, "twitch:agu", &reply("a", "r1"));
+        feed(&mut st, "twitch:agu", &reply("b", "a"));
+        let t = st.thread_json(&json!({"vk": "v1", "sk": "twitch:agu", "parent": "a", "thread": "r1"})).unwrap();
+        assert_eq!(t["root"], "r1");
+        assert_eq!(t["hasRoot"], true);
+        let ids: Vec<&str> = t["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["r1", "a", "b"]);
+        // nobody has said this chat may be posted in yet
+        assert_eq!(t["canReply"], false);
+        // a thread whose first message left the store says so
+        let t = st.thread_json(&json!({"vk": "v1", "sk": "twitch:agu", "parent": "gone", "thread": "gone"})).unwrap();
+        assert_eq!((t["hasRoot"].clone(), t["rows"].as_array().unwrap().len()), (json!(false), 0));
+    }
+
     #[test]
     fn closing_a_view_leaves_the_other_one_its_rows() {
         let mut st = state_with_two_views();

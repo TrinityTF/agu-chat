@@ -112,19 +112,7 @@ pub(super) struct UnpinAfter {
     pub _sub: Subscription,
 }
 
-/// Twitch takes 30 seconds to 30 minutes, or "until unpinned / stream ends".
-pub(super) const PIN_MIN_S: i64 = 30;
-pub(super) const PIN_MAX_S: i64 = 1800;
-
-/// The seconds a "Customized time" amount means, when it is a valid one.
-pub(super) fn unpin_secs(amount: &str, unit_min: bool) -> Option<i64> {
-    let n: f64 = amount.trim().parse().ok()?;
-    if !n.is_finite() {
-        return None;
-    }
-    let secs = (n * if unit_min { 60.0 } else { 1.0 }).round() as i64;
-    (PIN_MIN_S..=PIN_MAX_S).contains(&secs).then_some(secs)
-}
+pub(super) use super::pins::unpin_secs;
 
 pub(super) struct Toast {
     pub id: u64,
@@ -275,6 +263,8 @@ pub struct ChatPane {
     pub(super) unpin_after: Option<UnpinAfter>,
     /// the "Pin for" menu a message's pin button opened
     pub(super) pin_pick: Option<PinPick>,
+    /// the "Commands" menu a message's hover tools opened
+    pub(super) cmd_pick: Option<super::cmd_menu::CmdPick>,
     pub(super) confirm: Option<Confirm>,
     /// the reply thread open over the message list (DankChat's reply sheet)
     pub(super) thread: Option<ThreadOpen>,
@@ -537,6 +527,7 @@ impl ChatPane {
             pin_menu: None,
             unpin_after: None,
             pin_pick: None,
+            cmd_pick: None,
             confirm: None,
             thread: None,
             thread_built: RefCell::new(HashMap::new()),
@@ -717,7 +708,7 @@ impl ChatPane {
     pub(super) fn thread_can_reply(&self) -> bool {
         let Some(t) = &self.thread else { return false };
         let Some(st) = self.store.source(&t.sk) else { return false };
-        matches!(st.source.platform, Platform::Twitch | Platform::Kick) && st.conn.as_ref().and_then(|c| c.can_send).unwrap_or(false)
+        super::thread::can_reply(st.source.platform, st.conn.as_ref().and_then(|c| c.can_send))
     }
 
     /// The thread's reply box, made once per open thread: Enter sends, Esc closes the thread.
@@ -2547,10 +2538,7 @@ impl ChatPane {
     // ---- pinned messages ---------------------------------------------------------------------------------------------
 
     pub(super) fn hide_pin(&mut self, id: &str) {
-        self.hidden_pins.retain(|x| x != id);
-        self.hidden_pins.push(id.to_string());
-        let keep = self.hidden_pins.len().saturating_sub(20);
-        self.hidden_pins.drain(..keep);
+        super::pins::hide_pin(&mut self.hidden_pins, id);
         if let Ok(b) = serde_json::to_vec(&self.hidden_pins) {
             let _ = std::fs::write(hidden_pins_path(&self.svc), b);
         }
@@ -2850,8 +2838,6 @@ pub(super) fn sel_flows(b: &BuiltRow) -> super::select::RowFlows {
 
 #[cfg(test)]
 mod unpin_tests {
-    use super::unpin_secs;
-
     #[test]
     fn a_suspicious_frame_names_its_chatter() {
         use serde_json::json;
@@ -2859,17 +2845,5 @@ mod unpin_tests {
         assert_eq!(super::suspicious_user_of(&json!({"type": "suspicioususer", "user": null, "userId": "42"})).as_deref(), Some("42"));
         assert_eq!(super::suspicious_user_of(&json!({"type": "suspicious", "user": null})), None);
         assert_eq!(super::suspicious_user_of(&json!({"type": "chat", "userId": "42"})), None);
-    }
-
-    #[test]
-    fn unpin_after_takes_30_seconds_to_30_minutes() {
-        assert_eq!(unpin_secs("20", true), Some(1200));
-        assert_eq!(unpin_secs("30", false), Some(30));
-        assert_eq!(unpin_secs("29", false), None);
-        assert_eq!(unpin_secs("30", true), Some(1800));
-        assert_eq!(unpin_secs("31", true), None);
-        assert_eq!(unpin_secs("0.5", true), Some(30));
-        assert_eq!(unpin_secs("", true), None);
-        assert_eq!(unpin_secs("abc", false), None);
     }
 }

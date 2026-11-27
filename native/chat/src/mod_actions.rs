@@ -191,6 +191,16 @@ pub fn twitch_body(action: &str, t: &ModTarget, seconds: Option<u32>, reason: &s
         }
         "unban" => json!({"action": "unban", "userId": t.user_id}),
         "delete" => json!({"action": "delete", "messageId": t.id}),
+        // a message pinned in the channel (`seconds` None: until unpinned or the stream ends)
+        "pin" => pin_body(&t.id, seconds),
+        "unpin" => json!({"action": "unpin", "messageId": t.id}),
+        "pinduration" => {
+            let mut b = json!({"action": "pinduration", "messageId": t.id});
+            if let Some(s) = seconds {
+                b["durationSeconds"] = json!(s);
+            }
+            b
+        }
         other => return Err(format!("unknown action {other}")),
     })
 }
@@ -214,6 +224,9 @@ pub fn plan(platform: Platform, action: &str, t: &ModTarget, seconds: Option<u32
                 "ban" => Some("banned".to_string()),
                 "warn" => Some("warned".to_string()),
                 "unban" => Some("unbanned".to_string()),
+                "pin" => Some("Pinned".to_string()),
+                "unpin" => Some("unpinned".to_string()),
+                "pinduration" => Some(if seconds.is_none() { "Pinned until unpinned or the stream ends" } else { "Pin time updated" }.to_string()),
                 "timeout" => {
                     let d = format_duration(seconds.unwrap_or(0) as i64);
                     Some(if quick { format!("timed out {} ({d})", t.name) } else { format!("timed out {d}") })
@@ -406,6 +419,19 @@ mod pin_tests {
             }
         }
         assert_eq!(PIN_CHOICES.last().unwrap().1, None);
+    }
+
+    #[test]
+    fn twitch_pins_go_through_the_plan_like_the_desktops_pin_calls() {
+        let t = ModTarget { id: "m1".into(), ..Default::default() };
+        let p = |a: &str, s: Option<u32>| plan(Platform::Twitch, a, &t, s, "", false).unwrap();
+        assert_eq!(p("pin", Some(300)).req.body, pin_body("m1", Some(300)));
+        assert_eq!(p("pin", None).req.body, json!({"action": "pin", "messageId": "m1"}));
+        assert_eq!(p("unpin", None).req.body, json!({"action": "unpin", "messageId": "m1"}));
+        assert_eq!(p("unpin", None).ok.as_deref(), Some("unpinned"));
+        assert_eq!(p("pinduration", Some(90)).req.body, json!({"action": "pinduration", "messageId": "m1", "durationSeconds": 90}));
+        assert_eq!(p("pinduration", None).ok.as_deref(), Some("Pinned until unpinned or the stream ends"));
+        assert_eq!(p("pin", Some(60)).req.path, "/api/mod/action");
     }
 
     #[test]

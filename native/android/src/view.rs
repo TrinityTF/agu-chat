@@ -848,6 +848,18 @@ pub fn row_json(r: &Row, env: &Env) -> Value {
     v
 }
 
+/// Twitch's pinned message of a channel for the app: the line drawn like a chat line (`row`), who pinned it with their
+/// badges (taken from `pinner_badges`, their latest line here), when it ends and whether this account may unpin it.
+pub fn pin_json(sk: &str, m: &ChatMsg, pinner_badges: &str, can_mod: bool, env: &Env) -> Value {
+    let r = Row { key: format!("{sk}|pin"), ts: m.ts, sk: sk.to_string(), platform: agu_chat_core::protocol::Platform::Twitch, ord: 0, backlog: true, body: RowBody::Msg(m.clone()) };
+    let by = m.pin.as_ref().map(|p| &p.by).filter(|b| !b.name.is_empty());
+    json!({
+        "sk": sk, "kind": "twitch", "id": m.id, "row": row_json(&r, env), "canMod": can_mod,
+        "by": by.map(|b| json!({"name": b.name, "badges": badges_json(pinner_badges, env, None)})),
+        "endsAtMs": agu_chat_model::pins::pin_ends_at_ms(m),
+    })
+}
+
 /// The user's highlight rules, ignores and account names, compiled: what decides how a row is shown.
 pub struct Rules {
     pub settings: Settings,

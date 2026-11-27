@@ -119,6 +119,38 @@ private sealed interface Inl {
 /** Mod mode on a chat line: the buttons go inline at the start of its text, like the desktop's. */
 private class InlineMod(val buttons: List<ModButtonCfg>, val run: (ModButtonCfg) -> Unit)
 
+/** Opens the reply thread of a line (a tap on its "Replying to" line); null where that is not offered. */
+val LocalThreadOpener = androidx.compose.runtime.compositionLocalOf<((Row) -> Unit)?> { null }
+
+/** The "↩ Replying to @name: ..." line above a reply; a tap opens the thread when the reply says which message it answers. */
+@Composable
+private fun ReplyLine(row: Row, r: ReplyRef, d: Display) {
+    val open = LocalThreadOpener.current
+    Text(
+        "Replying to @${r.user.orEmpty()}: ${r.text.orEmpty()}", color = AguColors.Muted, fontSize = (d.bodySp * 0.8f).sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = if (open != null && r.opensThread) Modifier.clickable { open(row) } else Modifier,
+    )
+}
+
+/** A short line of [lead] muted text, then badges and a name, then [trail]: the pinned card's "Pinned by ..." header. */
+@Composable
+fun BadgedName(lead: String, badges: List<Badge>, name: String?, nameColor: Color, trail: String, fontSp: Float, modifier: Modifier = Modifier) {
+    val d = LocalDisplay.current
+    val built = remember(lead, badges, name, nameColor, trail, d) {
+        val b = Bld(d)
+        val text = buildAnnotatedString {
+            withStyle(SpanStyle(color = AguColors.Muted)) { append(lead) }
+            badges(b, badges, d)
+            if (name != null) withStyle(SpanStyle(color = nameColor, fontWeight = FontWeight.SemiBold)) { append(name) }
+            if (trail.isNotEmpty()) withStyle(SpanStyle(color = Faint)) { append(trail) }
+        }
+        Built(text, b.inline)
+    }
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    Text(built.text, inlineContent = inlineContent(built.inline, density, d, measurer) {}, style = TextStyle(color = AguColors.Text, fontSize = fontSp.sp), modifier = modifier)
+}
+
 private val LocalInlineMod = androidx.compose.runtime.compositionLocalOf<InlineMod?> { null }
 
 private class Built(val text: AnnotatedString, val inline: Map<String, Inl>)
@@ -470,9 +502,7 @@ private fun LineRow(row: Row, d: Display, frame: Modifier, showMark: Boolean, on
     if (bar != null) m = m.drawBehind { drawRect(bar, size = Size(3.dp.toPx(), size.height)) }
     Column(m.padding(start = if (bar != null) 11.dp else 8.dp, end = 8.dp, top = 3.dp, bottom = 3.dp)) {
         if (look.label != null) Text(look.label, color = look.labelColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-        row.reply?.let { r ->
-            Text("Replying to @${r.user.orEmpty()}: ${r.text.orEmpty()}", color = AguColors.Muted, fontSize = (d.bodySp * 0.8f).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        row.reply?.let { r -> ReplyLine(row, r, d) }
         if (!row.system.isNullOrEmpty()) {
             Text(row.system, color = AguColors.Muted, fontSize = (d.bodySp * 0.8f).sp, fontWeight = FontWeight.Normal)
         }
@@ -495,7 +525,7 @@ private fun EventRow(row: Row, d: Display, frame: Modifier, showMark: Boolean, o
             if (look.bg != null) m = m.background(look.bg)
             if (bar != null) m = m.drawBehind { drawRect(bar, size = Size(3.dp.toPx(), size.height)) }
             Column(m.padding(start = if (bar != null) 8.dp else 8.dp, end = 8.dp, top = 1.dp, bottom = 3.dp)) {
-                row.reply?.let { r -> Text("Replying to @${r.user.orEmpty()}: ${r.text.orEmpty()}", color = AguColors.Muted, fontSize = (d.bodySp * 0.8f).sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                row.reply?.let { r -> ReplyLine(row, r, d) }
                 LineText(row, d, showMark, onTip)
             }
         }

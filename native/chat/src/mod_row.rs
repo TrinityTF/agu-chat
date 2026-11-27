@@ -60,7 +60,7 @@ pub struct RowMod {
     pub warn: bool,
     pub delete: bool,
     pub unban: bool,
-    /// Rumble: "Pin this message" (a moderator or the owner may pin any line)
+    /// Rumble: "Pin this message" (a moderator or the owner may pin any line); Twitch: "Pin for" a time (a chat line, where the account may pin)
     pub pin: bool,
     /// a command button (`/announce ...`) may run: any moderator on Twitch
     pub cmd: bool,
@@ -90,7 +90,12 @@ fn twitch_mod(env: &ModEnv, target: ModTarget, badges: &str, deleted: bool, dele
 /// The moderation a row offers, or None when it has none (not a person's line, no rights, or nothing allowed).
 pub fn row_mod(row: &Row, env: &ModEnv) -> Option<RowMod> {
     let m = match (&row.body, row.platform) {
-        (RowBody::Msg(m), Platform::Twitch) => twitch_mod(env, ModTarget { id: m.id.clone(), user_id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), menu: None }, &m.badges, m.deleted, true),
+        (RowBody::Msg(m), Platform::Twitch) => {
+            let mut r = twitch_mod(env, ModTarget { id: m.id.clone(), user_id: m.user.id.clone(), login: m.user.login.clone(), name: m.user.name.clone(), menu: None }, &m.badges, m.deleted, true);
+            // a chat line can be pinned ("Pin for") by an account that may pin in this channel
+            r.pin = env.twitch.pin && !m.deleted;
+            r
+        }
         (RowBody::Notice(n), Platform::Twitch) if !n.user.id.is_empty() && n.seventv.is_none() => {
             let t = ModTarget { id: n.id.clone(), user_id: n.user.id.clone(), login: n.user.login.clone(), name: n.user.name.clone(), menu: None };
             twitch_mod(env, t, &n.badges, n.deleted, !n.text.is_empty())
@@ -227,6 +232,18 @@ mod tests {
         let delete_only = ModEnv { co: CoCaps { connected: true, can_moderate: false, can_delete: true }, ..env };
         let d = row_mod(&row(Platform::Kick, "agu-tf", frame("5", "viewer")), &delete_only).unwrap();
         assert!(d.delete && !d.ban);
+    }
+
+    #[test]
+    fn a_twitch_chat_line_can_be_pinned_where_the_account_may_pin() {
+        let mut env = twitch_env(false, false);
+        env.twitch.pin = true;
+        let r = row_mod(&row(Platform::Twitch, "agu", chat("9", "")), &env).unwrap();
+        assert!(r.pin && !r.ban && !r.delete);
+        let mut gone = chat("9", "");
+        gone["msg"]["deleted"] = json!(true);
+        assert!(row_mod(&row(Platform::Twitch, "agu", gone), &env).map_or(true, |m| !m.pin));
+        assert!(row_mod(&row(Platform::Twitch, "agu", chat("9", "")), &twitch_env(true, true)).map_or(false, |m| !m.pin));
     }
 
     #[test]

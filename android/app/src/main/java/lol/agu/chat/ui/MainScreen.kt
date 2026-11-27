@@ -125,6 +125,8 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
     var tabMenu by remember { mutableStateOf<Tab?>(null) }
     var renaming by remember { mutableStateOf<Tab?>(null) }
     var menuRow by remember { mutableStateOf<Row?>(null) }
+    // the reply thread over the chat
+    var threadReq by remember { mutableStateOf<ThreadReq?>(null) }
     var replyTo by remember { mutableStateOf<Row?>(null) }
     // a name for the message box (a Super Chat's Reply puts @name there)
     var mention by remember { mutableStateOf<String?>(null) }
@@ -155,7 +157,12 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
         if (i >= 0 && i != pager.currentPage) pager.animateScrollToPage(i)
     }
 
-    CompositionLocalProvider(LocalMod provides mod) {
+    // a tap on a reply's "Replying to" line opens its thread, in the tab that line is in
+    val openThread: (Row) -> Unit = { row ->
+        val t = tabs.firstOrNull { it.id == current?.id && row.sk in it.sks } ?: tabs.firstOrNull { row.sk in it.sks }
+        if (t != null) threadReq = threadOf(t.id, row, fromReplyLine = true)
+    }
+    CompositionLocalProvider(LocalMod provides mod, LocalThreadOpener provides openThread) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val width: Dp = maxWidth
     val wide = width >= 840.dp
@@ -277,8 +284,15 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
             onReply = if ((row.kind == "msg" || row.kind == "notice") && !isWhisperSk(row.sk)) ({ replyTo = row; menuRow = null }) else null,
             onCopy = { copyText(ctx, row.plainText()); menuRow = null },
             onDismiss = { menuRow = null },
+            onThread = if (canThread(row)) ({
+                val t = tabs.firstOrNull { it.id == current?.id && row.sk in it.sks } ?: tabs.firstOrNull { row.sk in it.sks }
+                if (t != null) threadReq = threadOf(t.id, row, fromReplyLine = false)
+                menuRow = null
+            }) else null,
         )
     }
+
+    threadReq?.let { t -> ThreadSheet(vm, t, onDismiss = { threadReq = null }, onLogin = onAccounts) }
 
     ModDialogs(mod)
     mod.card?.let { req -> UserCardSheet(vm, mod, req, onDismiss = { mod.card = null }, onLogin = onAccounts) }
@@ -521,7 +535,7 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
         // the hype train bars (a tap opens one's details, drawn over the list below)
         var hypeOpen by remember { mutableStateOf<String?>(null) }
         HypeBars(tab, vm.hype, setOfNotNull(hypeOpen)) { sk -> hypeOpen = if (hypeOpen == sk) null else sk }
-        PinnedBars(tab, vm.pins, LocalMod.current)
+        PinnedBars(tab, vm, LocalMod.current)
         // channels that are not connected say so (named by platform when several are merged)
         val lines = tab.channels.mapNotNull { ch ->
             val conn = vm.conns[ch.sk()] ?: return@mapNotNull null

@@ -61,7 +61,10 @@ data class Part(
 
 @Serializable
 @Immutable
-data class ReplyRef(val user: String? = null, val text: String? = null, val parentId: JsonPrimitive? = null)
+data class ReplyRef(val user: String? = null, val text: String? = null, val parentId: JsonPrimitive? = null, val threadId: JsonPrimitive? = null) {
+    /** Tapping the line opens the thread: the reply has to say which message it answers. */
+    val opensThread: Boolean get() = !parentId?.content.isNullOrEmpty() || !threadId?.content.isNullOrEmpty()
+}
 
 /** A matched highlight rule: the row's colour, and how strong its tint is. */
 @Serializable
@@ -344,6 +347,18 @@ fun muteChoicesOf(raw: List<List<JsonPrimitive>>): List<Triple<String, String, I
 /** A Rumble chat's pinned message, drawn as a bar at the top of the chat ([canMod]: the account may unpin it). */
 @Immutable
 class RumblePin(val row: Row, val canMod: Boolean)
+
+/** A Twitch channel's pinned message: the line drawn like a chat line, who pinned it, when it ends ([endsAtMs]), and whether this account may unpin it. */
+@Immutable
+class TwitchPin(val id: String, val row: Row, val byName: String?, val byBadges: List<Badge>, val endsAtMs: Long?, val canMod: Boolean)
+
+/** One reply thread to show: the chat and the line it was opened from (see `thread.rows`). */
+@Immutable
+data class ThreadReq(val vk: String, val sk: String, val parent: String, val thread: String)
+
+/** What `thread.rows` answers: the lines of the thread, whether its first message is still in the chat, and whether a reply can be posted here. */
+@Immutable
+class ThreadData(val root: String, val hasRoot: Boolean, val canReply: Boolean, val rows: List<Row>)
 
 /** One entry of Rumble's muted list; [scope] is "video" (this livestream) or "total". */
 @Immutable

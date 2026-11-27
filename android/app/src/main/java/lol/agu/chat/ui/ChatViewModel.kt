@@ -44,6 +44,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val hype = mutableStateMapOf<String, HypeTrain>()
     /** Rumble pinned messages by channel (source key): the bar at the top of that chat. */
     val pins = mutableStateMapOf<String, RumblePin>()
+    /** Twitch pinned messages by channel (source key): the card at the top of that chat. */
+    val twitchPins = mutableStateMapOf<String, TwitchPin>()
+    /** The pins opened out to their whole text (by message id). */
+    val pinsOpen = mutableStateMapOf<String, Boolean>()
     /** The tab to bring forward (one you just added); the screen scrolls to it and calls [focusDone]. A tab a whisper opens never gets it. */
     var focusTab by mutableStateOf<String?>(null)
         private set
@@ -155,14 +159,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } ?: emptyList()
         val remove = (o["remove"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
         // Rumble's pinned messages of the channels in this tab (every Rumble channel is listed; a null row = none pinned)
-        val pins = (o["pins"] as? JsonArray)?.mapNotNull { p ->
-            val po = p as? JsonObject ?: return@mapNotNull null
+        val pinList = (o["pins"] as? JsonArray)?.mapNotNull { it as? JsonObject }
+        val pins = pinList?.filter { it["kind"]?.jsonPrimitive?.contentOrNull != "twitch" }?.mapNotNull { po ->
             val sk = po["sk"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val row = (po["row"] as? JsonObject)?.let { runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull() }
             Triple(sk, row, po["canMod"]?.jsonPrimitive?.contentOrNull == "true")
         }
+        // Twitch's: (source key, the pin, or null when nothing is pinned, or it is hidden or over)
+        val twitch = pinList?.filter { it["kind"]?.jsonPrimitive?.contentOrNull == "twitch" }?.mapNotNull { po ->
+            val sk = po["sk"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val row = (po["row"] as? JsonObject)?.let { runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull() }
+            val by = po["by"] as? JsonObject
+            sk to row?.let {
+                TwitchPin(
+                    po["id"]?.jsonPrimitive?.contentOrNull.orEmpty(), it, by?.get("name")?.jsonPrimitive?.contentOrNull,
+                    (by?.get("badges") as? JsonArray)?.mapNotNull { b -> runCatching { Core.json.decodeFromJsonElement(Badge.serializer(), b) }.getOrNull() } ?: emptyList(),
+                    po["endsAtMs"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()?.toLong(), po["canMod"]?.jsonPrimitive?.contentOrNull == "true",
+                )
+            }
+        }
         withContext(Dispatchers.Main) {
             pins?.forEach { (sk, row, can) -> if (row == null) this@ChatViewModel.pins.remove(sk) else this@ChatViewModel.pins[sk] = RumblePin(row, can) }
+            twitch?.forEach { (sk, p) -> if (p == null) this@ChatViewModel.twitchPins.remove(sk) else this@ChatViewModel.twitchPins[sk] = p }
         }
         withContext(Dispatchers.Main) { if (tabs.any { it.id == vk }) applyRows(vk, reset, upsert, remove) }
     }
@@ -626,6 +644,57 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (quick) put("quick", true)
             if (confirmed) put("confirmed", true)
         })
+
+    // ---- Twitch pins and reply threads (the rules are the core's) ----------------------------------------
+
+    /** The "Pin for" choices as (label, seconds; null = until unpinned or the stream ends). */
+    suspend fun pinChoices(): List<Pair<String, Int?>> = withContext(Dispatchers.Default) {
+        runCatching {
+            (Core.call("pin.choices") as JsonArray).map { c ->
+                val l = c as JsonArray
+                l[0].jsonPrimitive.content to l[1].jsonPrimitive.contentOrNull?.toIntOrNull()
+            }
+        }.getOrElse { emptyList() }
+    }
+
+    /** What is left on a pin: (text like "5 min", it is over); null text when it has no end. */
+    suspend fun pinLeft(endsAtMs: Long?): Pair<String?, Boolean> = withContext(Dispatchers.Default) {
+        runCatching {
+            val o = Core.call("pin.left", buildJsonObject { endsAtMs?.let { put("endsAtMs", it) } }) as JsonObject
+            o["text"]?.jsonPrimitive?.contentOrNull to (o["over"]?.jsonPrimitive?.contentOrNull == "true")
+        }.getOrElse { null to false }
+    }
+
+    /** Where "Unpin After" starts: customized time or not, the unit is minutes, the amount, and the hint under a bad amount. */
+    class UnpinStart(val timeMode: Boolean, val unitMin: Boolean, val amount: String, val hint: String)
+
+    suspend fun pinStart(endsAtMs: Long?): UnpinStart = withContext(Dispatchers.Default) {
+        runCatching {
+            val o = Core.call("pin.start", buildJsonObject { endsAtMs?.let { put("endsAtMs", it) } }) as JsonObject
+            UnpinStart(o["timeMode"]?.jsonPrimitive?.contentOrNull == "true", o["unitMin"]?.jsonPrimitive?.contentOrNull == "true", o["amount"]?.jsonPrimitive?.contentOrNull.orEmpty(), o["hint"]?.jsonPrimitive?.contentOrNull.orEmpty())
+        }.getOrElse { UnpinStart(false, true, "20", "") }
+    }
+
+    /** The seconds a customized time means, or null when Twitch would not take it (30 seconds to 30 minutes). */
+    suspend fun pinSecs(amount: String, unitMin: Boolean): Int? = withContext(Dispatchers.Default) {
+        runCatching { (Core.call("pin.secs", buildJsonObject { put("amount", amount); put("unitMin", unitMin) }) as? JsonPrimitive)?.contentOrNull?.toIntOrNull() }.getOrNull()
+    }
+
+    /** "Hide for Yourself": the pin goes from every tab and stays hidden. */
+    fun hidePin(id: String) {
+        viewModelScope.launch(Dispatchers.Default) { runCatching { Core.call("pin.hide", buildJsonObject { put("id", id) }) } }
+    }
+
+    /** The lines of the reply thread [t] names, or null when it can't be read. */
+    suspend fun threadRows(t: ThreadReq): ThreadData? = withContext(Dispatchers.Default) {
+        runCatching {
+            val o = Core.call("thread.rows", buildJsonObject { put("vk", t.vk); put("sk", t.sk); put("parent", t.parent); put("thread", t.thread) }) as JsonObject
+            ThreadData(
+                o["root"]?.jsonPrimitive?.contentOrNull.orEmpty(), o["hasRoot"]?.jsonPrimitive?.contentOrNull == "true", o["canReply"]?.jsonPrimitive?.contentOrNull == "true",
+                (o["rows"] as? JsonArray)?.mapNotNull { runCatching { Core.json.decodeFromJsonElement(Row.serializer(), it) }.getOrNull() } ?: emptyList(),
+            )
+        }.getOrNull()
+    }
 
     /** A mod-mode command button: the template is filled in with this line and run as the message box would. */
     suspend fun modCommand(vk: String, sk: String, template: String, row: Row): SendResult {

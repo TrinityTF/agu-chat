@@ -14,6 +14,7 @@ use gpui::{deferred,
     div, point, prelude::*, px, relative, AnyElement, ClickEvent, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
     ScrollHandle, SharedString, WeakEntity, Window,
 };
+use agu_chat_model::input::custom_commands::{expand_input, with_custom_auto, CommandContext};
 use serde_json::json;
 
 use super::autocomplete::*;
@@ -144,7 +145,7 @@ pub struct SendBox {
 }
 
 /// The toast lines for the targets that failed, in target order. With more than one target each line names its platform.
-fn send_failures(outcomes: Vec<(Platform, Option<String>)>, multi: bool) -> Vec<String> {
+pub(super) fn send_failures(outcomes: Vec<(Platform, Option<String>)>, multi: bool) -> Vec<String> {
     outcomes
         .into_iter()
         .filter_map(|(p, err)| err.map(|e| if multi { format!("{}: {e}", icons::platform_label(p)) } else { e }))
@@ -484,6 +485,10 @@ impl SendBox {
         mentions.refresh(&val, pos, &names);
         let ctx = ChangeCtx { inventory: &inventory.inventory, slash_ok, twitch_caps: caps.as_ref(), names: &names };
         let auto = auto_for_change(&val, pos, self.auto.as_ref(), &ctx);
+        let auto = match self.pane.upgrade() {
+            Some(p) => with_custom_auto(auto, &val, pos, &p.read(cx).settings.custom_commands),
+            None => auto,
+        };
         self.mentions = mentions;
         self.auto = auto;
         cx.notify();
@@ -617,6 +622,11 @@ impl SendBox {
             self.toast(g.text, true, cx);
             return;
         }
+        // A custom command: its text is sent instead, line by line, each the way a typed line would be.
+        if let Some(lines) = self.expand_custom(&t, &targets, cx) {
+            self.send_custom(t, lines, targets, cx);
+            return;
+        }
         let body: String = t.chars().take(500).collect();
         let bridge = cx.global::<Services>().bridge.clone();
         let single = if targets.len() == 1 { Some(targets[0].clone()) } else { None };
@@ -700,6 +710,50 @@ impl SendBox {
                 } else {
                     let sent = sb.text(cx).trim().to_string();
                     sb.remember(&sent);
+                    sb.clear(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The lines a custom command stands for, or None when `t` is not one.
+    fn expand_custom(&self, t: &str, targets: &[SendSource], cx: &Context<Self>) -> Option<Vec<String>> {
+        let pane = self.pane.upgrade()?;
+        let pane = pane.read(cx);
+        let cmds = &pane.settings.custom_commands;
+        if cmds.is_empty() {
+            return None;
+        }
+        let first = targets.first()?;
+        let ctx = CommandContext { channel: first.source.channel.clone(), me: pane.co_login(first.source.platform), ..Default::default() };
+        expand_input(t, cmds, &ctx)
+    }
+
+    fn send_custom(&mut self, typed: String, lines: Vec<String>, targets: Vec<SendSource>, cx: &mut Context<Self>) {
+        if lines.is_empty() {
+            self.toast("That command has no text", true, cx);
+            return;
+        }
+        self.sending = true;
+        cx.notify();
+        let bridge = cx.global::<Services>().bridge.clone();
+        let reply = self.reply.clone();
+        let (last, pinned) = match targets.as_slice() {
+            [s] => self.pane.upgrade().map(|p| p.read(cx).message_ids(&s.sk)).unwrap_or((None, None)),
+            _ => (None, None),
+        };
+        let tgts: Vec<(SourceRef, Option<String>)> = targets.iter().map(|s| (s.source.clone(), reply.as_ref().filter(|r| r.sk == s.sk).map(|r| r.id.clone()))).collect();
+        cx.spawn(async move |this, cx| {
+            let out = super::custom_send::run_lines(&bridge, &tgts, &lines, last, pinned).await;
+            let _ = this.update(cx, |sb, cx| {
+                sb.sending = false;
+                for (tx, warn) in out.toasts {
+                    sb.toast(tx, warn, cx);
+                }
+                if out.ok {
+                    sb.remember(&typed);
                     sb.clear(cx);
                 }
                 cx.notify();

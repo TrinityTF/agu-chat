@@ -24,6 +24,11 @@ pub fn reply_link(r: &Row) -> Option<ReplyLink<'_>> {
     }
 }
 
+/// A reply can be posted into a thread from here: a Twitch or Kick chat this account can post in.
+pub fn can_reply(platform: agu_chat_core::protocol::Platform, can_send: Option<bool>) -> bool {
+    matches!(platform, agu_chat_core::protocol::Platform::Twitch | agu_chat_core::protocol::Platform::Kick) && can_send.unwrap_or(false)
+}
+
 /// The first message of the thread a reply belongs to, from what the reply knows (`parent`, `thread`) and the
 /// lines still in the store: Twitch names it outright; otherwise walk up from the parent while the parent is
 /// itself a reply that is still here.

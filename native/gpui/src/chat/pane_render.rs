@@ -312,6 +312,12 @@ impl ChatPane {
                     }
                 }));
             }
+            if let Some(r) = h.reply.clone().filter(|_| !self.menu_commands().is_empty()) {
+                bar = bar.child(self.toolbar_button_at(format!("cmds-{key}"), icons::DOTS_H, "Commands", false, cx, move |p, pos, cx| {
+                    p.cmd_pick = Some(super::cmd_menu::CmdPick { target: r.clone(), pos });
+                    cx.notify();
+                }));
+            }
             d = d.child(bar);
         }
         d.into_any_element()
@@ -876,15 +882,15 @@ impl ChatPane {
         let env = self.envs.get(sk)?.clone();
         let rs = self.settings.clone();
         let base = rs.font_size;
-        let ends_at = p.pin.as_ref().and_then(|x| x.ends_at.as_deref()).and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis());
+        let ends_at = super::pins::pin_ends_at_ms(p);
         let now = chrono::Utc::now().timestamp_millis();
-        if ends_at.map(|e| e <= now).unwrap_or(false) {
+        if super::pins::pin_expired(p, now) {
             return None;
         }
         let open = self.pin_open.contains(&p.id);
         let by = p.pin.as_ref().map(|x| x.by.clone());
-        let left = ends_at.map(|e| ((e - now) as f64 / 1000.0).round().max(0.0) as i64);
-        let left_text = left.map(|l| if l >= 60 { format!("{} min", (l as f64 / 60.0).ceil() as i64) } else { format!("{l}s") });
+        let left = ends_at.map(|e| super::pins::pin_left_secs(e, now));
+        let left_text = left.map(super::pins::left_text);
         let size = super::twitch::emotes::SizeOpt::Small;
         let key = format!("{sk}|{}", p.id);
 
@@ -1030,11 +1036,7 @@ impl ChatPane {
                 let left_s = left;
                 menu = menu.child(item(format!("after-{key}"), icons::CLOCK, "Unpin After", true).on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
                     // starts from what's left on the pin now, in minutes when it's a minute or more
-                    let (time_mode, unit_min, amount) = match left_s {
-                        None => (false, true, "20".to_string()),
-                        Some(l) if l >= 60 => (true, true, ((l as f64) / 60.0).ceil().to_string()),
-                        Some(l) => (true, false, l.to_string()),
-                    };
+                    let (time_mode, unit_min, amount) = super::pins::unpin_after_start(left_s);
                     let input = cx.new(|cx| {
                         let mut t = TextInput::new(w, cx, "", InputStyle::Chat);
                         t.set_max_chars(Some(6));
@@ -1361,7 +1363,7 @@ impl ChatPane {
             div().flex().gap(px(8.)).pb(px(4.)).pl(px(24.)).child(div().w(px(64.)).child(u.amount.clone())).child(unit_btn),
         );
         if time_mode && !valid {
-            col = col.child(div().pl(px(24.)).text_size(px(11.)).line_height(px(16.)).text_color(c(theme::AMBER_400)).child("30 seconds to 30 minutes"));
+            col = col.child(div().pl(px(24.)).text_size(px(11.)).line_height(px(16.)).text_color(c(theme::AMBER_400)).child(super::pins::PIN_RANGE_HINT));
         }
         col = col.child(radio("r-end", !time_mode, "Manually unpinned or end of stream", cx, false)).child(
             div()
@@ -1651,6 +1653,7 @@ chat_list(
             .children(self.toasts_el())
             .children(self.mod_pop_el(window, cx))
             .children(self.pin_pick_el(window, cx))
+            .children(self.cmd_pick_el(window, cx))
             .children(self.copy_menu_el(window, cx))
             .child(self.send_box(window, cx))
             .children(self.tip_el(window))

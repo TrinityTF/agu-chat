@@ -2,6 +2,7 @@
 pub mod alerts;
 pub mod chat_list;
 pub mod chat_pane;
+pub mod cmd_menu;
 pub use agu_chat_model::chat_text;
 pub use agu_chat_model::highlights;
 pub mod hype_train;
@@ -12,6 +13,7 @@ pub mod inline;
 pub mod link_card;
 pub use agu_chat_model::mentions;
 pub use agu_chat_model::mod_actions;
+pub use agu_chat_model::pins;
 pub use agu_chat_model::mod_buttons;
 pub use agu_chat_model::mod_caps;
 pub mod mod_popover;
