@@ -22,6 +22,7 @@ pub mod pane_render;
 pub mod paint_text;
 pub mod rows;
 pub use agu_chat_model::search;
+pub use agu_chat_model::settings_text;
 pub mod select;
 pub mod services;
 pub use agu_chat_model::store;

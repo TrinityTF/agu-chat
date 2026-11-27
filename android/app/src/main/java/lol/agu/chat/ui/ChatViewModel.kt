@@ -55,6 +55,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val previews = PreviewStore { href -> viewModelScope.launch { runCatching { Core.call("preview.get", buildJsonObject { put("href", href) }) }.getOrNull()?.let { onPreview(it) } } }
     var appVersion by mutableStateOf("")
         private set
+    /** The core's whole settings object (Settings screens read it, [patchSettings] patches it). */
+    var settings by mutableStateOf(JsonObject(emptyMap()))
+        private set
+    /** The lists the Settings screens draw from (rule colours, badges, mod button icons, links). */
+    var settingsMeta by mutableStateOf(JsonObject(emptyMap()))
+        private set
+    /** The updater as the Settings screen shows it. */
+    var updater by mutableStateOf(UpdaterInfo())
+        private set
     /** The sign-in WebView the core asked for (YouTube, X, Twitch), or null. */
     var loginRequest by mutableStateOf<LoginRequest?>(null)
         private set
@@ -82,7 +91,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "activity" -> onActivity(e.data)
                     "alert" -> alerts.fire(e.data)
                     "mentions" -> onMentions(e.data)
-                    "settings" -> withContext(Dispatchers.Main) { display = Display.parse(e.data, display) }
+                    "settings" -> withContext(Dispatchers.Main) {
+                        (e.data as? JsonObject)?.let { settings = it }
+                        display = Display.parse(e.data, display)
+                    }
+                    "updater" -> withContext(Dispatchers.Main) { updater = UpdaterInfo.parse(e.data) }
                     "preview" -> onPreview(e.data)
                     "accounts" -> parseAccounts(e.data)?.let { withContext(Dispatchers.Main) { accounts = it } }
                     "login.webview", "login.show" -> onLoginRequest(e.kind, e.data)
@@ -97,7 +110,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
-            runCatching { Core.call("settings.get") }.getOrNull()?.let { display = Display.parse(it, display) }
+            runCatching { Core.call("settings.get") }.getOrNull()?.let { (it as? JsonObject)?.let { o -> settings = o }; display = Display.parse(it, display) }
+            runCatching { Core.call("settings.meta") }.getOrNull()?.let { (it as? JsonObject)?.let { o -> settingsMeta = o } }
+            runCatching { Core.call("updater.get") }.getOrNull()?.let { updater = UpdaterInfo.parse(it) }
             alerts.prepare()
             restoreTabs()
             refreshAccounts()
@@ -344,6 +359,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun jumpDone(j: Jump) {
         if (jump == j) jump = null
+    }
+
+    // ---- settings --------------------------------------------------------------------------------
+
+    /** Change settings like the desktop does: the patch shows at once, then goes to the core, whose answer is the truth. */
+    fun patchSettings(patch: JsonObject) {
+        settings = JsonObject(settings + patch)
+        display = Display.parse(settings, display)
+        viewModelScope.launch {
+            val answer = runCatching { Core.call("settings.set", buildJsonObject { put("patch", patch) }) }.getOrNull() as? JsonObject ?: return@launch
+            settings = answer
+            display = Display.parse(answer, display)
+        }
+    }
+
+    fun updaterCheck() {
+        viewModelScope.launch { runCatching { Core.call("updater.check") } }
+    }
+
+    fun updaterDownload() {
+        viewModelScope.launch { runCatching { Core.call("updater.download") } }
+    }
+
+    /** Hands the verified download to the system installer; [onNeedPermission] when the phone first has to allow installs from this app. */
+    fun updaterInstall(context: android.content.Context, onNeedPermission: () -> Unit) {
+        if (!ApkInstaller.mayInstall(context)) return onNeedPermission()
+        viewModelScope.launch {
+            val path = runCatching { (Core.call("updater.install") as? JsonObject)?.get("path")?.jsonPrimitive?.contentOrNull }.getOrNull() ?: return@launch
+            ApkInstaller.install(context, path)
+        }
+    }
+
+    /** Plays a highlight sound once (the settings' Play buttons): a stored file, or the ping when [file] is empty. */
+    fun playSound(file: String) {
+        val volume = settings.int("highlightVolume", 70)
+        viewModelScope.launch { alerts.play(file, volume) }
     }
 
     /** The app is on screen or not: a highlight vibrates only in the background. */

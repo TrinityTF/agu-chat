@@ -84,12 +84,13 @@ import lol.agu.chat.R
 
 @Composable
 fun MainScreen(vm: ChatViewModel) {
-    var showAccounts by rememberSaveable { mutableStateOf(false) }
+    // null: closed, "": the list of sections, "accounts": straight to Accounts (a login prompt)
+    var settings by rememberSaveable { mutableStateOf<String?>(null) }
     CompositionLocalProvider(LocalDisplay provides vm.display, LocalPreviews provides vm.previews) {
         Box(Modifier.fillMaxSize().background(AguColors.Bg)) {
-            Chats(vm, onAccounts = { showAccounts = true })
+            Chats(vm, onAccounts = { settings = "accounts" }, onSettings = { settings = "" })
             if (vm.mentionsOpen) MentionsScreen(vm)
-            if (showAccounts) AccountsScreen(vm, onBack = { showAccounts = false })
+            settings?.let { SettingsScreen(vm, start = it, onClose = { settings = null }) }
             vm.loginRequest?.let { LoginWebScreen(it, vm) }
         }
     }
@@ -100,7 +101,7 @@ private class AddTo(val tab: Tab?)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
+private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> Unit) {
     val tabs = vm.tabs
     val pager = rememberPagerState { tabs.size }
     // search: the text typed per tab (only the open tab's search box shows); a wide screen can show two tabs side by side
@@ -148,7 +149,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit) {
     val wide = width >= 840.dp
     Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
         TopBar(
-            onAccounts, vm.mentionsUnread, onBell = { vm.openMentions() },
+            onSettings, vm.mentionsUnread, onBell = { vm.openMentions() },
             searching = searching, onSearch = {
                 searching = !searching
                 if (!searching) { current?.let { t -> queries[t.id] = ""; vm.search(t.id, "") }; query = "" }
@@ -289,7 +290,7 @@ private fun copyText(ctx: Context, text: String) {
 
 @Composable
 private fun TopBar(
-    onAccounts: () -> Unit, mentions: Int, onBell: () -> Unit,
+    onSettings: () -> Unit, mentions: Int, onBell: () -> Unit,
     searching: Boolean = false, onSearch: () -> Unit = {},
     showSplit: Boolean = false, split: Boolean = false, onSplit: () -> Unit = {},
     showMod: Boolean = false, modOn: Boolean = false, onMod: () -> Unit = {},
@@ -362,12 +363,19 @@ private fun TopBar(
                 ) { Text(if (mentions > 99) "99+" else mentions.toString(), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, lineHeight = 10.sp) }
             }
         }
-        Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onAccounts), contentAlignment = Alignment.Center) {
-            // A simple person glyph: head and shoulders.
+        Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
+            // a gear: a ring with eight teeth
             Canvas(Modifier.size(22.dp)) {
                 val c = AguColors.Text
-                drawCircle(c, radius = size.width * 0.22f, center = Offset(size.width / 2, size.height * 0.30f))
-                drawArc(c, 180f, 180f, true, topLeft = Offset(size.width * 0.12f, size.height * 0.58f), size = Size(size.width * 0.76f, size.height * 0.8f))
+                val w = size.width
+                val mid = Offset(w / 2, w / 2)
+                drawCircle(c, radius = w * 0.24f, center = mid, style = androidx.compose.ui.graphics.drawscope.Stroke(width = w * 0.11f))
+                for (k in 0 until 8) {
+                    val a = Math.toRadians(k * 45.0)
+                    val dx = Math.cos(a).toFloat()
+                    val dy = Math.sin(a).toFloat()
+                    drawLine(c, Offset(mid.x + dx * w * 0.32f, mid.y + dy * w * 0.32f), Offset(mid.x + dx * w * 0.46f, mid.y + dy * w * 0.46f), strokeWidth = w * 0.14f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                }
             }
         }
     }

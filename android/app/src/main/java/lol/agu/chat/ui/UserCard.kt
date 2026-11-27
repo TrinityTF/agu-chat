@@ -53,7 +53,6 @@ import lol.agu.chat.Core
 
 private fun JsonObject.str(k: String): String = (this[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
 private fun JsonObject.flag(k: String): Boolean = (this[k] as? JsonPrimitive)?.contentOrNull == "true"
-private fun JsonObject.list(k: String): List<JsonObject> = (this[k] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
 
 private val AmberText = Color(0xFFFCD34D)
 private val OrangeText = Color(0xFFFFB86A)

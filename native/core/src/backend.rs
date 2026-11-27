@@ -177,6 +177,20 @@ impl Backend {
         *self.quit.lock().unwrap() = Some(f);
     }
 
+    /// Android: download the update the last check found ("available" -> "downloading" -> "ready").
+    pub fn updater_download(&self) {
+        let u = self.inner.updater.clone();
+        self.rt.spawn(async move { u.download() });
+    }
+
+    /// The verified download of the update that is "ready", for the system installer.
+    pub fn updater_ready_path(&self) -> Option<PathBuf> {
+        let s = self.inner.updater.get_state();
+        let v = s.version.filter(|_| s.status == "ready")?;
+        let p = NativeInstaller::downloaded_path(&self.data_dir().join("updates"), crate::updater::NATIVE_TARGET, &v);
+        p.is_file().then_some(p)
+    }
+
     pub fn data_dir(&self) -> &Path {
         self.inner.store.files.dir()
     }

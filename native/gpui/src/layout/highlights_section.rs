@@ -32,17 +32,7 @@ fn kind_label(kind: &str) -> &'static str {
     KINDS.iter().find(|(k, _)| *k == kind).map(|(_, l)| *l).unwrap_or("Phrase")
 }
 
-/// Shown name of a stored sound file: drop the "-<hash>" suffix `Sounds::import` adds.
-pub fn sound_label(file: &str) -> String {
-    if let Some((stem, ext)) = file.rsplit_once('.') {
-        if let Some((base, hash)) = stem.rsplit_once('-') {
-            if hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
-                return format!("{base}.{ext}");
-            }
-        }
-    }
-    file.to_string()
-}
+pub use crate::chat::settings_text::sound_label;
 
 #[derive(Clone)]
 enum SoundTarget {

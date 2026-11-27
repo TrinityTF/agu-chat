@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- the core keeps a downloaded update in <files>/agu/updates -->
+    <files-path name="updates" path="agu/updates/" />
+</paths>

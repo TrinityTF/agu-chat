@@ -4,11 +4,14 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.MediaPlayer
 import android.os.VibrationEffect
 import android.os.Vibrator
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -32,13 +35,39 @@ class Alerts(context: Context) {
         ping = ShortArray(pcm.size) { pcm[it].jsonPrimitive.contentOrNull?.toIntOrNull()?.toShort() ?: 0 }
     }
 
-    /** An `alert` event: `{sound: {file, volume} | null, vibrate}`. A custom sound file plays as the ping for now. */
-    fun fire(data: JsonElement) {
+    /** An `alert` event: `{sound: {file, volume} | null, vibrate}`. The file is a custom sound, empty for the ping. */
+    suspend fun fire(data: JsonElement) {
         val o = data as? JsonObject ?: return
         val sound = o["sound"] as? JsonObject
-        if (sound != null) playPing((sound["volume"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 70).coerceIn(0, 100))
+        if (sound != null) play(sound["file"]?.jsonPrimitive?.contentOrNull.orEmpty(), (sound["volume"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 70).coerceIn(0, 100))
         if (o["vibrate"]?.jsonPrimitive?.contentOrNull == "true") vibrate()
     }
+
+    /** One sound: the stored custom [file] (the core says where it is), or the ping when it is empty or cannot be played. */
+    suspend fun play(file: String, volume: Int) {
+        if (file.isNotEmpty()) {
+            val path = runCatching { (Core.call("sounds.path", buildJsonObject { put("file", file) }) as? JsonObject)?.get("path")?.jsonPrimitive?.contentOrNull }.getOrNull()
+            if (path != null && playFile(path, volume)) return
+        }
+        playPing(volume)
+    }
+
+    private val players = HashSet<MediaPlayer>()
+
+    /** A sound file with MediaPlayer; false when it could not even be started. */
+    private fun playFile(path: String, volume: Int): Boolean = runCatching {
+        val mp = MediaPlayer()
+        synchronized(players) { players.add(mp) }
+        fun done() { runCatching { mp.release() }; synchronized(players) { players.remove(mp) } }
+        mp.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+        mp.setDataSource(path)
+        mp.setVolume(volume / 100f, volume / 100f)
+        mp.setOnCompletionListener { done() }
+        mp.setOnErrorListener { _, _, _ -> done(); playPing(volume); true }
+        mp.setOnPreparedListener { it.start() }
+        mp.prepareAsync()
+        true
+    }.getOrDefault(false)
 
     private fun playPing(volume: Int) {
         val samples = ping ?: return

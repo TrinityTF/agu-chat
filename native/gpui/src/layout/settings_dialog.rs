@@ -30,8 +30,7 @@ use crate::icons;
 use crate::text_input::{InputStyle, TextInput, TextInputEvent};
 use crate::theme::{self, a, c};
 
-pub const REPO_URL: &str = "https://github.com/TrinityTF/agu-chat";
-const TEMPLATE_HELP: &str = "{user} login, {name} display name, {user-id}, {msg-id}, {channel}, {msg} message text";
+pub use crate::chat::settings_text::{new_issue_url, percent_of, updater_text, MOD_ICON_LABELS, REPO_URL, TEMPLATE_HELP};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -1759,52 +1758,11 @@ impl SettingsDialog {
     }
 }
 
-/// GitHub's new-issue page with the app version and system already in the body (nothing personal: no names,
-/// no channels).
-fn new_issue_url(version: &str, os: &str) -> String {
-    let os = match os {
-        "windows" => "Windows",
-        "macos" => "macOS",
-        o => o,
-    };
-    let body = format!(
-        "**What happened**\n\n\n**What you expected**\n\n\n**Steps to reproduce**\n1. \n\n**Platform / chat** (Twitch, Kick, YouTube, Rumble, X)\n\n\n---\nAgu Chat {version} on {os}\n"
-    );
-    let enc: String = body.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-    format!("{REPO_URL}/issues/new?body={enc}")
-}
-
-const MOD_ICON_LABELS: [&str; 10] = ["Ban", "Clock", "Trash", "Shield", "Warning", "Flag", "Hidden", "Chat", "Pin", "Check"];
 
 fn a_amber(alpha: f32) -> gpui::Rgba {
     a(theme::AMBER_500, alpha)
 }
 
-/// Progress as a percentage. The backend reports 0..1 (updater.js); the dev mock reports 0..100. The JS dialog
-/// printed `Math.round(progress)` and so showed 0-1% for a real download; this shows the real percentage.
-fn percent_of(p: f32) -> f32 {
-    if p <= 1.0 {
-        p * 100.0
-    } else {
-        p
-    }
-}
-
-/// `updaterText`
-pub fn updater_text(u: &UpdaterState) -> String {
-    let v = |d: &str| u.version.clone().unwrap_or_else(|| d.to_string());
-    match u.status.as_str() {
-        "idle" => "Not checked yet.".into(),
-        "dev" => "Updates are off in development builds.".into(),
-        "checking" => "Checking for updates…".into(),
-        "none" => "You are on the latest version.".into(),
-        "available" => format!("Version {} is available.", v("?")),
-        "downloading" => format!("Downloading {}… {}%", v("the update"), percent_of(u.progress).round() as i64),
-        "ready" => format!("Version {} is ready to install.", v("?")),
-        "error" => format!("Update check failed{}", u.error.as_ref().map(|e| format!(": {e}")).unwrap_or_else(|| ".".into())),
-        _ => String::new(),
-    }
-}
 
 impl Focusable for SettingsDialog {
     fn focus_handle(&self, _: &App) -> FocusHandle {

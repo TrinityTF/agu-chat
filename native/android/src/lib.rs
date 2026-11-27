@@ -6,6 +6,7 @@ pub mod compose;
 pub mod hub;
 pub mod login;
 pub mod session;
+pub mod settings_api;
 pub mod view;
 
 #[cfg(target_os = "android")]

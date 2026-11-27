@@ -159,16 +159,33 @@ pub fn allowed_on_channel(channel: &str, current: &str, version: &str) -> bool {
     !stable_filters(channel, current) || !counts_as_pre(version)
 }
 
-/// `Agu-Chat-Setup-<version>-x64.exe`: the one installer asset the updater downloads.
-#[cfg(not(target_os = "macos"))]
-pub fn installer_asset_name(version: &str) -> String {
-    format!("Agu-Chat-Setup-{version}-x64.exe")
+/// Which build asks: the release selection below is the same for every one of them; only the asset name differs.
+pub const WINDOWS: &str = "windows";
+pub const MAC: &str = "mac";
+pub const ANDROID: &str = "android";
+
+/// The target this build is.
+#[cfg(target_os = "android")]
+pub const NATIVE_TARGET: &str = ANDROID;
+#[cfg(target_os = "macos")]
+pub const NATIVE_TARGET: &str = MAC;
+#[cfg(not(any(target_os = "android", target_os = "macos")))]
+pub const NATIVE_TARGET: &str = WINDOWS;
+
+/// The one asset a release must carry for `target` to be offered it:
+///   windows `Agu-Chat-Setup-<version>-x64.exe`, mac `Agu-Chat-<version>-mac.zip` (the zipped app bundle),
+///   android `Agu-Chat-<version>-android.apk`. Each also has a `<name>.sha256` next to it.
+pub fn asset_name(target: &str, version: &str) -> String {
+    match target {
+        MAC => format!("Agu-Chat-{version}-mac.zip"),
+        ANDROID => format!("Agu-Chat-{version}-android.apk"),
+        _ => format!("Agu-Chat-Setup-{version}-x64.exe"),
+    }
 }
 
-/// macOS: the zipped app bundle (`Agu-Chat-<version>-mac.zip`); only releases that carry it are offered.
-#[cfg(target_os = "macos")]
+/// The installer asset this build downloads.
 pub fn installer_asset_name(version: &str) -> String {
-    format!("Agu-Chat-{version}-mac.zip")
+    asset_name(NATIVE_TARGET, version)
 }
 
 /// A file attached to a release.
@@ -196,7 +213,11 @@ pub struct Release {
 
 impl Release {
     pub fn installer(&self) -> Option<&Asset> {
-        let want = installer_asset_name(&self.version);
+        self.installer_for(NATIVE_TARGET)
+    }
+
+    pub fn installer_for(&self, target: &str) -> Option<&Asset> {
+        let want = asset_name(target, &self.version);
         self.assets.iter().find(|a| a.name == want)
     }
 }
@@ -205,6 +226,11 @@ impl Release {
 /// the `-x64` installer), other tags and releases that do not (yet) carry their installer are dropped: a
 /// half-uploaded release is never offered.
 pub fn parse_releases(list: &Value) -> Vec<Release> {
+    parse_releases_for(list, NATIVE_TARGET)
+}
+
+/// `parse_releases` for one target's installer asset.
+pub fn parse_releases_for(list: &Value, target: &str) -> Vec<Release> {
     list.as_array()
         .map(|a| {
             a.iter()
@@ -236,7 +262,7 @@ pub fn parse_releases(list: &Value) -> Vec<Release> {
                         url: r["html_url"].as_str().unwrap_or("").to_string(),
                         assets,
                     };
-                    rel.installer().is_some().then_some(rel)
+                    rel.installer_for(target).is_some().then_some(rel)
                 })
                 .collect()
         })
@@ -377,6 +403,11 @@ pub enum InstallError {
 /// Downloading a release and installing it.
 pub trait Installer: Send + Sync {
     fn supported(&self) -> bool;
+    /// A found update downloads by itself (desktop). False: it stays "available" until `Updater::download` (a phone
+    /// on mobile data should not fetch a whole app unasked).
+    fn auto_download(&self) -> bool {
+        true
+    }
     /// `progress` takes 0..=1
     fn download(&self, release: &Release, progress: Arc<dyn Fn(f32) + Send + Sync>) -> BoxFuture<'static, Result<(), InstallError>>;
     /// Quits into the downloaded update ("Restart to update").
@@ -408,6 +439,7 @@ pub type QuitHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 ///   macOS:   `Agu-Chat-<version>-mac.zip`, unpacked and signature-checked when downloaded; installing swaps the
 ///            running `Agu Chat.app` for the new one (a small shell script that waits for this process to exit).
 pub struct NativeInstaller {
+    target: &'static str,
     dir: PathBuf,
     client: reqwest::Client,
     /// the verified installer of the last finished download
@@ -418,7 +450,12 @@ pub struct NativeInstaller {
 
 impl NativeInstaller {
     pub fn new(dir: PathBuf, quit: QuitHook, log: Arc<Logger>) -> Self {
-        NativeInstaller { dir, client: reqwest::Client::new(), ready: Arc::new(Mutex::new(None)), quit, log }
+        NativeInstaller { target: NATIVE_TARGET, dir, client: reqwest::Client::new(), ready: Arc::new(Mutex::new(None)), quit, log }
+    }
+
+    /// Where the verified download of `version` is once `Updater` says "ready".
+    pub fn downloaded_path(dir: &std::path::Path, target: &str, version: &str) -> PathBuf {
+        dir.join(asset_name(target, version))
     }
 }
 
@@ -440,19 +477,23 @@ fn hex(bytes: &[u8]) -> String {
 
 impl Installer for NativeInstaller {
     fn supported(&self) -> bool {
-        cfg!(any(windows, target_os = "macos"))
+        cfg!(any(windows, target_os = "macos", target_os = "android"))
+    }
+
+    fn auto_download(&self) -> bool {
+        self.target != ANDROID
     }
 
     fn download(&self, release: &Release, progress: Arc<dyn Fn(f32) + Send + Sync>) -> BoxFuture<'static, Result<(), InstallError>> {
-        let (dir, client, ready, log, release) = (self.dir.clone(), self.client.clone(), self.ready.clone(), self.log.clone(), release.clone());
+        let (dir, client, ready, log, release, target) = (self.dir.clone(), self.client.clone(), self.ready.clone(), self.log.clone(), release.clone(), self.target);
         Box::pin(async move {
             use futures_util::StreamExt;
             use sha2::{Digest, Sha256};
             use std::io::Write;
             let fail = |m: String| InstallError::Failed(m);
-            let asset = release.installer().ok_or_else(|| fail("This release has no installer for this app.".into()))?.clone();
+            let asset = release.installer_for(target).ok_or_else(|| fail("This release has no installer for this app.".into()))?.clone();
             // The name goes into a path: only the exact asset name we build ourselves is accepted.
-            if asset.name != installer_asset_name(&release.version) || asset.name.contains(['/', '\\']) {
+            if asset.name != asset_name(target, &release.version) || asset.name.contains(['/', '\\']) {
                 return Err(fail("Unexpected installer name.".into()));
             }
             *ready.lock().unwrap() = None;
@@ -702,6 +743,8 @@ struct Inner {
     recheck_queued: bool,
     download_gen: u64, // bumping it cancels the running download's result
     downloading: bool,
+    /// the release found by the last check, waiting for `Updater::download` (installers that do not auto-download)
+    pending: Option<Release>,
     last_percent: i32,
     retry_timer: Timer,
     first_timer: Timer,
@@ -728,6 +771,7 @@ impl Updater {
                 recheck_queued: false,
                 download_gen: 0,
                 downloading: false,
+                pending: None,
                 last_percent: -1,
                 retry_timer: Timer::new(),
                 first_timer: Timer::new(),
@@ -907,17 +951,43 @@ impl Updater {
 
     async fn on_update_available(self: &Arc<Self>, rel: Release) {
         let supported = self.installer.supported();
+        let auto = supported && self.installer.auto_download();
         let (version, notes) = (rel.version.clone(), notes_to_lines(&rel.notes));
+        self.inner.lock().unwrap().pending = (supported && !auto).then(|| rel.clone());
         self.set(|s| {
-            s.status = if supported { "downloading" } else { "available" }.into();
+            s.status = if auto { "downloading" } else { "available" }.into();
             s.version = Some(version.clone());
             s.notes = notes;
             s.progress = 0.0;
             s.error = None;
         });
-        if !supported {
-            return; // TODO: nothing to download until the native installer exists
+        if !auto {
+            return; // no installer here, or one that waits for `download`
         }
+        self.download_release(rel).await;
+    }
+
+    /// The user asked for the update found by the last check (Android's Download button).
+    pub fn download(self: &Arc<Self>) {
+        let rel = {
+            let g = self.inner.lock().unwrap();
+            if !g.enabled || g.state.status != "available" || g.downloading {
+                return;
+            }
+            g.pending.clone()
+        };
+        let Some(rel) = rel else { return };
+        let me = self.clone();
+        tokio::spawn(async move { me.download_release(rel).await });
+    }
+
+    async fn download_release(self: &Arc<Self>, rel: Release) {
+        self.set(|s| {
+            s.status = "downloading".into();
+            s.version = Some(rel.version.clone());
+            s.progress = 0.0;
+            s.error = None;
+        });
         let gen = {
             let mut g = self.inner.lock().unwrap();
             g.download_gen += 1;
@@ -1284,5 +1354,112 @@ second line", None), "boom");
         }
         assert_eq!(u.get_state().version.as_deref(), Some("0.0.1"));
         assert!(u.install().await.is_err());
+    }
+
+    /// A releases list as GitHub sends it, with desktop and Android assets mixed.
+    fn android_list() -> Value {
+        let asset = |name: String| serde_json::json!({ "name": name, "browser_download_url": format!("https://example.invalid/{name}"), "size": 10 });
+        serde_json::json!([
+            // desktop-only release: the exe and the mac zip, no apk
+            { "tag_name": "v0.4.0", "prerelease": true, "draft": false, "body": "desktop only", "html_url": "u1",
+              "assets": [asset(asset_name(WINDOWS, "0.4.0")), asset(asset_name(MAC, "0.4.0"))] },
+            { "tag_name": "v0.3.5", "prerelease": true, "draft": false, "body": "<p>Phone release</p>", "html_url": "u2",
+              "assets": [asset(asset_name(ANDROID, "0.3.5")), asset(format!("{}.sha256", asset_name(ANDROID, "0.3.5"))), asset(asset_name(WINDOWS, "0.3.5"))] },
+            { "tag_name": "v1.0.0", "prerelease": false, "draft": false, "body": "", "html_url": "u3", "assets": [asset(asset_name(ANDROID, "1.0.0"))] },
+            // a wrongly named apk is never ours
+            { "tag_name": "v0.3.6", "prerelease": true, "draft": false, "body": "", "html_url": "u4", "assets": [asset("agu-chat.apk".into())] },
+            { "tag_name": "v0.3.0", "prerelease": true, "draft": true, "body": "", "html_url": "u5", "assets": [asset(asset_name(ANDROID, "0.3.0"))] }
+        ])
+    }
+
+    #[test]
+    fn the_android_asset_is_the_apk_named_after_the_version() {
+        assert_eq!(asset_name(ANDROID, "0.3.5"), "Agu-Chat-0.3.5-android.apk");
+        assert_eq!(asset_name(WINDOWS, "0.3.5"), "Agu-Chat-Setup-0.3.5-x64.exe");
+        assert_eq!(asset_name(MAC, "0.3.5"), "Agu-Chat-0.3.5-mac.zip");
+    }
+
+    #[test]
+    fn an_android_phone_is_offered_only_releases_that_carry_its_apk() {
+        let rels = parse_releases_for(&android_list(), ANDROID);
+        let versions: Vec<_> = rels.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["0.3.5", "1.0.0", "0.3.0"]);
+        // the desktop sees its own assets, not the apk
+        let desk = parse_releases_for(&android_list(), WINDOWS);
+        assert_eq!(desk.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), vec!["0.4.0", "0.3.5"]);
+        // beta: newest with an apk (drafts never count); the desktop-only 0.4.0 is skipped
+        assert_eq!(pick_update(&rels, "0.3.4", "beta").unwrap().version, "1.0.0");
+        assert_eq!(pick_update(&rels[..1], "0.3.4", "beta").unwrap().version, "0.3.5");
+        assert!(pick_update(&rels[..1], "0.3.5", "beta").is_none());
+        // stable on a 0.x phone acts like beta, on a 1.x phone it takes full releases only
+        assert_eq!(pick_update(&rels[..1], "0.3.4", "stable").unwrap().version, "0.3.5");
+        let later = vec![rel("1.0.1-beta", true), rel("1.0.1", false)];
+        assert_eq!(pick_update(&later, "1.0.0", "stable").unwrap().version, "1.0.1");
+        assert_eq!(rels[0].installer_for(ANDROID).unwrap().name, "Agu-Chat-0.3.5-android.apk");
+        assert_eq!(notes_to_lines(&rels[0].notes), vec!["Phone release"]);
+    }
+
+    #[tokio::test]
+    async fn an_apk_waits_for_the_download_button_then_is_checked_against_its_sha256() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("agu-upd-apk-{}", crate::util::uuid_v4()));
+        let log = Arc::new(Logger::new(&dir, true));
+        let body = b"PK pretend apk bytes".to_vec();
+        let url = serve(body.clone());
+        let good: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+        let mk = |digest: String| Release {
+            version: "0.3.5".into(),
+            prerelease: true,
+            assets: vec![Asset { name: asset_name(ANDROID, "0.3.5"), url: url.clone(), size: body.len() as u64, digest: Some(digest) }],
+            ..Default::default()
+        };
+        let inst = |l: &Arc<Logger>| NativeInstaller { target: ANDROID, ..NativeInstaller::new(dir.join("updates"), Arc::new(Mutex::new(None)), l.clone()) };
+
+        // a wrong checksum: the download is refused, nothing is left, the update can be asked for again
+        let u = Updater::new("0.3.4".into(), true, Arc::new(FakeFeed(vec![mk(format!("sha256:{}", "0".repeat(64)))])), Arc::new(inst(&log)), log.clone());
+        u.inner.lock().unwrap().enabled = true;
+        u.check();
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if u.get_state().status == "available" {
+                break;
+            }
+        }
+        // found, but not downloaded unasked
+        assert_eq!(u.get_state().status, "available");
+        assert_eq!(u.get_state().version.as_deref(), Some("0.3.5"));
+        assert!(!dir.join("updates").exists());
+        u.download();
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if u.get_state().status == "error" {
+                break;
+            }
+        }
+        let s = u.get_state();
+        assert_eq!(s.status, "error");
+        assert!(s.error.unwrap().contains("checksum"));
+        assert!(!NativeInstaller::downloaded_path(&dir.join("updates"), ANDROID, "0.3.5").exists());
+
+        // the right checksum: ready, with the apk under its final name
+        let u = Updater::new("0.3.4".into(), true, Arc::new(FakeFeed(vec![mk(format!("sha256:{good}"))])), Arc::new(inst(&log)), log.clone());
+        u.inner.lock().unwrap().enabled = true;
+        u.check();
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if u.get_state().status == "available" {
+                break;
+            }
+        }
+        u.download();
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if u.get_state().status == "ready" {
+                break;
+            }
+        }
+        assert_eq!(u.get_state().status, "ready");
+        assert_eq!(std::fs::read(NativeInstaller::downloaded_path(&dir.join("updates"), ANDROID, "0.3.5")).unwrap(), body);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

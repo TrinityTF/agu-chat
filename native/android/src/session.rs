@@ -571,6 +571,9 @@ impl Session {
             s3(&"settings", &serde_json::to_value(s).unwrap_or(Value::Null))
         })));
 
+        let s4 = sink.clone();
+        std::mem::forget(bridge.on_updater(Arc::new(move |u| s4(&"updater", &crate::settings_api::updater_json(u)))));
+
         let session = Session { inner };
         let s = session.clone();
         net.rt.spawn(async move { s.pump(rx).await });
@@ -1554,6 +1557,40 @@ impl Session {
                 }
                 "mentions.list" => Ok(s.mentions_list()),
                 // the built-in alert sound: 16-bit mono PCM
+                // Settings screens
+                "settings.meta" => Ok(crate::settings_api::meta(&b.app_info().version)),
+                "settings.check" => Ok(crate::settings_api::check(&args)),
+                "modbtn.duration" => Ok(crate::settings_api::duration(&args)),
+                "highlights.test" => Ok(crate::settings_api::highlight_test(&b.settings_get(), &args)),
+                "sounds.label" => Ok(json!(crate::settings_api::sound_name(str_arg(&args, "file")?))),
+                // a file the app copied out of the phone's file picker: into the sounds folder, by name
+                "sounds.import" => {
+                    let file = b.sounds_import(PathBuf::from(str_arg(&args, "path")?)).await?;
+                    Ok(json!({ "file": file }))
+                }
+                // where a stored sound is (the app plays it); only bare names inside the sounds folder
+                "sounds.path" => {
+                    let file = str_arg(&args, "file")?;
+                    if !agu_chat_core::highlight_rules::is_sound_file_name(file) {
+                        return Err("Not a sound file.".into());
+                    }
+                    let p = s.inner.backend.sounds_dir().join(file);
+                    if p.is_file() { Ok(json!({ "path": p.to_string_lossy() })) } else { Err("That sound is gone.".into()) }
+                }
+                "updater.get" => Ok(crate::settings_api::updater_json(&b.updater_get())),
+                "updater.check" => {
+                    b.updater_check().await;
+                    Ok(Value::Null)
+                }
+                "updater.download" => {
+                    s.inner.backend.updater_download();
+                    Ok(Value::Null)
+                }
+                // the verified apk, for the system installer (the app hands it over; nothing is installed here)
+                "updater.install" => match s.inner.backend.updater_ready_path() {
+                    Some(p) => Ok(json!({ "path": p.to_string_lossy() })),
+                    None => Err("No update is ready to install.".into()),
+                },
                 "alerts.ping" => {
                     let rate = 44100u32;
                     let pcm: Vec<i32> = ping_samples(rate).into_iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i32).collect();

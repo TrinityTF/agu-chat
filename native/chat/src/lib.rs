@@ -14,6 +14,7 @@ pub mod mod_caps;
 pub mod mod_row;
 pub mod net;
 pub mod search;
+pub mod settings_text;
 pub mod shown;
 pub mod store;
 pub mod thread;
