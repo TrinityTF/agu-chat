@@ -1,6 +1,6 @@
 [package]
 name = "agu-chat-android"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 description = "Agu Chat for Android: the Rust side of the app (core + chat logic) behind a small JSON bridge to Kotlin"
 
