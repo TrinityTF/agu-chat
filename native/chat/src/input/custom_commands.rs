@@ -9,13 +9,14 @@
 //! - `{name;fallback}` uses `fallback` when `name` is empty. `{{` is a literal `{`.
 //! - Anything else in braces is left as typed.
 //!
-//! A text with several lines sends one message per line.
+//! Sent the way Chatterino sends it: the whole text is one message (line breaks and runs of spaces become one
+//! space, Qt's `simplified()`), and emoji shortcodes such as `:thumbsup:` become the emoji.
 use super::autocomplete::{command_query, AutoMatch, AutoMode, AutoState};
 use agu_chat_core::protocol::CustomCommand;
 use serde_json::Value;
 
 /// The help line of the settings page, the same on every platform.
-pub const COMMANDS_HELP: &str = "Type the name in the message box to send the text. Each line is its own message, and a line starting with / runs as a command. Fill-ins: {1} the first word typed after the name, {1+} that word and the rest, {channel.name}, {user.name}, {msg.id}, {msg.text}.";
+pub const COMMANDS_HELP: &str = "Type the name in the message box to send the text. Several lines are sent as one message, :shortcodes: become emoji, and a text starting with / runs as a command. Fill-ins: {1} the first word typed after the name, {1+} that word and the rest, {channel.name}, {user.name}, {msg.id}, {msg.text}.";
 
 /// What a command can fill in besides the typed words. Empty strings when unknown.
 #[derive(Clone, Debug, Default)]
@@ -37,7 +38,7 @@ pub fn find<'a>(cmds: &'a [CustomCommand], word: &str) -> Option<&'a CustomComma
 }
 
 /// The messages to send for `input`, or None when its first word is not a custom command (send it as typed).
-/// Empty lines are dropped; an expansion with no text at all gives an empty list.
+/// An expansion with no text at all gives an empty list.
 pub fn expand_input(input: &str, cmds: &[CustomCommand], ctx: &CommandContext) -> Option<Vec<String>> {
     let trimmed = input.trim_start();
     let first = trimmed.split_whitespace().next()?;
@@ -51,8 +52,36 @@ pub fn expand_for_message(cmd: &CustomCommand, ctx: &CommandContext) -> Vec<Stri
     lines(&expand(&cmd.text, &[], ctx))
 }
 
+/// The message Chatterino would send for this text: whitespace (line breaks too) collapsed to single spaces and
+/// `:shortcode:` emoji filled in; none when nothing is left.
 fn lines(s: &str) -> Vec<String> {
-    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+    let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.is_empty() {
+        return Vec::new();
+    }
+    vec![emoji_shortcodes(&one)]
+}
+
+/// `:thumbsup:` -> the emoji, for every gemoji shortcode; anything else between colons stays as typed.
+pub fn emoji_shortcodes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(':') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let code_len = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-')).unwrap_or(after.len());
+        if code_len > 0 && after[code_len..].starts_with(':') {
+            if let Some(e) = emojis::get_by_shortcode(&after[..code_len]) {
+                out.push_str(e.as_str());
+                rest = &after[code_len + 1..];
+                continue;
+            }
+        }
+        out.push(':');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Fills every placeholder in `text`.
@@ -340,9 +369,17 @@ mod tests {
     }
 
     #[test]
-    fn several_lines_send_several_messages() {
-        let cmds = vec![cmd("/two", "first\n\n second ")];
-        assert_eq!(expand_input("/two", &cmds, &ctx()).unwrap(), vec!["first", "second"]);
+    fn several_lines_go_as_one_message_like_chatterino() {
+        let cmds = vec![cmd("/two", "first\n\n second  :thumbsup:\nV E R Y")];
+        assert_eq!(expand_input("/two", &cmds, &ctx()).unwrap(), vec!["first second \u{1F44D} V E R Y"]);
+        let blank = vec![cmd("/blank", " \n ")];
+        assert!(expand_input("/blank", &blank, &ctx()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_real_shortcodes_become_emoji() {
+        assert_eq!(emoji_shortcodes(":+1: at 12:30:45 :notanemoji: :fries:"), "\u{1F44D} at 12:30:45 :notanemoji: \u{1F35F}");
+        assert_eq!(emoji_shortcodes("https://x.com :"), "https://x.com :");
     }
 
     #[test]
