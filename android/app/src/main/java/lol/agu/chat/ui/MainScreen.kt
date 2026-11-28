@@ -71,6 +71,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.key
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -306,8 +310,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
             Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
                 Text(tab.title(full = true), color = AguColors.Muted, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 SheetItem("Rename") { renaming = tab; tabMenu = null }
-                SheetItem("Add a channel to this tab") { adding = AddTo(tab); tabMenu = null }
-                SheetItem("Change channel(s)…") { changing = tab; tabMenu = null }
+                SheetItem("Channels…") { changing = tab; tabMenu = null }
                 if (!tab.whisperOnly) SheetItem("Reload emotes") { vm.reloadEmotes(tab); tabMenu = null }
                 for (ch in tab.channels) if (!ch.isWhisper()) SheetItem("Stream link: ${ch.label()}") { vm.openStream(ch); tabMenu = null }
                 if (tab.channels.size > 1) for (ch in tab.channels) {
@@ -728,42 +731,30 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
 }
 
 /**
- * Add channels: one or several, from any platforms, into a new tab or merged into the tab you are on ([mergeInto];
- * [into] starts it on that choice). "Add another" keeps what you typed in a list and clears the box for the next one;
- * Add takes the list plus whatever is still in the box. The Whisper choice opens a Twitch whisper conversation with a
- * username instead ([startWhisper] starts on it).
+ * Add channels from the "+" button: one or several, from any platforms, into a new tab or merged into the tab you are
+ * on ([mergeInto]; [into] starts it on that choice). The channels are [ChannelRows]: a platform logo and a name per
+ * row, "+" for the next. Whisper (a platform choice too) opens a Twitch whisper conversation with that username
+ * ([startWhisper] starts on it).
  */
 @Composable
 private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, startWhisper: Boolean, onDismiss: () -> Unit) {
-    var platform by rememberSaveable { mutableStateOf(if (startWhisper) "whisper" else "twitch") }
-    var channel by rememberSaveable { mutableStateOf("") }
+    val rows = remember { mutableStateListOf(DraftRow(if (startWhisper) "whisper" else "twitch", focus = true)) }
     var merge by rememberSaveable { mutableStateOf(into != null) }
-    var list by remember { mutableStateOf(listOf<ChannelRef>()) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val dest = into ?: mergeInto
-    val whisper = platform == "whisper"
-
-    // the box's channel onto the list; false (with the reason shown) when it can't go there
-    fun draftAdd(): Boolean {
-        if (channel.isBlank()) return true
-        val ref = vm.draftRef(platform, channel)
-        when {
-            ref == null -> error = vm.emptyChannelText(platform)
-            list.any { it.sk() == ref.sk() } -> error = "That channel is already in the list"
-            list.any { it.isWhisper() != ref.isWhisper() } -> error = "A whisper can't share a split with channels."
-            else -> { list = list + ref; channel = ""; error = null; return true }
-        }
-        return false
-    }
+    val filled = rows.filter { it.name.isNotBlank() }
+    val whisperOnly = rows.all { it.platform == "whisper" }
 
     fun submit() {
-        if (busy || !draftAdd()) return
-        if (list.isEmpty()) { error = vm.emptyChannelText(platform); return }
+        if (busy) return
+        val refs = draftRefs(vm, rows) { error = it } ?: return
+        if (refs.isEmpty()) { error = vm.emptyChannelText(rows.first().platform); return }
+        if (refs.any { it.isWhisper() } && refs.any { !it.isWhisper() }) { error = "A whisper can't share a split with channels."; return }
         busy = true; error = null
         scope.launch {
-            val err = if (merge && dest != null) vm.setChannels(dest, (dest.channels + list).distinctBy { it.sk() }) else vm.addTabWith(list)
+            val err = if (merge && dest != null) vm.setChannels(dest, (dest.channels + refs).distinctBy { it.sk() }) else vm.addTabWith(refs)
             busy = false
             if (err == null) onDismiss() else error = err
         }
@@ -771,7 +762,7 @@ private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, sta
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (whisper && list.isEmpty()) "Whisper someone" else if (list.size + (if (channel.isBlank()) 0 else 1) > 1) "Add channels" else "Add channel") },
+        title = { Text(if (whisperOnly && rows.size == 1) "Whisper someone" else if (filled.size > 1) "Add channels" else "Add channel") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
                 if (dest != null) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -779,6 +770,126 @@ private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, sta
                     FilterChip(selected = !merge, onClick = { merge = false }, label = { Text("New tab") }, colors = colors)
                     FilterChip(selected = merge, onClick = { merge = true }, label = { Text("Merge into ${dest.title()}", maxLines = 1) }, colors = colors)
                 }
+                ChannelRows(rows, onEdit = { error = null }, onDone = ::submit)
+                if (rows.any { it.platform == "whisper" }) Text(WHISPER_HINT, color = AguColors.Muted, fontSize = 12.sp)
+                error?.let { Text(it, color = AguColors.Danger, fontSize = 13.sp) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = ::submit, enabled = !busy && filled.isNotEmpty()) {
+                Text(if (busy) "Adding…" else if (whisperOnly && filled.size == 1) "Open" else "Add", color = AguColors.Accent)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = AguColors.Muted) } },
+    )
+}
+
+/** One line of [ChannelRows]: the platform (picked by its logo) and the channel name; [focus] puts the cursor in it. */
+internal class DraftRow(platform: String, val focus: Boolean = false) {
+    var platform by mutableStateOf(platform)
+    var name by mutableStateOf("")
+}
+
+/** The rows' channels; null (with [onError] told why) when a filled row is not a channel. Empty rows are skipped. */
+internal fun draftRefs(vm: ChatViewModel, rows: List<DraftRow>, onError: (String) -> Unit): List<ChannelRef>? {
+    val out = mutableListOf<ChannelRef>()
+    for (r in rows) {
+        if (r.name.isBlank()) continue
+        val ref = vm.draftRef(r.platform, r.name) ?: run { onError(vm.emptyChannelText(r.platform)); return null }
+        if (out.none { it.sk() == ref.sk() }) out += ref
+    }
+    return out
+}
+
+/**
+ * The channels to add, one row each: the platform's logo (a tap picks another), the name box, and "+" on the last
+ * row for the next one (it starts on the same platform, with the cursor in it); the rows above it get "✕".
+ */
+@Composable
+internal fun ChannelRows(rows: SnapshotStateList<DraftRow>, onEdit: () -> Unit, onDone: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEachIndexed { i, r ->
+            key(r) {
+                val focus = remember { FocusRequester() }
+                LaunchedEffect(Unit) { if (r.focus) runCatching { focus.requestFocus() } }
+                val last = i == rows.lastIndex
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PlatformPicker(r.platform) { r.platform = it; onEdit() }
+                    Box(Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(12.dp)).background(AguColors.Surface2).padding(horizontal = 14.dp), contentAlignment = Alignment.CenterStart) {
+                        if (r.name.isEmpty()) Text(if (r.platform == "whisper") "username" else "Channel name", color = AguColors.Muted, fontSize = 15.sp)
+                        BasicTextField(
+                            r.name, { r.name = it; onEdit() }, singleLine = true,
+                            textStyle = TextStyle(color = AguColors.Text, fontSize = 15.sp),
+                            cursorBrush = SolidColor(AguColors.Accent),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { onDone() }),
+                            modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                        )
+                    }
+                    Box(
+                        Modifier.size(48.dp).clip(CircleShape).background(if (last) AguColors.Surface2 else Color.Transparent)
+                            .clickable { if (last) rows.add(DraftRow(r.platform, focus = true)) else rows.remove(r); onEdit() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(if (last) "+" else "✕", color = if (last) AguColors.Text else AguColors.Muted, fontSize = if (last) 22.sp else 16.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The platform of a row as its logo; a tap lists the platforms (and Whisper) to pick from. */
+@Composable
+private fun PlatformPicker(platform: String, onPick: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.height(48.dp).clip(RoundedCornerShape(12.dp)).background(AguColors.Surface2).clickable { open = true }.padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (platform == "whisper") MailIcon(18) else PlatformLogo(platform, 18.dp)
+            Text("▾", color = AguColors.Muted, fontSize = 12.sp, modifier = Modifier.padding(start = 4.dp))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = AguColors.Surface) {
+            for (p in platforms) DropdownMenuItem(
+                text = { Text(platformLabel(p), color = AguColors.Text) },
+                leadingIcon = { PlatformLogo(p, 16.dp) },
+                onClick = { onPick(p); open = false },
+            )
+            DropdownMenuItem(text = { Text("Whisper", color = AguColors.Text) }, leadingIcon = { MailIcon(16) }, onClick = { onPick("whisper"); open = false })
+        }
+    }
+}
+
+/**
+ * The tab's channels (the desktop's "Change channel(s)"): the ones it holds, each removable, and [ChannelRows] below
+ * to add more; Apply makes the tab show exactly that list (it keeps its place and name).
+ */
+@Composable
+private fun ChangeChannelsDialog(vm: ChatViewModel, tab: Tab, onDismiss: () -> Unit) {
+    var list by remember { mutableStateOf(tab.channels) }
+    val rows = remember { mutableStateListOf(DraftRow(tab.channels.lastOrNull()?.let { if (it.isWhisper()) "whisper" else it.platform } ?: "twitch")) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun apply() {
+        if (busy) return
+        val refs = draftRefs(vm, rows) { error = it } ?: return
+        busy = true; error = null
+        scope.launch {
+            val err = vm.setChannels(tab, (list + refs).distinctBy { it.sk() })
+            busy = false
+            if (err == null) onDismiss() else error = err
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Channels") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
                 for (ch in list) Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(AguColors.Surface2).padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -787,106 +898,15 @@ private fun AddChannelDialog(vm: ChatViewModel, into: Tab?, mergeInto: Tab?, sta
                     Text(ch.label(), color = AguColors.Text, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 10.dp))
                     Text("✕", color = AguColors.Muted, fontSize = 16.sp, modifier = Modifier.clip(CircleShape).clickable { list = list - ch; error = null }.padding(horizontal = 14.dp, vertical = 10.dp))
                 }
-                ChannelFields(platform, { platform = it }, channel, { channel = it })
-                if (whisper) Text(WHISPER_HINT, color = AguColors.Muted, fontSize = 12.sp)
-                if (!whisper) Text(
-                    "+ Add another", color = if (channel.isBlank()) AguColors.Muted else AguColors.Accent, fontSize = 14.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = channel.isNotBlank()) { draftAdd() }.padding(vertical = 6.dp, horizontal = 2.dp),
-                )
+                Text("Add channels", color = AguColors.Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+                ChannelRows(rows, onEdit = { error = null }, onDone = ::apply)
                 error?.let { Text(it, color = AguColors.Danger, fontSize = 13.sp) }
             }
         },
         confirmButton = {
-            TextButton(onClick = ::submit, enabled = !busy && (list.isNotEmpty() || channel.isNotBlank())) {
-                Text(if (busy) "Adding…" else if (whisper && list.isEmpty()) "Open" else "Add", color = AguColors.Accent)
+            TextButton(enabled = !busy && (list.isNotEmpty() || rows.any { it.name.isNotBlank() }), onClick = ::apply) {
+                Text(if (busy) "Applying…" else "Apply", color = AguColors.Accent)
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = AguColors.Muted) } },
-    )
-}
-
-/** The platform choice and the channel name box of the add and change dialogs. */
-@Composable
-internal fun ChannelFields(platform: String, onPlatform: (String) -> Unit, channel: String, onChannel: (String) -> Unit, modifier: Modifier = Modifier) {
-    val whisper = platform == "whisper"
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            val colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AguColors.Surface2, selectedLabelColor = AguColors.Text)
-            for (p in platforms) FilterChip(
-                selected = platform == p, onClick = { onPlatform(p) },
-                label = { Text(platformLabel(p)) },
-                leadingIcon = { PlatformLogo(p, 14.dp) },
-                colors = colors,
-            )
-            FilterChip(selected = whisper, onClick = { onPlatform("whisper") }, label = { Text("Whisper") }, leadingIcon = { MailIcon(14) }, colors = colors)
-        }
-        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(AguColors.Surface2).padding(horizontal = 14.dp, vertical = 12.dp)) {
-            if (channel.isEmpty()) Text(if (whisper) "username" else "Channel name", color = AguColors.Muted, fontSize = 15.sp)
-            BasicTextField(
-                channel, onChannel, singleLine = true,
-                textStyle = TextStyle(color = AguColors.Text, fontSize = 15.sp),
-                cursorBrush = SolidColor(AguColors.Accent), modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    }
-}
-
-/**
- * The desktop's "Change channel(s)": the channels a tab holds, each removable, with the add-channel fields below to
- * put more in; Apply makes the tab show exactly that list (it keeps its place and name).
- */
-@Composable
-private fun ChangeChannelsDialog(vm: ChatViewModel, tab: Tab, onDismiss: () -> Unit) {
-    var list by remember { mutableStateOf(tab.channels) }
-    var platform by remember { mutableStateOf("twitch") }
-    var channel by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    fun draftAdd(): Boolean {
-        if (channel.isBlank()) return true
-        val ref = vm.draftRef(platform, channel)
-        when {
-            ref == null -> error = vm.emptyChannelText(platform)
-            list.any { it.sk() == ref.sk() } -> error = "That channel is already in this tab"
-            list.any { it.isWhisper() != ref.isWhisper() } -> error = "A whisper can't share a split with channels."
-            else -> { list = list + ref; channel = ""; error = null; return true }
-        }
-        return false
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Change channel(s)") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
-                for (ch in list) Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(AguColors.Surface2).padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    PlatformLogo(ch.platform, 14.dp)
-                    Text(ch.label(), color = AguColors.Text, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 10.dp))
-                    Text("✕", color = AguColors.Muted, fontSize = 16.sp, modifier = Modifier.clip(CircleShape).clickable { list = list - ch; error = null }.padding(horizontal = 14.dp, vertical = 10.dp))
-                }
-                Text("Add a channel", color = AguColors.Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
-                ChannelFields(platform, { platform = it }, channel, { channel = it })
-                error?.let { Text(it, color = AguColors.Danger, fontSize = 13.sp) }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = !busy && (list.isNotEmpty() || channel.isNotBlank()),
-                onClick = {
-                    if (!draftAdd()) return@TextButton
-                    busy = true
-                    scope.launch {
-                        val err = vm.setChannels(tab, list)
-                        busy = false
-                        if (err == null) onDismiss() else error = err
-                    }
-                },
-            ) { Text(if (busy) "Applying…" else "Apply", color = AguColors.Accent) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = AguColors.Muted) } },
     )
