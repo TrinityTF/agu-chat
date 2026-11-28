@@ -295,7 +295,7 @@ fn tick() -> bool {
             if page_logged_in() {
                 let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
                 if let Some(r) = reply {
-                    let _ = r.send(Ok(sessions));
+                    let _ = r.send(Ok(list));
                 }
                 return true;
             }
@@ -345,7 +345,7 @@ fn request_cookies(l: &Login) -> bool {
     }
 }
 
-/// (name, value) of the session cookie; nothing else is copied out.
+/// (name, value) of rumble.com's cookies; core keeps the session and drops Cloudflare's.
 fn read_list(list: &ICoreWebView2CookieList) -> windows_core::Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     unsafe {
@@ -356,9 +356,6 @@ fn read_list(list: &ICoreWebView2CookieList) -> windows_core::Result<Vec<(String
             let mut name = PWSTR::null();
             cookie.Name(&mut name)?;
             let name = take_pwstr(name);
-            if name != "u_s" {
-                continue;
-            }
             let mut value = PWSTR::null();
             cookie.Value(&mut value)?;
             out.push((name, take_pwstr(value)));

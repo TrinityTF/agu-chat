@@ -174,10 +174,10 @@ impl LoginBridge {
 pub const X_LOGIN_URL: &str = "https://x.com/i/flow/login";
 /// Rumble's own sign-in page; it returns to rumble.com afterwards, which is where the session cookie is read.
 pub const RUMBLE_LOGIN_URL: &str = "https://auth.rumble.com/?redirect_uri=https%3A%2F%2Frumble.com%2F";
-/// Google signs in, then lands on YouTube's front page, whose response sets `LOGIN_INFO` (a plain file such as
-/// robots.txt never does). The sign-in screen turns page scripts off on youtube.com, so the page cannot hand the
-/// phone over to the YouTube app; the cookies are all the app needs.
-pub const YOUTUBE_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
+/// Google signs in (or, already signed in, goes straight on) to YouTube's sign-in handler, the same step YouTube's own
+/// Sign in button ends on: it sets the YouTube cookies, `LOGIN_INFO` included, and sends the page on to robots.txt.
+/// No YouTube page loads, so none can hand the phone over to the YouTube app (scripts are off on youtube.com too).
+pub const YOUTUBE_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26next%3D%252Frobots.txt";
 /// The app link the Kick login's browser tab is sent to at the end (AndroidManifest: KickReturnActivity).
 pub const KICK_RETURN_URL: &str = "aguchat://kick-done";
 pub const TWITCH_LOGIN_URL: &str = "https://www.twitch.tv/login";

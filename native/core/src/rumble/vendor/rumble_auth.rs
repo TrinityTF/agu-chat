@@ -59,7 +59,10 @@ fn form(pairs: &[(&str, String)]) -> String {
 }
 
 fn cookie(session: &str) -> (String, String) {
-    ("Cookie".to_string(), format!("{SESSION_COOKIE}={session}"))
+    match session.strip_prefix(crate::rumble::login::FULL_PREFIX) {
+        Some(all) => ("Cookie".to_string(), all.to_string()),
+        None => ("Cookie".to_string(), format!("{SESSION_COOKIE}={session}")),
+    }
 }
 
 /// One service.php call. `session` is the raw u_s token, or None for the unauthenticated steps of login.
@@ -109,15 +112,23 @@ pub struct Who {
 
 /// Cheap read-only "is this session still good, and who is it". None for an expired or revoked session.
 pub async fn whoami(session: &str) -> Option<Who> {
+    check_session(session).await.ok()
+}
+
+/// [whoami] with Rumble's reason when it says no (for the sign-in's error message; no cookie values in it).
+pub async fn check_session(session: &str) -> Result<Who, String> {
     if session.is_empty() {
-        return None;
+        return Err("no session".into());
     }
-    let s = service_php("user.has_unread_notifications", &[], &[], Some(session)).await.ok()?;
+    let s = service_php("user.has_unread_notifications", &[], &[], Some(session)).await.map_err(|e| match e.status {
+        Some(st) => format!("HTTP {st}: {}", e.message),
+        None => e.message,
+    })?;
     let user = &s.json["user"];
     if !truthy(&user["logged_in"]) || !truthy(&user["id"]) {
-        return None;
+        return Err("Rumble says not logged in".into());
     }
-    Some(Who { id: js_string(&user["id"]), username: js_str_or_empty(Some(&user["username"])) })
+    Ok(Who { id: js_string(&user["id"]), username: js_str_or_empty(Some(&user["username"])) })
 }
 
 pub async fn logout(session: &str) {

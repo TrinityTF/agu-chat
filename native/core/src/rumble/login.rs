@@ -1,6 +1,7 @@
 //! The Rumble sign-in window, provided by the app. Rumble refuses password logins from anything but a browser, so
 //! the user signs in on Rumble's own page in a web view (the same design as X: `x::auth::LoginHook`) and the
-//! app hands back the cookies it found there; core only keeps `u_s`. Cookie values are never logged.
+//! app hands back the cookies it found there; core keeps `u_s`, or Rumble's whole cookie set when `u_s` alone is not
+//! enough (never Cloudflare's own cookies). Cookie values are never logged.
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
@@ -46,6 +47,45 @@ pub fn all_sessions(list: &[(String, String)]) -> Vec<(String, String)> {
     list.iter().filter(|(k, v)| k == "u_s" && !v.trim().is_empty()).cloned().collect()
 }
 
+/// A stored session that is Rumble's whole cookie header rather than a bare `u_s` value.
+pub const FULL_PREFIX: &str = "cookies:";
+
+/// Cloudflare's cookies belong to the browser that earned them; they never leave it.
+fn is_cloudflare(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("cf_") || n.starts_with("__cf") || n == "_cfuvid"
+}
+
+/// Every rumble.com cookie but Cloudflare's, as a stored session (`FULL_PREFIX` + a Cookie header).
+pub fn full_session(pairs: &[(String, String)]) -> Option<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
+    for (k, v) in pairs {
+        // the first of a name wins, as a browser sends the more specific cookie first
+        if k.is_empty() || v.is_empty() || is_cloudflare(k) || seen.contains(&k.as_str()) {
+            continue;
+        }
+        seen.push(k);
+        parts.push(format!("{k}={v}"));
+    }
+    (parts.len() > 1).then(|| format!("{FULL_PREFIX}{}", parts.join("; ")))
+}
+
+/// The cookie names (values left out) for an error message, e.g. `u_s x2, a_s`.
+pub fn cookie_names(pairs: &[(String, String)]) -> String {
+    let mut names: Vec<(&str, usize)> = Vec::new();
+    for (k, _) in pairs {
+        match names.iter_mut().find(|(n, _)| *n == k) {
+            Some((_, c)) => *c += 1,
+            None => names.push((k, 1)),
+        }
+    }
+    if names.is_empty() {
+        return "none".into();
+    }
+    names.iter().map(|(n, c)| if *c > 1 { format!("{n} x{c}") } else { n.to_string() }).collect::<Vec<_>>().join(", ")
+}
+
 pub fn session_of(pairs: &[(String, String)]) -> Option<String> {
     sessions_of(pairs).into_iter().next()
 }
@@ -75,6 +115,10 @@ mod tests {
         assert_eq!(session_of(&p(&[("u_sx", "tok")])), None);
         assert_eq!(session_of(&[]), None);
         assert!(page_says_logged_in("\"yes\"") && page_says_logged_in("yes"));
+        let jar = p(&[("u_s", "a"), ("cf_clearance", "x"), ("__cf_bm", "y"), ("a_s", "b"), ("u_s", "c"), ("_cfuvid", "z")]);
+        assert_eq!(full_session(&jar).as_deref(), Some("cookies:u_s=a; a_s=b"));
+        assert_eq!(full_session(&p(&[("u_s", "a"), ("cf_clearance", "x")])), None, "nothing beyond u_s itself");
+        assert_eq!(cookie_names(&jar), "u_s x2, cf_clearance, __cf_bm, a_s, _cfuvid");
         assert!(!page_says_logged_in("\"pending\"") && !page_says_logged_in("null") && !page_says_logged_in(""));
         assert_eq!(all_sessions(&p(&[("u_s", "a"), ("x", "1"), ("u_s", " "), ("u_s", "b")])).len(), 2);
         assert_eq!(sessions_of(&p(&[("u_s", "guest"), ("u_s", "me"), ("u_s", "guest"), ("u_s", "")])), vec!["guest", "me"]);

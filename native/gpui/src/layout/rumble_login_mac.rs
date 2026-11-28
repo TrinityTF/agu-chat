@@ -109,8 +109,8 @@ fn open(cx: &mut App, reply: Reply) {
         if reply.borrow().is_none() {
             return false;
         }
-        // (name, value) of the session cookie; nothing else is copied out
-        let Some(list) = h.cookies_for(COOKIE_HOST, |n| n == "u_s") else { return true };
+        // (name, value) of rumble.com's cookies; core keeps the session and drops Cloudflare's
+        let Some(list) = h.cookies_for(COOKIE_HOST, |_| true) else { return true };
         let sessions = agu_chat_core::rumble::login::all_sessions(&list);
         if !sessions.is_empty() && h.url().as_deref().map(back_on_rumble).unwrap_or(false) {
             ticks += 1;
@@ -123,7 +123,7 @@ fn open(cx: &mut App, reply: Reply) {
             }
             let r = reply.borrow_mut().take();
             if let Some(r) = r {
-                let _ = r.send(Ok(sessions));
+                let _ = r.send(Ok(list));
             }
             let h = h.clone();
             let _ = cx.update(|cx| {

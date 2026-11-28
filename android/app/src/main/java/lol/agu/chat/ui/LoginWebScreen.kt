@@ -111,14 +111,17 @@ object LoginCookies {
         return out
     }
 
-    /** Like [read] but every value, also a second cookie of the same name (Rumble can have a guest and a real `u_s`). */
-    fun readAll(url: String, names: Set<String>): List<Pair<String, String>> {
+    /**
+     * Like [read] but every value, also a second cookie of the same name (Rumble can have a guest and a real `u_s`);
+     * [names] null is every cookie the site has (core keeps what it needs and drops Cloudflare's).
+     */
+    fun readAll(url: String, names: Set<String>?): List<Pair<String, String>> {
         val raw = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull() ?: return emptyList()
         return raw.split(';').mapNotNull { part ->
             val i = part.indexOf('=')
             if (i <= 0) return@mapNotNull null
             val k = part.substring(0, i).trim()
-            if (k in names) k to part.substring(i + 1).trim() else null
+            if (names == null || k in names) k to part.substring(i + 1).trim() else null
         }
     }
 }
@@ -140,13 +143,11 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
     // A window the page opened (X's "Sign in with Google" is a popup that reports back to x.com and closes itself);
     // without one the Google page has no opener to answer and stays white.
     var popup by remember { mutableStateOf<WebView?>(null) }
-    // set when youtube.com did not hand over LOGIN_INFO without its scripts, so the page gets them after all
-    var youTubeScripts by remember { mutableStateOf(false) }
     val web = remember {
-        // YouTube's own page only has to answer with its cookies; its scripts can hand a phone over to the YouTube
-        // app, which took the sign-in out of Agu Chat. Google's sign-in pages before it keep theirs.
+        // youtube.com only has to answer with its cookies (its sign-in handler, then robots.txt); a YouTube page's
+        // scripts can hand a phone over to the YouTube app. Google's sign-in pages before it keep theirs.
         fun noYouTubeScripts(w: WebView, url: String?) {
-            if (request.platform == "youtube" && !youTubeScripts && isYouTube(url) && w.settings.javaScriptEnabled) w.settings.javaScriptEnabled = false
+            if (request.platform == "youtube" && isYouTube(url) && w.settings.javaScriptEnabled) w.settings.javaScriptEnabled = false
         }
 
         fun setUp(w: WebView, main: Boolean) {
@@ -225,25 +226,16 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
         // the same rule as the desktop windows: poll the cookie jar until the sign-in cookies are there
         val rumble = request.platform == "rumble"
         var tick = 0
-        var onYouTube = 0
         while (true) {
             delay(500)
             tick++
             val got = LoginCookies.read(spec.cookieUrl, spec.names)
-            // signed in to Google and on youtube.com for 8 s without LOGIN_INFO: let the page run its scripts once
-            if (request.platform == "youtube" && !youTubeScripts && isYouTube(web.url) && !spec.complete(got)) {
-                if (++onYouTube >= 16) {
-                    youTubeScripts = true
-                    web.settings.javaScriptEnabled = true
-                    web.reload()
-                }
-            }
             if (!spec.complete(got) || !spec.onPage(web.url)) continue
             // Rumble: only once its page says this browser is logged in (asked at most every 1.5 s)
             if (rumble && (tick % 3 != 0 || web.check(RUMBLE_CHECK) != "yes")) continue
             handedOver = true
             if (request.platform == "twitch") web.loadUrl("about:blank") // twitch.tv's front page autoplays a stream
-            val cookies = if (rumble) LoginCookies.readAll(spec.cookieUrl, spec.names) else got.toList()
+            val cookies = if (rumble) LoginCookies.readAll(spec.cookieUrl, null) else got.toList()
             // Twitch stays up for the authorise page core sends next
             vm.loginAnswer(request, cookies = cookies, keepOpen = request.platform == "twitch")
             return@LaunchedEffect

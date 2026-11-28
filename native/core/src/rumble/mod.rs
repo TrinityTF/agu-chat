@@ -142,19 +142,26 @@ fn cancel_flow() {
 /// The cookies came back: take `u_s`, check it with Rumble and store it. Nothing is stored for a login that was
 /// cancelled or replaced meanwhile.
 async fn finish_session(id: u64, pairs: login::Pairs) -> Result<(), String> {
-    let candidates = login::sessions_of(&pairs);
-    drop(pairs);
+    let mut candidates = login::sessions_of(&pairs);
     if candidates.is_empty() {
         return Err("The Rumble login did not finish, try again.".into());
     }
+    // `u_s` on its own first (what Rumble has always taken), then Rumble's whole cookie set
+    candidates.extend(login::full_session(&pairs));
+    let names = login::cookie_names(&pairs);
+    drop(pairs);
     let mut session = None;
+    let mut why = String::new();
     for s in candidates {
-        if auth::whoami(&s).await.is_some() {
-            session = Some(s);
-            break;
+        match auth::check_session(&s).await {
+            Ok(_) => {
+                session = Some(s);
+                break;
+            }
+            Err(e) => why = e,
         }
     }
-    let Some(session) = session else { return Err("Rumble did not accept the login session, try again.".into()) };
+    let Some(session) = session else { return Err(format!("Rumble did not accept the login session ({why}; cookies: {names}). Try again.")) };
     if FLOW.lock().unwrap().pending.as_ref().map(|p| p.0) != Some(id) {
         return Ok(()); // cancelled or replaced; end_flow ignores it too
     }
