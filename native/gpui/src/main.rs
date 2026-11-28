@@ -111,6 +111,7 @@ fn main() {
             #[cfg(any(windows, target_os = "macos"))]
             {
                 layout::x_login::install(cx);
+                layout::rumble_login::install(cx);
                 layout::youtube_login::install(cx);
                 layout::twitch_login::install(cx);
             }

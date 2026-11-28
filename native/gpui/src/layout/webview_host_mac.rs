@@ -230,6 +230,11 @@ impl Host {
         )
     }
 
+    /// The address the page is on now.
+    pub fn url(&self) -> Option<String> {
+        self.webview.borrow().as_ref().and_then(|wv| wv.url().ok())
+    }
+
     pub fn load_url(&self, url: &str) {
         if let Some(wv) = self.webview.borrow().as_ref() {
             let _ = wv.load_url(url);

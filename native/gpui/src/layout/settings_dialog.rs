@@ -117,7 +117,6 @@ pub struct SettingsDialog {
     // accounts
     prompts: HashMap<Platform, DevicePrompt>,
     busy: bool,
-    rumble_need_code: bool,
     copied: bool,
     // ignores
     ignore_platform: Platform,
@@ -278,7 +277,6 @@ impl SettingsDialog {
             err: HashMap::new(),
             prompts: HashMap::new(),
             busy: false,
-            rumble_need_code: false,
             copied: false,
             ignore_platform: Platform::Twitch,
             cmd_status: None,
@@ -419,8 +417,6 @@ impl SettingsDialog {
         } else if let Some(id) = key.strip_prefix("color.") {
             let id = id.to_string();
             self.commit_rule_color(&id, cx);
-        } else if enter && key.starts_with("rumble.") {
-            self.rumble_submit(cx);
         }
     }
 
@@ -701,9 +697,6 @@ impl SettingsDialog {
                         if let (Ok(p), true) = (serde_json::from_value::<DevicePrompt>(v.clone()), platform != Platform::Twitch) {
                             this.prompts.insert(platform, p);
                         }
-                        if platform == Platform::Rumble {
-                            this.rumble_login_result(&v, cx);
-                        }
                     }
                     Err(e) => {
                         this.err.insert(platform.as_str().to_string(), err_msg(e));
@@ -745,68 +738,33 @@ impl SettingsDialog {
         Self::card().child(Self::account_title(Platform::Twitch)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
     }
 
-    fn rumble_login_result(&mut self, v: &Value, cx: &mut Context<Self>) {
-        self.set_text_of("rumble.pass", "", cx);
-        if v["twoFactor"].as_bool().unwrap_or(false) {
-            self.rumble_need_code = true;
-        } else {
-            self.rumble_need_code = false;
-            self.set_text_of("rumble.code", "", cx);
-        }
-    }
-
-    fn rumble_submit(&mut self, cx: &mut Context<Self>) {
-        let (u, p, code) = (self.text_of("rumble.user", cx), self.text_of("rumble.pass", cx), self.text_of("rumble.code", cx));
-        let ok = if self.rumble_need_code { !code.trim().is_empty() } else { !u.trim().is_empty() && !p.is_empty() };
-        if self.busy || !ok {
-            return;
-        }
-        self.busy = true;
-        let args = if self.rumble_need_code { json!({ "code": code.trim() }) } else { json!({ "username": u.trim(), "password": p }) };
-        self.login(Platform::Rumble, args, cx);
-        self.busy = true;
-    }
-
-    fn rumble_account(&mut self, st: &AccountState, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Rumble signs in through a window inside Agu Chat that shows Rumble's own login page (Rumble refuses password
+    /// logins from apps, and the password goes to Rumble, not to Agu Chat); only the session is kept, encrypted on
+    /// this PC.
+    fn rumble_account(&mut self, st: &AccountState, cx: &mut Context<Self>) -> AnyElement {
         if st.unsupported {
             return self.other_account(Platform::Rumble, st, cx);
         }
         let err = self.err.get("rumble").cloned().or_else(|| st.error.clone()).unwrap_or_default();
         let body: AnyElement = if st.connected {
             self.connected_line(Platform::Rumble, st, cx)
+        } else if st.pending.is_some() {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_color(c(theme::MUTED)).child("Waiting for you to log in to Rumble in the sign-in window\u{2026}"))
+                .child(btn(eid("ru-cancel"), "Cancel", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_login(Platform::Rumble, cx))))
+                .into_any_element()
         } else {
-            let need = self.rumble_need_code;
-            let fields: AnyElement = if need {
-                let code = self.input("rumble.code", "Verification code", InputStyle::Field, "", false, false, window, cx);
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(div().text_color(c(theme::MUTED)).child("Rumble sent a verification code. Enter it to finish logging in."))
-                    .child(code)
-                    .into_any_element()
-            } else {
-                let user = self.input("rumble.user", "Rumble username", InputStyle::Field, "", false, false, window, cx);
-                let pass = self.input("rumble.pass", "Password", InputStyle::Field, "", false, true, window, cx);
-                div().flex().flex_col().gap(px(8.)).child(user).child(pass).into_any_element()
-            };
-            let (u, p, code) = (self.text_of("rumble.user", cx), self.text_of("rumble.pass", cx), self.text_of("rumble.code", cx));
-            let disabled = self.busy || if need { code.trim().is_empty() } else { u.trim().is_empty() || p.is_empty() };
-            let submit = btn(eid("ru-submit"), if need { "Verify" } else { "Log in" }, BtnOpts { primary: true, disabled, ..Default::default() });
-            let submit = if disabled { submit } else { submit.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.rumble_submit(cx))) };
             div()
                 .flex()
                 .flex_col()
+                .items_start()
                 .gap(px(8.))
-                .child(fields)
-                .child(div().flex().items_center().gap(px(12.)).child(submit).children(need.then(|| {
-                    btn(eid("ru-back"), "Back", BtnOpts::default()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.rumble_need_code = false;
-                        this.set_text_of("rumble.code", "", cx);
-                        cx.notify();
-                    }))
-                })))
-                .child(txt(11.).text_color(c(theme::FAINT)).child("Your password is sent to Rumble once to sign in and is never stored. Only the resulting session is kept, encrypted on this PC."))
+                .child(btn(eid("login-rumble"), "Log in", BtnOpts::primary()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.login(Platform::Rumble, json!({}), cx))))
+                .child(txt(11.).text_color(c(theme::FAINT)).child("You sign in on Rumble's own page inside Agu Chat; only the session is kept, encrypted on this PC."))
                 .into_any_element()
         };
         Self::card().child(Self::account_title(Platform::Rumble)).child(body).children((!err.is_empty()).then(|| Self::err_line(&err))).into_any_element()
@@ -931,7 +889,7 @@ impl SettingsDialog {
         div()
             .child(Self::h("Accounts"))
             .child(self.twitch_account(&get(Platform::Twitch), cx))
-            .child(self.rumble_account(&get(Platform::Rumble), window, cx))
+            .child(self.rumble_account(&get(Platform::Rumble), cx))
             .child(self.kick_account(&get(Platform::Kick), cx))
             .child(self.x_account(&get(Platform::X), cx))
             .child(self.youtube_account(&get(Platform::Youtube), cx))

@@ -1,4 +1,4 @@
-//! Sign-in windows for the cookie logins (Twitch's web session, YouTube, X). The core asks the app for a window
+//! Sign-in windows for the cookie logins (Twitch's web session, YouTube, X, Rumble). The core asks the app for a window
 //! through each platform's `set_login_hook`; on Android the window is a Kotlin screen with a WebView, so a request
 //! crosses the bridge as an event and the answer comes back as a call:
 //!
@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agu_chat_core::{twitch, x, youtube};
+use agu_chat_core::{rumble, twitch, x, youtube};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
@@ -98,7 +98,7 @@ impl LoginBridge {
         self.state.lock().unwrap().waiting.len()
     }
 
-    /// Install the hooks of Twitch (web session), X and YouTube.
+    /// Install the hooks of Twitch (web session), X, Rumble and YouTube.
     pub fn install(&self) {
         let b = self.clone();
         x::auth::set_login_hook(x::auth::LoginHook {
@@ -112,6 +112,19 @@ impl LoginBridge {
             close: Arc::new({
                 let b = b.clone();
                 move || b.close("x", "login.close")
+            }),
+        });
+        rumble::login::set_login_hook(rumble::login::LoginHook {
+            open: Arc::new({
+                let b = b.clone();
+                move || {
+                    let f = b.request("login.webview", "rumble", RUMBLE_LOGIN_URL);
+                    Box::pin(async move { rumble_cookies(f.await?) })
+                }
+            }),
+            close: Arc::new({
+                let b = b.clone();
+                move || b.close("rumble", "login.close")
             }),
         });
         youtube::auth::set_login_hook(youtube::auth::LoginHook {
@@ -157,6 +170,8 @@ impl LoginBridge {
 }
 
 pub const X_LOGIN_URL: &str = "https://x.com/i/flow/login";
+/// Rumble's own sign-in page; it returns to rumble.com afterwards, which is where the session cookie is read.
+pub const RUMBLE_LOGIN_URL: &str = "https://auth.rumble.com/?redirect_uri=https%3A%2F%2Frumble.com%2F";
 /// Google signs in, then youtube.com/signin sets the session cookies and redirects to `continue`. That is a plain text
 /// file rather than YouTube's front page: the page's scripts can hand a phone over to the YouTube app, which then took
 /// the sign-in out of Agu Chat, and the cookies are all the app needs.
@@ -172,6 +187,14 @@ pub fn x_cookies(pairs: &[(String, String)]) -> Result<x::auth::Cookies, String>
     match (get(pairs, "auth_token"), get(pairs, "ct0")) {
         (Some(a), Some(c)) => Ok(x::auth::Cookies { auth_token: a.into(), ct0: c.into(), twid: get(pairs, "twid").unwrap_or_default().into() }),
         _ => Err("The X login did not finish, try again.".into()),
+    }
+}
+
+/// `u_s` is Rumble's session; core checks it with Rumble before keeping it.
+pub fn rumble_cookies(pairs: Pairs) -> Result<rumble::login::Pairs, String> {
+    match get(&pairs, "u_s") {
+        Some(_) => Ok(pairs),
+        None => Err("The Rumble login did not finish, try again.".into()),
     }
 }
 
@@ -275,6 +298,9 @@ mod tests {
         assert!(x_cookies(&pairs(&[("auth_token", "a")])).is_err());
         assert!(x_cookies(&pairs(&[("auth_token", "a"), ("ct0", "")])).is_err());
         assert!(x_cookies(&pairs(&[("auth_token", "a"), ("ct0", "c")])).is_ok());
+        assert!(rumble_cookies(pairs(&[("other", "a")])).is_err());
+        assert!(rumble_cookies(pairs(&[("u_s", "")])).is_err());
+        assert_eq!(rumble::login::session_of(&rumble_cookies(pairs(&[("u_s", "tok"), ("x", "y")])).unwrap()), Some("tok".to_string()));
         assert!(youtube_cookies(pairs(&[("SAPISID", "a")])).is_err());
         assert!(youtube_cookies(pairs(&[("SAPISID", "a"), ("LOGIN_INFO", "b")])).is_ok());
         assert!(twitch_cookies(&pairs(&[("auth-token", "")])).is_err());

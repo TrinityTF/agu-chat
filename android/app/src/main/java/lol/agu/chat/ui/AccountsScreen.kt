@@ -109,7 +109,6 @@ private fun AccountCard(platform: String, state: AccountState, vm: ChatViewModel
             state.unsupported ->
                 Muted("Read-only in this beta. You can read chat, but sending and moderating from here is not available yet.")
             state.connected -> ConnectedLine(state) { vm.logout(platform) }
-            platform == "rumble" -> RumbleForm(state, vm)
             pending != null -> when (platform) {
                 "twitch" -> Waiting("Waiting for you in the Twitch window...", vm, platform)
                 "kick" -> {
@@ -120,6 +119,7 @@ private fun AccountCard(platform: String, state: AccountState, vm: ChatViewModel
                     }
                 }
                 "x" -> Waiting("Waiting for you to log in to X in the sign-in window…", vm, platform)
+                "rumble" -> Waiting("Waiting for you to log in to Rumble in the sign-in window…", vm, platform)
                 else -> Waiting("Waiting for you to log in to YouTube in the sign-in window…", vm, platform)
             }
             else -> {
@@ -129,6 +129,7 @@ private fun AccountCard(platform: String, state: AccountState, vm: ChatViewModel
                 when (platform) {
                     "kick" -> Hint("You approve it on kick.com in your browser; your password never goes through Agu Chat.")
                     "x" -> Hint("X chat shows names and can be written to once you log in. You sign in on x.com inside Agu Chat; only the session is kept, encrypted on this phone.")
+                    "rumble" -> Hint("Log in to write in Rumble chat and moderate it. You sign in on Rumble's own page; only the session is kept, encrypted on this phone.")
                     "youtube" -> Hint("Log in to write in YouTube chat and moderate it. You sign in on Google inside Agu Chat; only the session is kept, encrypted on this phone.")
                 }
             }
@@ -162,69 +163,6 @@ private fun ConnectedLine(state: AccountState, onLogout: () -> Unit) {
 private fun Waiting(text: String, vm: ChatViewModel, platform: String) {
     Muted(text)
     TextButton(onClick = { vm.cancelLogin(platform) }) { Text("Cancel", color = AguColors.Muted) }
-}
-
-/** Rumble: username and password, then the verification code when Rumble asks for one. The password is only held in this form. */
-@Composable
-private fun RumbleForm(state: AccountState, vm: ChatViewModel) {
-    val scope = rememberCoroutineScope()
-    var user by remember { mutableStateOf("") }
-    var pass by remember { mutableStateOf("") }
-    var code by remember { mutableStateOf("") }
-    var needCode by remember { mutableStateOf(false) }
-    val busy = vm.loginBusy["rumble"] == true
-    val ok = if (needCode) code.isNotBlank() else user.isNotBlank() && pass.isNotEmpty()
-    val submit: () -> Unit = {
-        if (!busy && ok) {
-            scope.launch {
-                val args = buildJsonObject {
-                    if (needCode) put("code", code.trim()) else { put("username", user.trim()); put("password", pass) }
-                }
-                val r = vm.login("rumble", args)
-                pass = ""
-                if (r != null) {
-                    needCode = r["twoFactor"]?.jsonPrimitive?.booleanOrNull == true
-                    if (!needCode) code = ""
-                }
-            }
-        }
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (needCode) {
-            Muted("Rumble sent a verification code. Enter it to finish logging in.")
-            Field(code, { code = it }, "Verification code", KeyboardType.Number, ImeAction.Done, onDone = submit)
-        } else {
-            Field(user, { user = it }, "Rumble username", KeyboardType.Text, ImeAction.Next)
-            Field(pass, { pass = it }, "Password", KeyboardType.Password, ImeAction.Done, secret = true, onDone = submit)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            PrimaryButton(
-                if (busy) "Please wait…" else if (needCode) "Verify" else if (needsRelogin(state)) "Log in again" else "Log in",
-                enabled = ok && !busy, onClick = submit,
-            )
-            if (needCode) TextButton(onClick = { needCode = false; code = ""; vm.cancelLogin("rumble") }) { Text("Back", color = AguColors.Muted) }
-        }
-        Hint("Your password is sent to Rumble once to sign in and is never stored. Only the resulting session is kept, encrypted on this phone.")
-    }
-}
-
-@Composable
-private fun Field(
-    value: String, onChange: (String) -> Unit, label: String, keyboard: KeyboardType, ime: ImeAction,
-    secret: Boolean = false, onDone: () -> Unit = {},
-) {
-    OutlinedTextField(
-        value = value, onValueChange = onChange, label = { Text(label) }, singleLine = true,
-        visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
-        keyboardOptions = KeyboardOptions(keyboardType = keyboard, imeAction = ime, autoCorrectEnabled = false),
-        keyboardActions = KeyboardActions(onDone = { onDone() }),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = AguColors.Text, unfocusedTextColor = AguColors.Text,
-            focusedBorderColor = AguColors.Accent, unfocusedBorderColor = AguColors.Muted,
-            focusedLabelColor = AguColors.Accent, unfocusedLabelColor = AguColors.Muted, cursorColor = AguColors.Accent,
-        ),
-        modifier = Modifier.fillMaxWidth(),
-    )
 }
 
 private fun openUrl(ctx: Context, url: String) {

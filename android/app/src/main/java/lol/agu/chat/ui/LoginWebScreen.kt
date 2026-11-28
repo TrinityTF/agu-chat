@@ -43,7 +43,18 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 
 /** What a platform's sign-in has to produce: the cookies to read, where, and when the sign-in counts as done. */
-private class LoginSpec(val title: String, val cookieUrl: String, val names: Set<String>, val complete: (Map<String, String>) -> Boolean)
+private class LoginSpec(
+    val title: String, val cookieUrl: String, val names: Set<String>,
+    /** The page the WebView is on; a sign-in can also wait until it has left the login host. */
+    val onPage: (String?) -> Boolean = { true },
+    val complete: (Map<String, String>) -> Boolean,
+)
+
+/** Rumble sets `u_s` for guests too, so the sign-in only counts once the page is back on rumble.com (not auth.rumble.com). */
+private fun backOnRumble(url: String?): Boolean {
+    val host = runCatching { android.net.Uri.parse(url).host }.getOrNull()?.lowercase() ?: return false
+    return (host == "rumble.com" || host.endsWith(".rumble.com")) && host != "auth.rumble.com"
+}
 
 private val YOUTUBE_KEPT = setOf(
     "SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
@@ -54,6 +65,7 @@ private val YOUTUBE_KEPT = setOf(
 private val specs = mapOf(
     "twitch" to LoginSpec("Log in to Twitch", "https://www.twitch.tv", setOf("auth-token")) { !it["auth-token"].isNullOrEmpty() },
     "x" to LoginSpec("Log in to X", "https://x.com", setOf("auth_token", "ct0", "twid")) { !it["auth_token"].isNullOrEmpty() && !it["ct0"].isNullOrEmpty() },
+    "rumble" to LoginSpec("Log in to Rumble", "https://rumble.com", setOf("u_s"), onPage = ::backOnRumble) { !it["u_s"].isNullOrEmpty() },
     "youtube" to LoginSpec("Log in to YouTube", "https://www.youtube.com", YOUTUBE_KEPT) {
         (!it["SAPISID"].isNullOrEmpty() || !it["__Secure-3PAPISID"].isNullOrEmpty()) && !it["LOGIN_INFO"].isNullOrEmpty()
     },
@@ -173,7 +185,7 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
         while (true) {
             delay(500)
             val got = LoginCookies.read(spec.cookieUrl, spec.names)
-            if (spec.complete(got)) {
+            if (spec.complete(got) && spec.onPage(web.url)) {
                 handedOver = true
                 if (request.platform == "twitch") web.loadUrl("about:blank") // twitch.tv's front page autoplays a stream
                 // Twitch stays up for the authorise page core sends next

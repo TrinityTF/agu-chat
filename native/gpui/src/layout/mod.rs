@@ -22,6 +22,8 @@ pub mod tree;
 #[cfg(windows)]
 pub mod twitch_login;
 #[cfg(windows)]
+pub mod rumble_login;
+#[cfg(windows)]
 pub mod x_login;
 #[cfg(windows)]
 pub mod youtube_login;
@@ -30,6 +32,9 @@ pub mod webview_host_mac;
 #[cfg(target_os = "macos")]
 #[path = "twitch_login_mac.rs"]
 pub mod twitch_login;
+#[cfg(target_os = "macos")]
+#[path = "rumble_login_mac.rs"]
+pub mod rumble_login;
 #[cfg(target_os = "macos")]
 #[path = "x_login_mac.rs"]
 pub mod x_login;

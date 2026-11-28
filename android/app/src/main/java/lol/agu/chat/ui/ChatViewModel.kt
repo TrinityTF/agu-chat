@@ -867,7 +867,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Start a login; returns the core's answer (Rumble: `twoFactor`), or null when it failed (the error is in [loginErrors]). */
+    /** Start a login; returns the core's answer, or null when it failed (the error is in [loginErrors]). */
     suspend fun login(platform: String, args: JsonObject = JsonObject(emptyMap())): JsonObject? {
         loginErrors.remove(platform)
         loginBusy[platform] = true
@@ -891,7 +891,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun logout(platform: String) {
         loginErrors.remove(platform)
         // the sign-in WebView's cookies go with the account, so the next login starts clean
-        if (platform in listOf("twitch", "x", "youtube")) LoginCookies.clear()
+        if (platform in listOf("twitch", "x", "rumble", "youtube")) LoginCookies.clear()
         accountCall("accounts.logout", platform)
     }
 

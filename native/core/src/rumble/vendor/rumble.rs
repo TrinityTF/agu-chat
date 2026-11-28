@@ -2,12 +2,14 @@
 //! is gone (mod.rs owns the lifecycle for a single in-process subscriber).
 //!
 //! Rumble has no chat WebSocket and no public chat API. Its own web client reads Server-Sent Events from
-//! `GET https://<front-end host>.rumble.com/chat/api/chat/<chatId>/stream` (unauthenticated). Chat is per
+//! `GET https://web7.rumble.com/chat/api/chat/<chatId>/stream` (unauthenticated). Chat is per
 //! VIDEO, so a source owns re-resolving which video its channel is live on.
 //!
-//! EVERY request goes to one of Rumble's front-end hosts (wn0, web7: rumble_hosts.rs), never the rumble.com
-//! apex, and nothing here tries to get past a Cloudflare challenge: no TLS impersonation, no scripted
-//! browsers, no browser User-Agent. The honest product UA is sent (rumble_hosts::fetch_from_rumble).
+//! Which host serves what is rumble_hosts.rs (chat on web7; service.php, embedJS and oEmbed on the rumble.com
+//! apex). Nothing here tries to get past a Cloudflare challenge: no TLS impersonation, no scripted browsers, no
+//! browser User-Agent. The honest product UA is sent (rumble_hosts::fetch_from_rumble). Rumble challenges its
+//! HTML pages (channel pages included) for apps, so a channel name cannot be looked up; a pasted video link can,
+//! through oEmbed.
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
@@ -135,7 +137,22 @@ pub fn rumble_category_of(body: &Value) -> String {
 /// Resolves a pinned video to its chat id via Rumble's embed metadata route (plain JSON with the numeric chat
 /// id as `vid`, plus live status and title in the same trip). `live` is a small enum on Rumble's side
 /// (0 offline, 2 live); anything else is treated as not-live rather than guessed at.
-pub async fn resolve_rumble_video(embed_id: &str) -> Result<Resolved, String> {
+///
+/// `id` is either an embed id (`rumble.com/embed/<id>/`) or the id of a video page (`rumble.com/<id>-title.html`);
+/// the two differ for the same video and embedJS only knows embed ids. When embedJS does not know `id`, oEmbed
+/// turns the page id into the embed id and the lookup is repeated with that.
+pub async fn resolve_rumble_video(id: &str) -> Result<Resolved, String> {
+    let first = match resolve_embed(id).await {
+        Ok(r) => return Ok(r),
+        Err(e) => e,
+    };
+    match embed_id_via_oembed(id).await {
+        Some(embed_id) if embed_id != id.to_ascii_lowercase() => resolve_embed(&embed_id).await.map_err(|_| first),
+        _ => Err(first),
+    }
+}
+
+async fn resolve_embed(embed_id: &str) -> Result<Resolved, String> {
     let path = format!("/embedJS/u3/?request=video&ver=2&v={}", enc(embed_id));
     let mut o = FetchOpts::new(FETCH_TIMEOUT_MS).header("Accept", "application/json");
     o.method = "";
@@ -145,6 +162,30 @@ pub async fn resolve_rumble_video(embed_id: &str) -> Result<Resolved, String> {
     }
     let body = net::json(r).await.map_err(|e| e.message)?;
     video_from_json(&body, embed_id)
+}
+
+/// The oEmbed route turns a video page URL into the embed id of the same video. `https://rumble.com/<id>` is
+/// enough (no title slug needed). None when Rumble does not know the video or does not answer.
+async fn embed_id_via_oembed(page_id: &str) -> Option<String> {
+    let video_url = format!("https://rumble.com/{}", enc(page_id));
+    let path = format!("/api/Media/oembed.json?url={}", enc(&video_url));
+    let mut o = FetchOpts::new(FETCH_TIMEOUT_MS).header("Accept", "application/json");
+    o.method = "";
+    let r = fetch_from_rumble(&path, o).await.ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    let body = net::json(r).await.ok()?;
+    embed_id_from_oembed(&body)
+}
+
+static OEMBED_EMBED_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)rumble\.com/embed/(v[0-9a-z]+)").unwrap());
+
+/// The embed id inside an oEmbed answer's `html` (`<iframe src="https://rumble.com/embed/v6xe0d0/" ...>`),
+/// lowercased like every other id in this module.
+pub fn embed_id_from_oembed(body: &Value) -> Option<String> {
+    let html = body["html"].as_str()?;
+    OEMBED_EMBED_RE.captures(html).map(|c| c[1].to_ascii_lowercase())
 }
 
 pub fn video_from_json(body: &Value, embed_id: &str) -> Result<Resolved, String> {
@@ -164,6 +205,9 @@ pub fn video_from_json(body: &Value, embed_id: &str) -> Result<Resolved, String>
     })
 }
 
+/// What a user sees when Rumble's bot check answers a channel page (it does, to every app).
+pub const CHANNEL_BLOCKED: &str = "Rumble blocks channel lookups from apps right now — paste the live video link instead";
+
 static JSON_SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?s)<script type="application/json">(.*?)</script>"#).unwrap());
 
 /// Resolves a channel to whatever it is streaming right now.
@@ -173,13 +217,13 @@ static JSON_SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?s)<scr
 /// `live`, `livestream_status` and `permalink_id`. Returns not-live rather than failing when the channel
 /// simply isn't streaming: that is a normal state between broadcasts, not an error.
 pub async fn resolve_rumble_channel(space: &str, name: &str) -> Result<Resolved, String> {
-    // Two URLs, deliberately: the one we FETCH is the front-end host, the one handed to the user is the apex,
-    // since that is the link a human clicks and shares.
+    // The path we FETCH and the link handed to the user (the one a human clicks and shares).
     let fetch_path = format!("/{space}/{}", enc(name));
     let url = format!("https://rumble.com/{space}/{}", enc(name));
     let r = fetch_from_rumble(&fetch_path, FetchOpts::new(FETCH_TIMEOUT_MS).header("Accept", "text/html")).await.map_err(|e| e.message)?;
     if !r.status().is_success() {
-        return Err(format!("rumble channel {}", r.status().as_u16()));
+        let challenged = r.headers().get("cf-mitigated").is_some() || r.status().as_u16() == 403;
+        return Err(if challenged { CHANNEL_BLOCKED.to_string() } else { format!("rumble channel {}", r.status().as_u16()) });
     }
     let html = net::text(r).await.map_err(|e| e.message)?;
 
@@ -509,6 +553,17 @@ mod tests {
         assert_eq!(rumble_source_url(&s), "https://rumble.com/user/Foo");
         let v = parse_rumble_source("v7capuk").unwrap();
         assert_eq!((rumble_source_key(&v).as_str(), rumble_source_url(&v).as_str()), ("v:v7capuk", "https://rumble.com/v7capuk"));
+    }
+
+    #[test]
+    fn oembed_gives_the_embed_id() {
+        let body = json!({"type": "video", "html": "<iframe src=\"https://rumble.com/embed/v6xe0d0/\" width=\"1888\" height=\"1080\" frameborder=\"0\"></iframe>"});
+        assert_eq!(embed_id_from_oembed(&body), Some("v6xe0d0".into()));
+        let upper = json!({"html": "<iframe src='https://rumble.com/embed/V7GTDZO/?pub=1'></iframe>"});
+        assert_eq!(embed_id_from_oembed(&upper), Some("v7gtdzo".into()));
+        assert_eq!(embed_id_from_oembed(&json!({"html": "<p>no iframe</p>"})), None);
+        assert_eq!(embed_id_from_oembed(&json!({"title": "x"})), None);
+        assert_eq!(embed_id_from_oembed(&json!(false)), None);
     }
 
     #[test]

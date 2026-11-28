@@ -1,13 +1,13 @@
 //! Port of src/main/rumble/index.js: the Rumble platform module. See docs/ARCHITECTURE.md ("Platform module").
 //!
 //! Reading: Rumble has no chat WebSocket. Its own player reads Server-Sent Events from
-//!   GET https://<front-end host>.rumble.com/chat/api/chat/<chatId>/stream
+//!   GET https://web7.rumble.com/chat/api/chat/<chatId>/stream
 //! which is unauthenticated. Chat is per VIDEO, so a source owns re-resolving which video its channel is live
 //! on and swapping the SSE connection underneath. An offline channel keeps polling and reattaches by itself.
 //!
-//! HARD RULES (do not "fix" these): only front-end hosts (wn0, then web7 for chat), never the rumble.com
-//! apex; never try to get past a Cloudflare challenge (no TLS impersonation, no scripted browsers, no
-//! browser UA).
+//! HARD RULES (do not "fix" these): hosts follow vendor/rumble_hosts.rs (chat on web7; service.php and
+//! embedJS on the rumble.com apex with the honest UA); never try to get past a Cloudflare challenge (no TLS
+//! impersonation, no scripted browsers, no browser UA, no borrowed clearance cookies).
 //!
 //! Emits the frames /ws/rumble sends: chatlog, chat {msg}, status, delete, mute, pin, emotes, badges; plus
 //! the uniform conn frame. Sending and moderating go through the user's OWN Rumble login (see
@@ -16,6 +16,7 @@
 //! Differences from the JS: the SSE reader is a task whose AbortHandle plays the AbortController (a
 //! generation counter tells a stale reader that it was replaced); timers are `util::Timer`s; stop() aborts the
 //! source's tasks (`net::Jobs`).
+pub mod login;
 pub mod ua;
 pub mod vendor;
 
@@ -30,12 +31,12 @@ use tokio::task::AbortHandle;
 
 use crate::net::{FetchOpts, Jobs};
 use crate::platforms::{Accounts, Ctx, Emit, PlatformModule, Source};
-use crate::protocol::{AccountState, AccountUser, Frame, Platform};
+use crate::protocol::{AccountState, AccountUser, DevicePrompt, Frame, Platform};
 use crate::relay::{Handler, RouteError, RouteReq, RouteRes};
 use crate::util::{js_str_or_empty, js_string, js_to_number, js_trim, now_ms, truthy, Timer};
 use ua::set_user_agent;
 use vendor::rumble::{drain_frames, fetch_can_moderate, fetch_init, fetch_rumble_emotes, muted_users_from_init, pinned_from_init, parse_rumble_source, resolve_rumble_source, rumble_fetch, rumble_source_key, rumble_source_url, to_rumble_chat_msg, RumbleSource};
-use vendor::rumble_auth::{self as auth, LoginResult, RumbleError, TwoFactor};
+use vendor::rumble_auth::{self as auth, RumbleError};
 use vendor::rumble_hosts::{hosts_for, mark_host};
 
 const MAX_BACKLOG: usize = 200;
@@ -48,7 +49,8 @@ const LIVE_RECHECK_MS: u64 = 5 * 60_000;
 // Rumble sends a `: ` heartbeat even when chat is quiet, so a long silence means a dead connection.
 const IDLE_TIMEOUT_MS: i64 = 5 * 60_000;
 const SECRET_KEY: &str = "rumble";
-const TWO_FACTOR_TTL_MS: i64 = 5 * 60_000;
+/// How long the sign-in window may stay open.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CAPS_TTL_MS: i64 = 5 * 60_000;
 
 static APP_CTX: Mutex<Option<Arc<Ctx>>> = Mutex::new(None);
@@ -70,8 +72,16 @@ pub fn normalize_channel(input: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 static LIVE_SOURCES: LazyLock<Mutex<HashMap<String, Weak<RumbleSource_>>>> = LazyLock::new(|| Mutex::new(HashMap::new())); // normalized channel -> source
-/// in memory only, never persisted
-static PENDING_2FA: Mutex<Option<(TwoFactor, String, i64)>> = Mutex::new(None); // { challenge, username, expiresAt }
+
+/// The sign-in window that is open (if any) and the last login error; in memory only, never persisted.
+#[derive(Default)]
+struct LoginFlow {
+    seq: u64,
+    pending: Option<(u64, i64, Option<AbortHandle>)>, // (id, expires_at ms, task)
+    last_error: Option<String>,
+}
+
+static FLOW: LazyLock<Mutex<LoginFlow>> = LazyLock::new(|| Mutex::new(LoginFlow::default()));
 
 /// `{session, username}` of the stored login, if any.
 fn stored_account() -> Option<(String, String)> {
@@ -105,57 +115,125 @@ async fn finish_login(session: String, fallback_name: &str) -> Result<Value, Str
     Ok(user_json(&username))
 }
 
+/// Closes the window and drops the pending login (a cancel, or a new login replacing it).
+fn cancel_flow() {
+    let had = {
+        let mut f = FLOW.lock().unwrap();
+        match f.pending.take() {
+            Some((_, _, task)) => {
+                if let Some(t) = task {
+                    t.abort();
+                }
+                true
+            }
+            None => false,
+        }
+    };
+    if had {
+        if let Some(h) = login::hook() {
+            (h.close)();
+        }
+        if let Some(ctx) = app_ctx() {
+            ctx.accounts_changed();
+        }
+    }
+}
+
+/// The cookies came back: take `u_s`, check it with Rumble and store it. Nothing is stored for a login that was
+/// cancelled or replaced meanwhile.
+async fn finish_session(id: u64, pairs: login::Pairs) -> Result<(), String> {
+    let Some(session) = login::session_of(&pairs) else { return Err("The Rumble login did not finish, try again.".into()) };
+    drop(pairs);
+    if auth::whoami(&session).await.is_none() {
+        return Err("Rumble did not accept the login session, try again.".into());
+    }
+    if FLOW.lock().unwrap().pending.as_ref().map(|p| p.0) != Some(id) {
+        return Ok(()); // cancelled or replaced; end_flow ignores it too
+    }
+    finish_login(session, "").await.map(|_| ())
+}
+
+fn end_flow(id: u64, r: Result<(), String>) {
+    {
+        let mut f = FLOW.lock().unwrap();
+        if f.pending.as_ref().map(|p| p.0) != Some(id) {
+            return;
+        }
+        f.pending = None;
+        // an empty message is the window being closed: a cancel
+        if let Err(e) = r {
+            if !e.is_empty() {
+                f.last_error = Some(e);
+            }
+        }
+    }
+    if let Some(ctx) = app_ctx() {
+        ctx.accounts_changed();
+    }
+}
+
 struct RumbleAccounts;
 
 impl Accounts for RumbleAccounts {
     fn state(&self) -> AccountState {
         match stored_account() {
             Some((_, u)) => AccountState { connected: true, user: Some(AccountUser { id: String::new(), login: u.clone(), name: u }), ..Default::default() },
-            None => AccountState::default(),
+            None => {
+                let f = FLOW.lock().unwrap();
+                AccountState {
+                    pending: f.pending.as_ref().map(|(_, exp, _)| DevicePrompt { user_code: String::new(), verification_uri: String::new(), expires_at: *exp }),
+                    error: f.last_error.clone(),
+                    ..Default::default()
+                }
+            }
         }
     }
 
-    /// {username, password} -> {connected:true,user} | {twoFactor:true}; then {code} finishes a 2FA login.
-    fn login(&self, args: Value) -> BoxFuture<'static, Result<Value, String>> {
+    /// Opens the sign-in window and returns at once; the account state follows (pending -> connected | error).
+    fn login(&self, _args: Value) -> BoxFuture<'static, Result<Value, String>> {
         Box::pin(async move {
             if app_ctx().is_none() {
                 return Err("Rumble is not initialised.".into());
             }
-            if truthy(&args["code"]) {
-                let p = PENDING_2FA.lock().unwrap().clone();
-                let Some((challenge, username, expires_at)) = p.filter(|(_, _, exp)| now_ms() <= *exp) else {
-                    *PENDING_2FA.lock().unwrap() = None;
-                    return Err("That login attempt expired. Start again.".into());
+            let Some(hook) = login::hook() else { return Err("Rumble login is not available in this build.".into()) };
+            cancel_flow();
+            let id = {
+                let mut f = FLOW.lock().unwrap();
+                f.last_error = None;
+                f.seq += 1;
+                f.seq
+            };
+            let (open, close) = (hook.open.clone(), hook.close.clone());
+            let task = tokio::spawn(async move {
+                let r = match tokio::time::timeout(LOGIN_TIMEOUT, open()).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        close();
+                        Err("The Rumble login window timed out, try again.".into())
+                    }
                 };
-                let _ = expires_at;
-                let session = auth::complete_two_factor(&challenge, js_trim(&js_string(&args["code"]))).await.map_err(|e| e.message)?;
-                *PENDING_2FA.lock().unwrap() = None;
-                return finish_login(session, &username).await;
+                let r = match r {
+                    Ok(pairs) => finish_session(id, pairs).await,
+                    Err(e) => Err(e),
+                };
+                end_flow(id, r);
+            });
+            FLOW.lock().unwrap().pending = Some((id, now_ms() + LOGIN_TIMEOUT.as_millis() as i64, Some(task.abort_handle())));
+            if let Some(ctx) = app_ctx() {
+                ctx.accounts_changed();
             }
-            let username = js_trim(&js_str_or_empty(Some(&args["username"]))).to_string();
-            let password = js_str_or_empty(Some(&args["password"]));
-            if username.is_empty() || password.is_empty() {
-                return Err("Rumble username and password are required.".into());
-            }
-            // The password lives only inside this call: hashed by auth::login(), then dropped. It is never
-            // stored or logged, and error messages come from Rumble itself.
-            match auth::login(&username, &password).await.map_err(|e| e.message)? {
-                LoginResult::TwoFactor(challenge) => {
-                    *PENDING_2FA.lock().unwrap() = Some((challenge, username, now_ms() + TWO_FACTOR_TTL_MS));
-                    Ok(json!({"twoFactor": true}))
-                }
-                LoginResult::Session(session) => finish_login(session, &username).await,
-            }
+            Ok(json!({"pending": true}))
         })
     }
 
     fn cancel(&self) {
-        *PENDING_2FA.lock().unwrap() = None;
+        cancel_flow();
     }
 
     fn logout(&self) -> BoxFuture<'static, ()> {
         Box::pin(async {
-            *PENDING_2FA.lock().unwrap() = None;
+            cancel_flow();
+            FLOW.lock().unwrap().last_error = None;
             if let Some((session, _)) = stored_account() {
                 auth::logout(&session).await; // best effort; never blocks disconnecting
             }
@@ -844,7 +922,7 @@ impl RumbleSource_ {
             let idx = self.st.lock().unwrap().host_index;
             hosts[idx % hosts.len()].clone()
         };
-        let url = format!("https://{host}.rumble.com/chat/api/chat/{}/stream", vendor::rumble::enc(&chat_id));
+        let url = vendor::rumble_hosts::host_url(&host, &format!("/chat/api/chat/{}/stream", vendor::rumble::enc(&chat_id)));
         // timeout 0: the whole point is a connection that stays open; teardown is the task abort.
         let res = match rumble_fetch(&url, FetchOpts::new(0).header("Accept", "text/event-stream")).await {
             Ok(r) => r,

@@ -1,16 +1,11 @@
-//! Port of src/main/rumble/vendor/rumbleAuth.js (render lib/rumbleAuth.js): Rumble account auth and the chat
-//! write path (send, moderate, delete).
+//! Port of src/main/rumble/vendor/rumbleAuth.js (render lib/rumbleAuth.js): the Rumble session check and the
+//! chat write path (send, moderate, delete).
 //!
-//! Rumble has no OAuth for third parties: the only way to act as a user is to hold a Rumble session, and the
-//! only way to get one is to log in as them, as Rumble's own web client does: fetch the account's salts, hash
-//! the password client-side (the plaintext is never sent, and never stored), and exchange that for a session
-//! token (`u_s`). The user does this themselves in Settings; nothing here is ever run without that.
+//! Rumble has no OAuth for third parties and refuses password logins from anything but a browser, so the user
+//! signs in on Rumble's own page in a web view (`rumble::login`) and only the `u_s` session cookie comes back.
+//! mod.rs persists it in ctx.secrets; it never leaves main.
 //!
-//! The password exists only for the duration of one `login()` call: hashed, used, dropped, never stored or
-//! logged. The session token is persisted by mod.rs in ctx.secrets and never leaves main.
-//!
-//! USE A FRONT-END HOST (wn0, web7), NOT THE APEX; see rumble_hosts.rs. Since 2026-10-27 only wn0 serves
-//! service.php; web7 serves just /chat/api/*.
+//! HOSTS: `/service.php` goes to the rumble.com apex (honest UA), `/chat/api/*` to web7; see rumble_hosts.rs.
 use base64::Engine;
 use rand::RngCore;
 use serde_json::{json, Value};
@@ -52,40 +47,11 @@ impl From<net::FetchError> for RumbleError {
 }
 
 // ---------------------------------------------------------------------------
-// Password hashing: salted, stretched MD5. Not ours to choose: the server compares against exactly this.
-// ---------------------------------------------------------------------------
-
-fn md5(message: &str) -> String {
-    format!("{:x}", md5::compute(message.as_bytes()))
-}
-
-/// md5(salt + password), then `iterations` more rounds of md5(previous + password).
-fn stretch(password: &str, salt: &str, iterations: u32) -> String {
-    let mut current = md5(&format!("{salt}{password}"));
-    for _ in 0..iterations {
-        current = md5(&format!("{current}{password}"));
-    }
-    current
-}
-
-/// Rumble hands out three salts and expects three comma-joined values back: the first salt's stretched hash
-/// re-hashed with the second salt, the third salt's stretched hash, and the second salt echoed verbatim.
-pub fn password_hashes(password: &str, salts: &[String]) -> Result<String, RumbleError> {
-    if salts.len() < 3 {
-        return Err(RumbleError::plain("rumble: expected three salts"));
-    }
-    let first = md5(&format!("{}{}", stretch(password, &salts[0], 128), salts[1]));
-    let second = stretch(password, &salts[2], 128);
-    Ok(format!("{first},{second},{}", salts[1]))
-}
-
-// ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
 struct Service {
     json: Value,
-    set_cookies: Vec<String>,
 }
 
 fn form(pairs: &[(&str, String)]) -> String {
@@ -113,11 +79,10 @@ async fn service_php(name: &str, data: &[(&str, String)], params: &[(&str, &str)
     let r = fetch_from_rumble(&format!("/service.php?{}", form(&q)), opts).await?;
     let status = r.status().as_u16();
     let ok = r.status().is_success();
-    let set_cookies: Vec<String> = r.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(String::from).collect();
     let text = net::text(r).await?;
     if text.contains("Just a moment") {
         // The one failure mode worth naming explicitly, because the fix is a code change (wrong host).
-        return Err(RumbleError::plain("Rumble served a bot challenge — this request must use a Rumble front-end host (wn0), not rumble.com"));
+        return Err(RumbleError::plain("Rumble served a bot challenge — Rumble answered with a bot challenge, so this request cannot be made from the app right now"));
     }
     let json: Value = serde_json::from_str(&text).map_err(|_| RumbleError::plain(format!("Rumble returned a non-JSON response to {name} (HTTP {status})")))?;
 
@@ -134,88 +99,7 @@ async fn service_php(name: &str, data: &[(&str, String)], params: &[(&str, &str)
     if !ok {
         return Err(RumbleError { message: format!("Rumble {name} failed (HTTP {status})"), refused: (400..500).contains(&status), expired: false, status: Some(status) });
     }
-    Ok(Service { json, set_cookies })
-}
-
-fn session_from_set_cookie(lines: &[String]) -> Option<String> {
-    let prefix = format!("{SESSION_COOKIE}=");
-    for line in lines {
-        for part in line.split(';') {
-            let part = part.trim_start();
-            if let Some(v) = part.strip_prefix(&prefix) {
-                let v = v.trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
-// Login
-// ---------------------------------------------------------------------------
-
-pub async fn get_salts(username: &str) -> Result<Vec<String>, RumbleError> {
-    let s = service_php("user.get_salts", &[("username", username.to_string())], &[("response_type", "session")], None).await?;
-    let salts: Vec<String> = s.json["data"]["salts"].as_array().map(|a| a.iter().map(js_string).collect()).unwrap_or_default();
-    if salts.len() < 3 {
-        return Err(RumbleError::plain("Rumble did not return login salts"));
-    }
-    Ok(salts)
-}
-
-/// A 2FA challenge to continue with.
-#[derive(Clone, Debug)]
-pub struct TwoFactor {
-    pub totp_id: String,
-    pub user_key: String,
-}
-
-pub enum LoginResult {
-    Session(String),
-    TwoFactor(TwoFactor),
-}
-
-/// Logs in, returning either a session or a 2FA challenge to continue with. `password` is consumed here and
-/// nowhere else: it is turned into hashes immediately and never leaves this function.
-pub async fn login(username: &str, password: &str) -> Result<LoginResult, RumbleError> {
-    let salts = get_salts(username).await?;
-    let hashes = password_hashes(password, &salts)?;
-
-    // Rumble decides whether 2FA applies in a dedicated first step, and this call is also what rejects a
-    // wrong password: so it runs before user.login even for accounts without 2FA.
-    let first = service_php(
-        "user.2fa.first_step",
-        &[("legacy_password", "1".into()), ("login", username.to_string()), ("password", hashes.clone()), ("redirect_url", "https://rumble.com".into())],
-        &[],
-        None,
-    )
-    .await?;
-    let info = &first.json["data"];
-    if truthy(&info["totp_id"]) {
-        return Ok(LoginResult::TwoFactor(TwoFactor { totp_id: js_string(&info["totp_id"]), user_key: js_str_or_empty(Some(&info["user_key"])) }));
-    }
-
-    let s = service_php("user.login", &[("username", username.to_string()), ("password_hashes", hashes)], &[], None).await?;
-    let session = &s.json["data"]["session"];
-    if !truthy(session) {
-        return Err(RumbleError::plain("Rumble accepted the login but returned no session"));
-    }
-    Ok(LoginResult::Session(js_string(session)))
-}
-
-/// Second half of a 2FA login. Unlike user.login, this one delivers the session as a Set-Cookie header.
-pub async fn complete_two_factor(t: &TwoFactor, code: &str) -> Result<String, RumbleError> {
-    let s = service_php(
-        "user.2fa.verify_totp",
-        &[("code", code.to_string()), ("totp_id", t.totp_id.clone()), ("user_key", t.user_key.clone()), ("redirect_url", "https://rumble.com".into())],
-        &[],
-        None,
-    )
-    .await?;
-    session_from_set_cookie(&s.set_cookies).ok_or_else(|| RumbleError::plain("Rumble accepted the code but returned no session"))
+    Ok(Service { json })
 }
 
 pub struct Who {
@@ -267,7 +151,7 @@ async fn chat_api(path: &str, method: &'static str, body: Option<Value>, session
     let ok = r.status().is_success();
     let text = net::text(r).await?;
     if text.contains("Just a moment") {
-        return Err(RumbleError::plain("Rumble served a bot challenge — this request must use a Rumble front-end host (wn0), not rumble.com"));
+        return Err(RumbleError::plain("Rumble served a bot challenge — Rumble answered with a bot challenge, so this request cannot be made from the app right now"));
     }
     let json: Value = if text.is_empty() {
         Value::Null
@@ -428,26 +312,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn md5_and_hash_shape() {
-        assert_eq!(md5("abc"), "900150983cd24fb0d6963f7d28e17f72");
-        assert_eq!(stretch("pw", "s", 0), md5("spw"));
-        assert_eq!(stretch("pw", "s", 1), md5(&format!("{}pw", md5("spw"))));
-        let salts: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
-        let h = password_hashes("pw", &salts).unwrap();
-        let parts: Vec<&str> = h.split(',').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], md5(&format!("{}b", stretch("pw", "a", 128))));
-        assert_eq!(parts[1], stretch("pw", "c", 128));
-        assert_eq!(parts[2], "b");
-        assert!(password_hashes("pw", &salts[..2]).is_err());
-    }
-
-    #[test]
-    fn set_cookie_and_request_id() {
-        let c = vec!["foo=1; Path=/".to_string(), "u_s=abc123; Path=/; HttpOnly".to_string()];
-        assert_eq!(session_from_set_cookie(&c), Some("abc123".into()));
-        assert_eq!(session_from_set_cookie(&["u_s=; Path=/".to_string()]), None);
-        assert_eq!(session_from_set_cookie(&[]), None);
+    fn request_id_and_form() {
         let id = request_id();
         assert_eq!(id.len(), 43);
         assert!(!id.contains('='));
