@@ -34,13 +34,24 @@ pub(super) fn hook() -> Option<LoginHook> {
 /// The session cookie among the pairs (the one Rumble's `service.php` and chat API take as `u_s=`).
 /// Run in the sign-in page once it is back on rumble.com: asks rumble.com, from its own page, whether this browser is
 /// logged in. Rumble swaps the guest `u_s` for the real one a moment after the page is back, so the cookie alone can
-/// still be the guest's. Answers 'yes', 'no' or 'pending' (a 'no' asks again next time). Android has a copy.
-pub const PAGE_CHECK_JS: &str = "(function(){var s=window.__aguLogin;if(s==='yes'||s==='pending')return s;window.__aguLogin='pending';fetch('/service.php?name=user.has_unread_notifications',{method:'POST',credentials:'include',headers:{'Accept':'application/json'}}).then(function(r){return r.json()}).then(function(j){window.__aguLogin=(j&&j.user&&j.user.logged_in)?'yes':'no'}).catch(function(){window.__aguLogin='no'});return 'pending'})()";
+/// still be the guest's. Rumble's answer has the account id but no name, so the name comes from the account's own
+/// profile page (it logs which source worked, names only). Answers 'pending', 'no' (asked again next time) or
+/// 'yes|<username>'. Android has a copy.
+pub const PAGE_CHECK_JS: &str = r#"(function(){var s=window.__aguLogin;if(s&&s!=='no')return s;window.__aguLogin='pending';function done(n){window.__aguLogin='yes|'+(n||'')}fetch('/service.php?name=user.has_unread_notifications',{credentials:'include',headers:{'Accept':'application/json'}}).then(function(r){return r.json()}).then(function(j){var u=j&&j.user;if(!(u&&u.logged_in)){window.__aguLogin='no';return}try{console.log('aguchat rumble user fields: '+Object.keys(u).join(','))}catch(e){}var n=u.username||u.name||u.display_name||'';if(n){done(n);return}fetch('/account/profile',{credentials:'include'}).then(function(r){return r.text()}).then(function(h){var d=new DOMParser().parseFromString(h,'text/html');var i=d.querySelector('input[name=username],input#username');var a=d.querySelector('a[href^="/user/"]')||document.querySelector('a[href^="/user/"]');var v=(i&&i.value)||(a&&a.getAttribute('href').split('/')[2])||'';console.log('aguchat rumble name: input='+!!(i&&i.value)+' link='+!!a+' found='+!!v);done(v)}).catch(function(){done('')})}).catch(function(){window.__aguLogin='no'});return 'pending'})()"#;
 
 /// The page check's answer (as a web view hands it back, JSON-quoted or not) says logged in.
 pub fn page_says_logged_in(answer: &str) -> bool {
-    answer.trim().trim_matches('"') == "yes"
+    answer.trim().trim_matches('"').starts_with("yes")
 }
+
+/// The username the page check found, if any.
+pub fn page_username(answer: &str) -> Option<String> {
+    let a = answer.trim().trim_matches('"');
+    a.strip_prefix("yes|").map(str::trim).filter(|n| !n.is_empty()).map(String::from)
+}
+
+/// Not a cookie: the pair a sign-in window adds for the username its page found (`@` is never in a cookie name).
+pub const USERNAME_KEY: &str = "@username";
 
 /// Every `u_s` value in a cookie list, in order.
 pub fn all_sessions(list: &[(String, String)]) -> Vec<(String, String)> {
@@ -62,7 +73,7 @@ pub fn full_session(pairs: &[(String, String)]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for (k, v) in pairs {
         // the first of a name wins, as a browser sends the more specific cookie first
-        if k.is_empty() || v.is_empty() || is_cloudflare(k) || seen.contains(&k.as_str()) {
+        if k.is_empty() || v.is_empty() || k.starts_with('@') || is_cloudflare(k) || seen.contains(&k.as_str()) {
             continue;
         }
         seen.push(k);
@@ -74,7 +85,7 @@ pub fn full_session(pairs: &[(String, String)]) -> Option<String> {
 /// The cookie names (values left out) for an error message, e.g. `u_s x2, a_s`.
 pub fn cookie_names(pairs: &[(String, String)]) -> String {
     let mut names: Vec<(&str, usize)> = Vec::new();
-    for (k, _) in pairs {
+    for (k, _) in pairs.iter().filter(|(k, _)| !k.starts_with('@')) {
         match names.iter_mut().find(|(n, _)| *n == k) {
             Some((_, c)) => *c += 1,
             None => names.push((k, 1)),
@@ -114,7 +125,11 @@ mod tests {
         assert_eq!(session_of(&p(&[("u_s", " ")])), None);
         assert_eq!(session_of(&p(&[("u_sx", "tok")])), None);
         assert_eq!(session_of(&[]), None);
-        assert!(page_says_logged_in("\"yes\"") && page_says_logged_in("yes"));
+        assert!(page_says_logged_in("\"yes|bot\"") && page_says_logged_in("yes|"));
+        assert_eq!(page_username("\"yes|EsmountBot\""), Some("EsmountBot".into()));
+        assert_eq!(page_username("yes|"), None);
+        assert_eq!(page_username("pending"), None);
+        assert_eq!(full_session(&p(&[("u_s", "a"), ("@username", "me"), ("a_s", "b")])).as_deref(), Some("cookies:u_s=a; a_s=b"));
         let jar = p(&[("u_s", "a"), ("cf_clearance", "x"), ("__cf_bm", "y"), ("a_s", "b"), ("u_s", "c"), ("_cfuvid", "z")]);
         assert_eq!(full_session(&jar).as_deref(), Some("cookies:u_s=a; a_s=b"));
         assert_eq!(full_session(&p(&[("u_s", "a"), ("cf_clearance", "x")])), None, "nothing beyond u_s itself");

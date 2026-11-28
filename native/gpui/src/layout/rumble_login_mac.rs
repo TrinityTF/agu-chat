@@ -121,6 +121,9 @@ fn open(cx: &mut App, reply: Reply) {
                 }
                 return true;
             }
+            let mut list = list;
+            let name = agu_chat_core::rumble::login::page_username(&answer.lock().unwrap());
+            list.extend(name.map(|n| (agu_chat_core::rumble::login::USERNAME_KEY.to_string(), n)));
             let r = reply.borrow_mut().take();
             if let Some(r) = r {
                 let _ = r.send(Ok(list));

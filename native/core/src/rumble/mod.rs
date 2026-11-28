@@ -149,6 +149,8 @@ async fn finish_session(id: u64, pairs: login::Pairs) -> Result<(), String> {
     // `u_s` on its own first (what Rumble has always taken), then Rumble's whole cookie set
     candidates.extend(login::full_session(&pairs));
     let names = login::cookie_names(&pairs);
+    // the name the sign-in page found (Rumble's session check has none)
+    let page_name = pairs.iter().find(|(k, _)| k == login::USERNAME_KEY).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
     drop(pairs);
     let mut session = None;
     let mut why = String::new();
@@ -165,7 +167,7 @@ async fn finish_session(id: u64, pairs: login::Pairs) -> Result<(), String> {
     if FLOW.lock().unwrap().pending.as_ref().map(|p| p.0) != Some(id) {
         return Ok(()); // cancelled or replaced; end_flow ignores it too
     }
-    finish_login(session, "").await.map(|_| ())
+    finish_login(session, &page_name).await.map(|_| ())
 }
 
 fn end_flow(id: u64, r: Result<(), String>) {

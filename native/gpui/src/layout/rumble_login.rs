@@ -293,6 +293,9 @@ fn tick() -> bool {
         let sessions = agu_chat_core::rumble::login::all_sessions(&list);
         if !sessions.is_empty() && url.as_deref().map(back_on_rumble).unwrap_or(false) {
             if page_logged_in() {
+                let mut list = list;
+                let name = CUR.with(|c| c.borrow().as_ref().and_then(|l| agu_chat_core::rumble::login::page_username(&l.answer.lock().unwrap())));
+                list.extend(name.map(|n| (agu_chat_core::rumble::login::USERNAME_KEY.to_string(), n)));
                 let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
                 if let Some(r) = reply {
                     let _ = r.send(Ok(list));

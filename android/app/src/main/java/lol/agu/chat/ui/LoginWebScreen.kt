@@ -60,9 +60,10 @@ private fun backOnRumble(url: String?): Boolean {
 
 /**
  * Asks rumble.com, from its own page, whether this browser is logged in: Rumble swaps the guest `u_s` for the real
- * one a moment after the page is back, so the cookie alone can still be the guest's. 'yes', 'no' or 'pending'.
+ * one a moment after the page is back, so the cookie alone can still be the guest's. Rumble's answer has no name, so
+ * the account's profile page gives it. 'pending', 'no' or 'yes|<username>' (core: rumble::login::PAGE_CHECK_JS).
  */
-private const val RUMBLE_CHECK = """(function(){var s=window.__aguLogin;if(s==='yes'||s==='pending')return s;window.__aguLogin='pending';fetch('/service.php?name=user.has_unread_notifications',{method:'POST',credentials:'include',headers:{'Accept':'application/json'}}).then(function(r){return r.json()}).then(function(j){window.__aguLogin=(j&&j.user&&j.user.logged_in)?'yes':'no'}).catch(function(){window.__aguLogin='no'});return 'pending'})()"""
+private const val RUMBLE_CHECK = """(function(){var s=window.__aguLogin;if(s&&s!=='no')return s;window.__aguLogin='pending';function done(n){window.__aguLogin='yes|'+(n||'')}fetch('/service.php?name=user.has_unread_notifications',{credentials:'include',headers:{'Accept':'application/json'}}).then(function(r){return r.json()}).then(function(j){var u=j&&j.user;if(!(u&&u.logged_in)){window.__aguLogin='no';return}try{console.log('aguchat rumble user fields: '+Object.keys(u).join(','))}catch(e){}var n=u.username||u.name||u.display_name||'';if(n){done(n);return}fetch('/account/profile',{credentials:'include'}).then(function(r){return r.text()}).then(function(h){var d=new DOMParser().parseFromString(h,'text/html');var i=d.querySelector('input[name=username],input#username');var a=d.querySelector('a[href^="/user/"]')||document.querySelector('a[href^="/user/"]');var v=(i&&i.value)||(a&&a.getAttribute('href').split('/')[2])||'';console.log('aguchat rumble name: input='+!!(i&&i.value)+' link='+!!a+' found='+!!v);done(v)}).catch(function(){done('')})}).catch(function(){window.__aguLogin='no'});return 'pending'})()"""
 
 private suspend fun WebView.check(js: String): String = suspendCancellableCoroutine { c ->
     evaluateJavascript(js) { v -> if (c.isActive) c.resume(v?.trim('"').orEmpty()) }
@@ -232,10 +233,16 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
             val got = LoginCookies.read(spec.cookieUrl, spec.names)
             if (!spec.complete(got) || !spec.onPage(web.url)) continue
             // Rumble: only once its page says this browser is logged in (asked at most every 1.5 s)
-            if (rumble && (tick % 3 != 0 || web.check(RUMBLE_CHECK) != "yes")) continue
+            var pageAnswer = ""
+            if (rumble) {
+                if (tick % 3 != 0) continue
+                pageAnswer = web.check(RUMBLE_CHECK)
+                if (!pageAnswer.startsWith("yes")) continue
+            }
             handedOver = true
             if (request.platform == "twitch") web.loadUrl("about:blank") // twitch.tv's front page autoplays a stream
-            val cookies = if (rumble) LoginCookies.readAll(spec.cookieUrl, null) else got.toList()
+            // Rumble: every cookie, plus the name the page found (core reads "@username"; `@` is never a cookie name)
+            val cookies = if (rumble) LoginCookies.readAll(spec.cookieUrl, null) + listOf("@username" to pageAnswer.substringAfter('|', "")) else got.toList()
             // Twitch stays up for the authorise page core sends next
             vm.loginAnswer(request, cookies = cookies, keepOpen = request.platform == "twitch")
             return@LaunchedEffect
