@@ -199,6 +199,8 @@ pub struct Settings {
     /// strike | hide | show
     pub deleted_messages: String,
     pub show_mod_buttons: bool,
+    /// the ... button on a row's hover bar that opens the custom commands marked "in menu"
+    pub commands_button: bool,
     pub show_mod_actions: bool,
     pub show_automod: bool,
     /// scroll | hover | alt
@@ -250,6 +252,7 @@ impl Default for Settings {
             animated_emotes: true,
             deleted_messages: "strike".into(),
             show_mod_buttons: true,
+            commands_button: true,
             show_mod_actions: true,
             show_automod: true,
             pause_chat: "scroll".into(),

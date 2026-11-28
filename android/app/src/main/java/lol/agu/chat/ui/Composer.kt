@@ -137,7 +137,7 @@ fun Composer(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    val shown = if (target.platform != null) listOf(target.platform) else target.platforms.distinct().take(3)
+                    val shown = if (target.platform != null) listOf(target.platform) else target.platforms.distinct()
                     if (shown.isEmpty()) Text(target.label, color = AguColors.Text, fontSize = 13.sp, maxLines = 1)
                     for (p in shown) PlatformLogo(p, 18.dp)
                     Text("▾", color = AguColors.Muted, fontSize = 11.sp)

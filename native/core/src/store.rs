@@ -37,6 +37,7 @@ pub fn default_settings() -> Map<String, Value> {
         "animatedEmotes": true, // off: emotes and GIFs stay still, which takes most of the GPU load away
         "deletedMessages": "strike", // strike | hide | show
         "showModButtons": true,
+        "commandsButton": true, // the ... button on a row's hover bar with the custom commands marked "in menu"
         "showModActions": true, // the mod log lines in chat (bans, timeouts, mode changes)
         "showAutomod": true, // AutoMod's held messages, with Allow / Deny
         "pauseChat": "scroll", // scroll | hover | alt: what holds the chat still, besides scrolling up

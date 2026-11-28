@@ -166,10 +166,13 @@ impl SettingsDialog {
         let n = list.len();
         let rows: Vec<AnyElement> = list.iter().enumerate().map(|(i, cmd)| self.command_editor(i, i + 1 == n, cmd, window, cx)).collect();
         let card = || div().mb(px(12.)).rounded(px(4.)).border_1().border_color(c(theme::LINE)).bg(c(theme::RAISED)).p(px(12.));
+        let sv = serde_json::to_value(&self.settings).unwrap_or_default();
+        let menu_button = self.bool_row(&sv, "commandsButton", "Commands button on messages", Some("The ⋯ button next to copy, pin and reply, with the commands marked In menu"), false, true, cx);
         div()
             .child(txt(13.).mb(px(8.)).mt(px(4.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("Custom commands"))
             .child(txt(11.).mb(px(8.)).text_color(c(theme::FAINT)).child(format!("{COMMANDS_HELP}{HELP_END}")))
             .child(imports)
+            .child(div().mb(px(12.)).child(menu_button))
             .child(
                 card()
                     .child(

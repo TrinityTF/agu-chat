@@ -520,6 +520,9 @@ struct Atom {
     dims: (f32, f32),
     /// the selection units it stands for (`InlineContent::unit_len`)
     u: (u32, u32),
+    /// the negative vertical margin already in `above`/`below` (an emote taller than the text line pokes out of
+    /// it); taken back out between two lines of the same flow, so a wrapped message's lines never overlap
+    vm: f32,
 }
 
 struct LineInfo {
@@ -597,14 +600,14 @@ fn word_atom(window: &Window, items: &[Item], item: usize, text: &str, char_off:
     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
     let hl = (ratio * t.size - (asc + desc)) / 2.0;
     let (above, below) = blink_above_below(asc, desc, ratio * t.size);
-    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Word { shaped, item, size: t.size, hl, asc }, break_before: false, dims: (0.0, 0.0), u: (0, 0) }
+    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Word { shaped, item, size: t.size, hl, asc }, break_before: false, dims: (0.0, 0.0), u: (0, 0), vm: 0.0 }
 }
 
 fn space_atom(window: &Window, t: &TextItem, ratio: f32) -> Atom {
     let shaped = shape(window, t, " ", 0, 1);
     let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
     let (above, below) = blink_above_below(asc, desc, ratio * t.size);
-    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Space, break_before: false, dims: (0.0, 0.0), u: (0, 0) }
+    Atom { w: shaped.width.f(), above, below, kind: AtomKind::Space, break_before: false, dims: (0.0, 0.0), u: (0, 0), vm: 0.0 }
 }
 
 /// Centre of a box relative to the baseline (negative = above), per vertical-align rule.
@@ -651,29 +654,29 @@ fn box_atom(window: &Window, items: &[Item], item: usize, content: &InlineConten
             let (w, h) = image_dims(i, imgs, window.scale_factor());
             let mh = if i.wrap { i.max_h } else { h } + 2.0 * i.vmargin;
             let c = box_center(i.valign, mh, bs, ratio, window);
-            Atom { w: w + 2.0 * i.margin_x, above: mh / 2.0 - c, below: mh / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (w, h), u: (0, 0) }
+            Atom { w: w + 2.0 * i.margin_x, above: mh / 2.0 - c, below: mh / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (w, h), u: (0, 0), vm: i.vmargin.min(0.0) }
         }
         Item::Icon(i) => {
             let c = box_center(i.valign, i.size, bs, ratio, window);
-            Atom { w: i.size + 2.0 * i.margin_x, above: i.size / 2.0 - c, below: i.size / 2.0 + c, kind: AtomKind::Box { item }, break_before: false, dims: (i.size, i.size), u: (0, 0) }
+            Atom { w: i.size + 2.0 * i.margin_x, above: i.size / 2.0 - c, below: i.size / 2.0 + c, kind: AtomKind::Box { item }, break_before: false, dims: (i.size, i.size), u: (0, 0), vm: 0.0 }
         }
         Item::Pill(p) => {
             let shaped = shape(window, &TextItem { text: p.text.clone(), size: p.size, color: p.color, weight: p.weight, italic: false, strike: false, gradient: None, paint: None, act: None, underline_on_hover: false, tip: None, overlays: Vec::new(), overlay_box: (0.0, 0.0) }, &p.text, 0, 1);
             let (asc, desc) = (shaped.ascent.f(), shaped.descent.f());
-            Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc), u: (0, 0) }
+            Atom { w: shaped.width.f() + 2.0 * p.pad_x + p.margin_r, above: asc.round(), below: desc.round(), kind: AtomKind::Box { item }, break_before: false, dims: (shaped.width.f() + 2.0 * p.pad_x, asc + desc), u: (0, 0), vm: 0.0 }
         }
         Item::Button(b) => {
             let c = box_center(VAlign::BottomAt(b.down), b.h, bs, ratio, window);
-            Atom { w: b.w + b.margin_r, above: b.h / 2.0 - c, below: b.h / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (b.w, b.h), u: (0, 0) }
+            Atom { w: b.w + b.margin_r, above: b.h / 2.0 - c, below: b.h / 2.0 + c, kind: AtomKind::Box { item }, break_before: true, dims: (b.w, b.h), u: (0, 0), vm: 0.0 }
         }
-        Item::Gap(w) => Atom { w: *w, above: 0.0, below: 0.0, kind: AtomKind::Box { item }, break_before: false, dims: (*w, 0.0), u: (0, 0) },
+        Item::Gap(w) => Atom { w: *w, above: 0.0, below: 0.0, kind: AtomKind::Box { item }, break_before: false, dims: (*w, 0.0), u: (0, 0), vm: 0.0 },
         Item::Gif(g) => {
             // `my-1 block max-h-40 max-w-full rounded object-contain`
             let (w, h) = match imgs.0.get(&g.url, max_w.max(240.0), 160.0, window.scale_factor()) {
                 Some(img) => fit_down(img.w as f32, img.h as f32, max_w, 160.0),
                 None => (0.0, 0.0),
             };
-            Atom { w: max_w, above: h + 4.0, below: 4.0, kind: AtomKind::Block { item }, break_before: true, dims: (w, h), u: (0, 0) }
+            Atom { w: max_w, above: h + 4.0, below: 4.0, kind: AtomKind::Block { item }, break_before: true, dims: (w, h), u: (0, 0), vm: 0.0 }
         }
         Item::Text(_) => unreachable!(),
     }
@@ -834,6 +837,7 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
     let mut placed: Vec<Placed> = Vec::new();
     let mut y = 0.0f32;
     let n_lines = lines.len();
+    let last_content = lines.iter().rposition(|(l, _)| !l.is_empty()).unwrap_or(0);
     for (li, (atoms_in_line, _)) in lines.into_iter().enumerate() {
         // an empty trailing line (after a block, or the initial one) takes no height
         if atoms_in_line.is_empty() && (li + 1 == n_lines || li > 0) && !(li == 0 && n_lines == 1) {
@@ -852,9 +856,11 @@ fn layout(content: &InlineContent, width: f32, window: &Window, imgs: &ImagesHan
             above = 0.0;
             below = 0.0;
         }
+        // inside the flow a tall emote gets its whole height: only the flow's top and bottom edge stay tight
+        let (inner_top, inner_bottom) = (li > 0, li < last_content);
         for (a, _) in &atoms_in_line {
-            above = above.max(a.above);
-            below = below.max(a.below);
+            above = above.max(a.above - if inner_top { a.vm } else { 0.0 });
+            below = below.max(a.below - if inner_bottom { a.vm } else { 0.0 });
         }
         let h = above + below;
         let baseline = y + above;

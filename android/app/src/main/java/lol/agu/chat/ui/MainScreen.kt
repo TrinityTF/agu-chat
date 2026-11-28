@@ -252,7 +252,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
             val splitPane: @Composable (Tab, Modifier) -> Unit = { st, m ->
                 Column(m) {
                     Row(Modifier.fillMaxWidth().height(32.dp).background(AguColors.Surface).padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        for (p in st.channels.map { it.platform }.distinct().take(3)) PlatformLogo(p, 12.dp, Modifier.padding(end = 4.dp))
+                        for (p in st.channels.map { it.platform }.distinct()) PlatformLogo(p, 12.dp, Modifier.padding(end = 4.dp))
                         Text(st.title(full = true), color = AguColors.Muted, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
                         Box(Modifier.size(32.dp).clip(CircleShape).clickable { vm.removeSplit(st.id) }, contentAlignment = Alignment.Center) {
                             Text("×", color = AguColors.Text, fontSize = 20.sp)
@@ -358,7 +358,7 @@ private fun Chats(vm: ChatViewModel, onAccounts: () -> Unit, onSettings: () -> U
             onReply = if ((row.kind == "msg" || row.kind == "notice") && !isWhisperSk(row.sk)) ({ replyTo = row; menuRow = null }) else null,
             onCopy = { copyText(ctx, row.plainText()); menuRow = null },
             onDismiss = { menuRow = null },
-            commands = if (row.kind == "msg") vm.settings.list("customCommands").filter { it.bool("inMenu") }.map { it.str("name") } else emptyList(),
+            commands = if (row.kind == "msg" && vm.settings.bool("commandsButton", true)) vm.settings.list("customCommands").filter { it.bool("inMenu") }.map { it.str("name") } else emptyList(),
             onCommand = { name ->
                 val t = tabs.firstOrNull { it.id == current?.id && row.sk in it.sks } ?: tabs.firstOrNull { row.sk in it.sks }
                 if (t != null) scope.launch {
@@ -606,7 +606,7 @@ private fun TabStrip(
                         )
                     }
                     if (tab.whisperOnly) MailIcon(13, modifier = Modifier.padding(end = 3.dp))
-                    else for (p in tab.channels.map { it.platform }.distinct().take(3)) PlatformLogo(p, 11.dp, Modifier.padding(end = 3.dp))
+                    else for (p in tab.channels.map { it.platform }.distinct()) PlatformLogo(p, 11.dp, Modifier.padding(end = 3.dp))
                     Text(
                         tab.title(), color = if (sel) AguColors.Text else AguColors.Muted, fontSize = 14.sp,
                         fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.padding(start = 4.dp),

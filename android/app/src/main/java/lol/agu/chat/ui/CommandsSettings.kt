@@ -84,6 +84,9 @@ fun CommandsSettings(vm: ChatViewModel, onBack: () -> Unit) {
         }
         status?.let { (t, warn) -> Text(t, color = if (warn) AguColors.Danger else AguColors.Muted, fontSize = 13.sp) }
         SettingsCard {
+            SwitchRow("Commands in the message menu", "The commands marked In menu, under a message's actions", vm.settings.bool("commandsButton", true)) { vm.patchSettings(jo("commandsButton" to it)) }
+        }
+        SettingsCard {
             if (list.isEmpty()) Text("No custom commands.", color = AguColors.Muted, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
             list.forEachIndexed { i, c ->
                 Row(
