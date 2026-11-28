@@ -50,6 +50,7 @@ impl From<net::FetchError> for RumbleError {
 // Transport
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // the answer of a write; no caller reads it now
 struct Service {
     json: Value,
 }
@@ -116,19 +117,35 @@ pub async fn whoami(session: &str) -> Option<Who> {
 }
 
 /// [whoami] with Rumble's reason when it says no (for the sign-in's error message; no cookie values in it).
+///
+/// A GET, as rumble.com's own pages ask it: for a logged-in session Rumble answers a POST with 405 (a guest gets the
+/// same 403 either way). Every service.php answer carries a `user` block describing the session, and that block is
+/// what counts here, whatever the call itself says.
 pub async fn check_session(session: &str) -> Result<Who, String> {
     if session.is_empty() {
         return Err("no session".into());
     }
-    let s = service_php("user.has_unread_notifications", &[], &[], Some(session)).await.map_err(|e| match e.status {
-        Some(st) => format!("HTTP {st}: {}", e.message),
-        None => e.message,
-    })?;
-    let user = &s.json["user"];
-    if !truthy(&user["logged_in"]) || !truthy(&user["id"]) {
-        return Err("Rumble says not logged in".into());
+    let mut opts = FetchOpts::new(FETCH_TIMEOUT_MS).method("GET").header("Accept", "application/json");
+    opts.manual_redirect = true;
+    let (k, v) = cookie(session);
+    opts.headers.push((k, v));
+    let r = fetch_from_rumble("/service.php?name=user.has_unread_notifications", opts).await.map_err(|e| e.message)?;
+    let status = r.status().as_u16();
+    let text = net::text(r).await.map_err(|e| e.message)?;
+    if text.contains("Just a moment") {
+        return Err("Rumble answered with a bot challenge".into());
     }
-    Ok(Who { id: js_string(&user["id"]), username: js_str_or_empty(Some(&user["username"])) })
+    let json: Value = serde_json::from_str(&text).map_err(|_| format!("HTTP {status}, not JSON"))?;
+    session_user(&json).ok_or_else(|| {
+        let m = js_str_or_empty(Some(&json["errors"][0]["message"]));
+        format!("HTTP {status}: not logged in{}", if m.is_empty() { String::new() } else { format!(" ({m})") })
+    })
+}
+
+/// The logged-in user a service.php answer describes, if any.
+fn session_user(json: &Value) -> Option<Who> {
+    let user = &json["user"];
+    (truthy(&user["logged_in"]) && truthy(&user["id"])).then(|| Who { id: js_string(&user["id"]), username: js_str_or_empty(Some(&user["username"])) })
 }
 
 pub async fn logout(session: &str) {
@@ -320,6 +337,14 @@ pub async fn pin_message(session: &str, video_id: &str, message_id: &str, pin: b
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_user_block_decides_even_next_to_an_error() {
+        let in_but_405 = serde_json::json!({"user": {"id": 42, "logged_in": true, "username": "bot"}, "errors": [{"code": "405", "message": "Method Not Allowed"}]});
+        assert_eq!(session_user(&in_but_405).map(|w| w.username), Some("bot".to_string()));
+        let guest = serde_json::json!({"user": {"id": null, "logged_in": false}, "errors": [{"code": "403"}]});
+        assert!(session_user(&guest).is_none());
+    }
+
     use super::*;
 
     #[test]
