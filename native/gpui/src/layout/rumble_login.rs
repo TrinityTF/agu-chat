@@ -137,6 +137,9 @@ struct Login {
     /// the answer of the last cookie request, picked up by the next tick
     slot: Slot,
     inflight: Arc<AtomicBool>,
+    /// the page's own answer to "is this browser logged in" (rumble::login::PAGE_CHECK_JS)
+    answer: Arc<Mutex<String>>,
+    ticks: u32,
 }
 
 thread_local! {
@@ -222,7 +225,7 @@ fn open(reply: Reply) {
             return;
         }
     };
-    CUR.with(|c| *c.borrow_mut() = Some(Login { webview: Some(webview), web_ctx: Some(web_ctx), reply: Some(reply), slot: Default::default(), inflight: Default::default() }));
+    CUR.with(|c| *c.borrow_mut() = Some(Login { webview: Some(webview), web_ctx: Some(web_ctx), reply: Some(reply), slot: Default::default(), inflight: Default::default(), answer: Default::default(), ticks: 0 }));
     HWND_OPEN.store(hwnd.0 as isize, Ordering::SeqCst);
     unsafe {
         SetTimer(hwnd, TIMER_ID, POLL_MS, None);
@@ -287,19 +290,40 @@ fn tick() -> bool {
     });
     let Some(inflight) = inflight else { return false };
     if let Some(list) = answer {
-        let session = list.iter().find(|(k, v)| k == "u_s" && !v.is_empty()).cloned();
-        if let (Some(session), true) = (session, url.as_deref().map(back_on_rumble).unwrap_or(false)) {
-            let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
-            if let Some(r) = reply {
-                let _ = r.send(Ok(vec![session]));
+        let sessions = agu_chat_core::rumble::login::all_sessions(&list);
+        if !sessions.is_empty() && url.as_deref().map(back_on_rumble).unwrap_or(false) {
+            if page_logged_in() {
+                let reply = CUR.with(|c| c.borrow_mut().as_mut().and_then(|l| l.reply.take()));
+                if let Some(r) = reply {
+                    let _ = r.send(Ok(sessions));
+                }
+                return true;
             }
-            return true;
         }
     }
     if !inflight.swap(true, Ordering::SeqCst) && !CUR.with(|c| c.borrow().as_ref().map(request_cookies).unwrap_or(false)) {
         inflight.store(false, Ordering::SeqCst);
     }
     false
+}
+
+/// True once the page said it is logged in; until then asks it again every third tick.
+fn page_logged_in() -> bool {
+    CUR.with(|c| {
+        let mut b = c.borrow_mut();
+        let Some(l) = b.as_mut() else { return false };
+        if agu_chat_core::rumble::login::page_says_logged_in(&l.answer.lock().unwrap()) {
+            return true;
+        }
+        l.ticks += 1;
+        if l.ticks % 3 == 1 {
+            if let Some(wv) = &l.webview {
+                let a = l.answer.clone();
+                let _ = wv.evaluate_script_with_callback(agu_chat_core::rumble::login::PAGE_CHECK_JS, move |v| *a.lock().unwrap() = v);
+            }
+        }
+        false
+    })
 }
 
 /// Ask WebView2's cookie manager for rumble.com's cookies; the callback runs on this thread from the message loop.

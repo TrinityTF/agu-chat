@@ -62,9 +62,7 @@ object Core {
             }
 
             override fun openUrl(url: String) {
-                runCatching {
-                    app.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                }
+                Browser.open(app, url)
             }
         }
         nativeStart(app.filesDir.resolve("agu").absolutePath, KeyVault.secretsKey(app), version, listener)

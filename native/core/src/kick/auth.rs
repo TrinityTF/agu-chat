@@ -205,8 +205,29 @@ pub fn parse_done(target: &str) -> Option<Result<String, String>> {
     })
 }
 
+/// Where the browser goes once the login is back, instead of the "close this tab" page. Android sets its own app link,
+/// so the browser tab it opened for the login closes and the app comes back; desktop keeps the page.
+static RETURN_TO: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_return_to(url: Option<String>) {
+    *RETURN_TO.lock().unwrap() = url;
+}
+
+/// The answer to /kick/done: a redirect to the app when one is set, else the page.
+fn done_response() -> (&'static str, Option<String>) {
+    match RETURN_TO.lock().unwrap().clone() {
+        Some(u) => ("302 Found", Some(u)),
+        None => ("200 OK", None),
+    }
+}
+
 async fn respond(s: &mut tokio::net::TcpStream, status: &str, body: &str) {
-    let msg = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}", body.len());
+    respond_to(s, status, body, None).await
+}
+
+async fn respond_to(s: &mut tokio::net::TcpStream, status: &str, body: &str, location: Option<&str>) {
+    let loc = location.map(|l| format!("Location: {l}\r\n")).unwrap_or_default();
+    let msg = format!("HTTP/1.1 {status}\r\n{loc}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}", body.len());
     let _ = s.write_all(msg.as_bytes()).await;
     let _ = s.shutdown().await;
 }
@@ -233,7 +254,8 @@ pub async fn wait_for_callback(listener: &TcpListener, limit: Duration) -> Resul
             let head = String::from_utf8_lossy(&buf).to_string();
             match request_target(&head).and_then(|t| parse_done(&t)) {
                 Some(r) => {
-                    respond(&mut s, "200 OK", DONE_PAGE).await;
+                    let (status, location) = done_response();
+                    respond_to(&mut s, status, DONE_PAGE, location.as_deref()).await;
                     return r;
                 }
                 None => respond(&mut s, "404 Not Found", "Not found").await,

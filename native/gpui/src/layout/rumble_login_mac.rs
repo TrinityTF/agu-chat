@@ -102,17 +102,28 @@ fn open(cx: &mut App, reply: Reply) {
         }
     };
     CUR.with(|c| *c.borrow_mut() = Some(h.clone()));
+    // the page's own answer to "is this browser logged in" (see rumble::login::PAGE_CHECK_JS)
+    let answer: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
+    let mut ticks = 0u32;
     host::poll(cx, &h, POLL, move |h, cx| {
         if reply.borrow().is_none() {
             return false;
         }
         // (name, value) of the session cookie; nothing else is copied out
         let Some(list) = h.cookies_for(COOKIE_HOST, |n| n == "u_s") else { return true };
-        let session = list.iter().find(|(k, v)| k == "u_s" && !v.is_empty()).cloned();
-        if let (Some(session), true) = (session, h.url().as_deref().map(back_on_rumble).unwrap_or(false)) {
+        let sessions = agu_chat_core::rumble::login::all_sessions(&list);
+        if !sessions.is_empty() && h.url().as_deref().map(back_on_rumble).unwrap_or(false) {
+            ticks += 1;
+            if !agu_chat_core::rumble::login::page_says_logged_in(&answer.lock().unwrap()) {
+                if ticks % 3 == 1 {
+                    let a = answer.clone();
+                    h.eval(agu_chat_core::rumble::login::PAGE_CHECK_JS, move |v| *a.lock().unwrap() = v);
+                }
+                return true;
+            }
             let r = reply.borrow_mut().take();
             if let Some(r) = r {
-                let _ = r.send(Ok(vec![session]));
+                let _ = r.send(Ok(sessions));
             }
             let h = h.clone();
             let _ = cx.update(|cx| {

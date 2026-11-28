@@ -25,6 +25,8 @@ object AlertCenter {
                 when (e.kind) {
                     "alert" -> alerts.fire(e.data)
                     "notify" -> Notifier.mention(app, e.data)
+                    // the bell's numbers changed: keep the list on disk, also while no screen is open
+                    "mentions" -> launch { MentionStore.refresh(app) }
                 }
             }
         }

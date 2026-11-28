@@ -235,6 +235,13 @@ impl Host {
         self.webview.borrow().as_ref().and_then(|wv| wv.url().ok())
     }
 
+    /// Run `js` in the page; `done` gets its result as JSON text (on whatever thread the web view answers on).
+    pub fn eval(&self, js: &str, done: impl Fn(String) + Send + 'static) {
+        if let Some(wv) = self.webview.borrow().as_ref() {
+            let _ = wv.evaluate_script_with_callback(js, done);
+        }
+    }
+
     pub fn load_url(&self, url: &str) {
         if let Some(wv) = self.webview.borrow().as_ref() {
             let _ = wv.load_url(url);

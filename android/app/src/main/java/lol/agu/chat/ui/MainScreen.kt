@@ -65,6 +65,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -631,16 +632,29 @@ private fun ChatList(vm: ChatViewModel, tab: Tab, jump: Jump?, onLongPress: (Row
     var pausedAt by remember { mutableStateOf<Int?>(null) }
     // Stuck to the bottom until you scroll up; late-loading pictures and cards then keep it at the bottom.
     var stuck by remember { mutableStateOf(true) }
+    // Like DankChat: only a finger on the list unsticks it, at once, so a new line never pulls it back down mid-drag;
+    // where that drag (and its fling) ends decides whether it sticks again. The list's own scrolls never unstick it.
+    var dragged by remember { mutableStateOf(false) }
     LaunchedEffect(state) {
-        snapshotFlow { state.isScrollInProgress }.collect { moving -> if (!moving) stuck = !state.canScrollForward }
+        state.interactionSource.interactions.collect { if (it is DragInteraction.Start) { dragged = true; stuck = false } }
+    }
+    LaunchedEffect(state) {
+        snapshotFlow { state.isScrollInProgress }.collect { moving ->
+            if (!moving && dragged) {
+                dragged = false
+                stuck = !state.canScrollForward
+            }
+        }
     }
     LaunchedEffect(stuck) { pausedAt = if (stuck) null else rows.size }
     var flashKey by remember { mutableStateOf<String?>(null) }
     val merged = tab.channels.size > 1
 
     LaunchedEffect(state) {
-        snapshotFlow { state.layoutInfo.totalItemsCount to state.layoutInfo.visibleItemsInfo.lastOrNull()?.let { it.offset + it.size } }.collect {
-            if (stuck && rows.isNotEmpty() && state.canScrollForward) {
+        // the newest line (a full list drops one at the top for each new one, so the count alone stays put), whether
+        // there is more below, and the last row's size (a picture that loaded late)
+        snapshotFlow { listOf(rows.lastOrNull()?.key, state.canScrollForward, state.layoutInfo.visibleItemsInfo.lastOrNull()?.let { it.offset + it.size }) }.collect {
+            if (stuck && !dragged && rows.isNotEmpty() && state.canScrollForward) {
                 state.scrollToItem(rows.lastIndex)
                 state.scrollBy(100000f)
             }

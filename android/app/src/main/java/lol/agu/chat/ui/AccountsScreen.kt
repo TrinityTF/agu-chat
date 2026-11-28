@@ -166,5 +166,5 @@ private fun Waiting(text: String, vm: ChatViewModel, platform: String) {
 }
 
 private fun openUrl(ctx: Context, url: String) {
-    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    lol.agu.chat.Browser.open(ctx, url)
 }

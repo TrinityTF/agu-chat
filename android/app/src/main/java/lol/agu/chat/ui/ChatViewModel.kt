@@ -515,7 +515,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun loadMentions() {
-        val list = runCatching { Core.call("mentions.list") as JsonArray }.getOrNull() ?: return
+        val live = runCatching { Core.call("mentions.list") as JsonArray }.getOrNull() ?: return
+        // with the ones saved before Android ended the app in the background
+        val list = lol.agu.chat.MentionStore.merged(getApplication(), live)
         val parsed = withContext(Dispatchers.Default) {
             list.mapNotNull { e ->
                 runCatching {

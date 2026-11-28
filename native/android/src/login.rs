@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agu_chat_core::{rumble, twitch, x, youtube};
+use agu_chat_core::{kick, rumble, twitch, x, youtube};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
@@ -100,6 +100,8 @@ impl LoginBridge {
 
     /// Install the hooks of Twitch (web session), X, Rumble and YouTube.
     pub fn install(&self) {
+        // Kick's login runs in a browser tab; its last redirect comes back to the app, which closes that tab
+        kick::auth::set_return_to(Some(KICK_RETURN_URL.into()));
         let b = self.clone();
         x::auth::set_login_hook(x::auth::LoginHook {
             open: Arc::new({
@@ -172,10 +174,12 @@ impl LoginBridge {
 pub const X_LOGIN_URL: &str = "https://x.com/i/flow/login";
 /// Rumble's own sign-in page; it returns to rumble.com afterwards, which is where the session cookie is read.
 pub const RUMBLE_LOGIN_URL: &str = "https://auth.rumble.com/?redirect_uri=https%3A%2F%2Frumble.com%2F";
-/// Google signs in, then youtube.com/signin sets the session cookies and redirects to `continue`. That is a plain text
-/// file rather than YouTube's front page: the page's scripts can hand a phone over to the YouTube app, which then took
-/// the sign-in out of Agu Chat, and the cookies are all the app needs.
-pub const YOUTUBE_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2Frobots.txt";
+/// Google signs in, then lands on YouTube's front page, whose response sets `LOGIN_INFO` (a plain file such as
+/// robots.txt never does). The sign-in screen turns page scripts off on youtube.com, so the page cannot hand the
+/// phone over to the YouTube app; the cookies are all the app needs.
+pub const YOUTUBE_LOGIN_URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
+/// The app link the Kick login's browser tab is sent to at the end (AndroidManifest: KickReturnActivity).
+pub const KICK_RETURN_URL: &str = "aguchat://kick-done";
 pub const TWITCH_LOGIN_URL: &str = "https://www.twitch.tv/login";
 
 fn get<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {

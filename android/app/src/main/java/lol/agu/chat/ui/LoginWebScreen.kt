@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 /** What a platform's sign-in has to produce: the cookies to read, where, and when the sign-in counts as done. */
 private class LoginSpec(
@@ -54,6 +56,21 @@ private class LoginSpec(
 private fun backOnRumble(url: String?): Boolean {
     val host = runCatching { android.net.Uri.parse(url).host }.getOrNull()?.lowercase() ?: return false
     return (host == "rumble.com" || host.endsWith(".rumble.com")) && host != "auth.rumble.com"
+}
+
+/**
+ * Asks rumble.com, from its own page, whether this browser is logged in: Rumble swaps the guest `u_s` for the real
+ * one a moment after the page is back, so the cookie alone can still be the guest's. 'yes', 'no' or 'pending'.
+ */
+private const val RUMBLE_CHECK = """(function(){var s=window.__aguLogin;if(s==='yes'||s==='pending')return s;window.__aguLogin='pending';fetch('/service.php?name=user.has_unread_notifications',{method:'POST',credentials:'include',headers:{'Accept':'application/json'}}).then(function(r){return r.json()}).then(function(j){window.__aguLogin=(j&&j.user&&j.user.logged_in)?'yes':'no'}).catch(function(){window.__aguLogin='no'});return 'pending'})()"""
+
+private suspend fun WebView.check(js: String): String = suspendCancellableCoroutine { c ->
+    evaluateJavascript(js) { v -> if (c.isActive) c.resume(v?.trim('"').orEmpty()) }
+}
+
+private fun isYouTube(url: String?): Boolean {
+    val host = runCatching { android.net.Uri.parse(url).host }.getOrNull()?.lowercase() ?: return false
+    return host == "youtube.com" || host.endsWith(".youtube.com")
 }
 
 private val YOUTUBE_KEPT = setOf(
@@ -93,6 +110,17 @@ object LoginCookies {
         }
         return out
     }
+
+    /** Like [read] but every value, also a second cookie of the same name (Rumble can have a guest and a real `u_s`). */
+    fun readAll(url: String, names: Set<String>): List<Pair<String, String>> {
+        val raw = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull() ?: return emptyList()
+        return raw.split(';').mapNotNull { part ->
+            val i = part.indexOf('=')
+            if (i <= 0) return@mapNotNull null
+            val k = part.substring(0, i).trim()
+            if (k in names) k to part.substring(i + 1).trim() else null
+        }
+    }
 }
 
 /**
@@ -112,7 +140,15 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
     // A window the page opened (X's "Sign in with Google" is a popup that reports back to x.com and closes itself);
     // without one the Google page has no opener to answer and stays white.
     var popup by remember { mutableStateOf<WebView?>(null) }
+    // set when youtube.com did not hand over LOGIN_INFO without its scripts, so the page gets them after all
+    var youTubeScripts by remember { mutableStateOf(false) }
     val web = remember {
+        // YouTube's own page only has to answer with its cookies; its scripts can hand a phone over to the YouTube
+        // app, which took the sign-in out of Agu Chat. Google's sign-in pages before it keep theirs.
+        fun noYouTubeScripts(w: WebView, url: String?) {
+            if (request.platform == "youtube" && !youTubeScripts && isYouTube(url) && w.settings.javaScriptEnabled) w.settings.javaScriptEnabled = false
+        }
+
         fun setUp(w: WebView, main: Boolean) {
             w.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             w.settings.javaScriptEnabled = true
@@ -129,10 +165,15 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
                 override fun shouldOverrideUrlLoading(view: WebView, r: WebResourceRequest): Boolean {
                     // sign-in pages stay in the WebView; app links (intent:, market:, twitch:, vnd.youtube:) go nowhere
                     val s = r.url.scheme
-                    return s != "https" && s != "http" && s != "about"
+                    if (s != "https" && s != "http" && s != "about") return true
+                    noYouTubeScripts(view, r.url.toString())
+                    return false
                 }
 
-                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) { if (main) progress = 10 }
+                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                    noYouTubeScripts(view, url)
+                    if (main) progress = 10
+                }
                 override fun onPageFinished(view: WebView, url: String?) { if (main) progress = 100 }
             }
             w.webChromeClient = object : android.webkit.WebChromeClient() {
@@ -182,16 +223,30 @@ fun LoginWebScreen(request: LoginRequest, vm: ChatViewModel) {
         web.loadUrl(request.url)
         if (request.show) return@LaunchedEffect
         // the same rule as the desktop windows: poll the cookie jar until the sign-in cookies are there
+        val rumble = request.platform == "rumble"
+        var tick = 0
+        var onYouTube = 0
         while (true) {
             delay(500)
+            tick++
             val got = LoginCookies.read(spec.cookieUrl, spec.names)
-            if (spec.complete(got) && spec.onPage(web.url)) {
-                handedOver = true
-                if (request.platform == "twitch") web.loadUrl("about:blank") // twitch.tv's front page autoplays a stream
-                // Twitch stays up for the authorise page core sends next
-                vm.loginAnswer(request, cookies = got.toList(), keepOpen = request.platform == "twitch")
-                return@LaunchedEffect
+            // signed in to Google and on youtube.com for 8 s without LOGIN_INFO: let the page run its scripts once
+            if (request.platform == "youtube" && !youTubeScripts && isYouTube(web.url) && !spec.complete(got)) {
+                if (++onYouTube >= 16) {
+                    youTubeScripts = true
+                    web.settings.javaScriptEnabled = true
+                    web.reload()
+                }
             }
+            if (!spec.complete(got) || !spec.onPage(web.url)) continue
+            // Rumble: only once its page says this browser is logged in (asked at most every 1.5 s)
+            if (rumble && (tick % 3 != 0 || web.check(RUMBLE_CHECK) != "yes")) continue
+            handedOver = true
+            if (request.platform == "twitch") web.loadUrl("about:blank") // twitch.tv's front page autoplays a stream
+            val cookies = if (rumble) LoginCookies.readAll(spec.cookieUrl, spec.names) else got.toList()
+            // Twitch stays up for the authorise page core sends next
+            vm.loginAnswer(request, cookies = cookies, keepOpen = request.platform == "twitch")
+            return@LaunchedEffect
         }
     }
 
