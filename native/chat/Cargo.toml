@@ -1,6 +1,6 @@
 [package]
 name = "agu-chat-model"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Agu Chat's UI-independent chat logic (rows, emotes, badges, moderation), shared by the desktop and Android apps"
 
